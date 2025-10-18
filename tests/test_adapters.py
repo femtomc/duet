@@ -43,6 +43,7 @@ def mock_popen_success(stdout_lines: list[str], returncode: int = 0, stderr: str
     mock_process.stdout = iter(stdout_lines)
     mock_process.stderr = io.StringIO(stderr)
     mock_process.wait = Mock(return_value=returncode)
+    mock_process.poll = Mock(return_value=returncode)  # Process is finished
     mock_process.kill = Mock()
     return mock_process
 
@@ -53,6 +54,7 @@ def mock_popen_timeout(timeout_seconds: float = 1.0):
     mock_process.stdout = iter([])
     mock_process.stderr = io.StringIO("")
     mock_process.wait = Mock(side_effect=subprocess.TimeoutExpired("cmd", timeout_seconds))
+    mock_process.poll = Mock(return_value=None)  # Process still running
     mock_process.kill = Mock()
     return mock_process
 

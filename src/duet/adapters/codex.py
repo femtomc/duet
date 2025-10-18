@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import datetime
 import json
+import queue
 import subprocess
+import threading
+import time
 from typing import Any, Callable, Dict, Optional
 
 from ..models import AssistantRequest, AssistantResponse
@@ -88,12 +91,55 @@ class CodexAdapter(AssistantAdapter):
                 "event_types": [],
                 "parse_errors": 0,
             }
-            stderr_output = []
 
-            # Read stdout line-by-line as it streams
-            if process.stdout:
-                for line in process.stdout:
-                    line = line.strip()
+            # Read stdout with timeout protection using background thread
+            # This prevents hanging if the CLI stalls without closing the pipe
+            line_queue: queue.Queue = queue.Queue()
+
+            def reader_thread():
+                """Background thread that reads stdout line-by-line."""
+                try:
+                    if process.stdout:
+                        for line in process.stdout:
+                            line_queue.put(("line", line))
+                except Exception as e:
+                    line_queue.put(("error", str(e)))
+                finally:
+                    line_queue.put(("done", None))
+
+            # Start reader thread as daemon so it doesn't block shutdown
+            thread = threading.Thread(target=reader_thread, daemon=True)
+            thread.start()
+
+            # Main loop: poll queue with timeout protection
+            start_time = time.time()
+            while True:
+                # Check if we've exceeded the overall timeout
+                elapsed = time.time() - start_time
+                if elapsed > self.timeout:
+                    process.kill()
+                    process.wait()
+                    raise CodexError(f"Codex CLI timeout after {self.timeout} seconds")
+
+                # Poll queue with 1-second timeout to check for new lines
+                try:
+                    msg_type, data = line_queue.get(timeout=1.0)
+                except queue.Empty:
+                    # No new data, check if process is still alive
+                    if process.poll() is not None:
+                        # Process finished, wait for thread to complete
+                        thread.join(timeout=1.0)
+                        break
+                    continue  # Keep polling
+
+                if msg_type == "done":
+                    break
+                elif msg_type == "error":
+                    # Reader thread encountered an error
+                    metadata["reader_error"] = data
+                    break
+                elif msg_type == "line":
+                    line = data.strip()
                     if not line:
                         continue
 
@@ -149,19 +195,22 @@ class CodexAdapter(AssistantAdapter):
                             }
                             on_event(error_event)
 
-            # Read stderr for diagnostics
+            # Read stderr for diagnostics (non-blocking since process finished)
+            stderr_output = []
             if process.stderr:
                 stderr_output = process.stderr.readlines()
                 if stderr_output:
                     metadata["stderr"] = "".join(stderr_output).strip()
 
-            # Wait for process to complete with timeout
-            try:
-                returncode = process.wait(timeout=self.timeout)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
-                raise CodexError(f"Codex CLI timeout after {self.timeout} seconds")
+            # Wait for process to complete (should be immediate since loop exited)
+            returncode = process.poll()
+            if returncode is None:
+                # Process still running somehow, wait with short timeout
+                try:
+                    returncode = process.wait(timeout=1.0)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    returncode = process.wait()
 
             # Check for errors
             if returncode != 0:
