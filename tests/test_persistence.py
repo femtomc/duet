@@ -19,7 +19,14 @@ from duet.persistence import DuetDatabase
 @pytest.fixture
 def in_memory_db():
     """Create an in-memory SQLite database for testing."""
-    return DuetDatabase(":memory:")
+    db = DuetDatabase(":memory:")
+    # Verify Sprint 8 schema applied
+    with db._conn() as conn:
+        cursor = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='run_states'"
+        )
+        assert cursor.fetchone() is not None, "Sprint 8 run_states table not created"
+    return db
 
 
 @pytest.fixture
@@ -299,6 +306,194 @@ def test_search_runs_by_id_prefix(in_memory_db):
 
     test_runs = db.search_runs(run_id_prefix="test")
     assert len(test_runs) == 1
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Sprint 8: State Management Tests
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_sprint8_schema_migration(in_memory_db):
+    """Test that Sprint 8 schema (run_states table, active_state_id column) is created."""
+    db = in_memory_db
+
+    # Verify run_states table exists
+    with db._conn() as conn:
+        cursor = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='run_states'"
+        )
+        assert cursor.fetchone() is not None
+
+        # Verify active_state_id column exists in runs table
+        cursor = conn.execute("PRAGMA table_info(runs)")
+        columns = [row[1] for row in cursor.fetchall()]
+        assert "active_state_id" in columns
+
+
+def test_insert_state(in_memory_db):
+    """Test inserting a run state."""
+    db = in_memory_db
+
+    # Insert run first
+    snapshot = RunSnapshot(run_id="test-run-001", iteration=0, phase=Phase.PLAN)
+    db.insert_run(snapshot)
+
+    # Insert state
+    db.insert_state(
+        state_id="test-run-001-plan-ready",
+        run_id="test-run-001",
+        phase_status="plan-ready",
+        baseline_commit="abc123",
+        notes="Initial state",
+    )
+
+    # Verify inserted
+    state = db.get_state("test-run-001-plan-ready")
+    assert state is not None
+    assert state["state_id"] == "test-run-001-plan-ready"
+    assert state["run_id"] == "test-run-001"
+    assert state["phase_status"] == "plan-ready"
+    assert state["baseline_commit"] == "abc123"
+    assert state["notes"] == "Initial state"
+
+
+def test_list_states(in_memory_db):
+    """Test listing states for a run."""
+    db = in_memory_db
+
+    # Insert run
+    snapshot = RunSnapshot(run_id="test-run-002", iteration=0, phase=Phase.PLAN)
+    db.insert_run(snapshot)
+
+    # Insert multiple states
+    states_to_insert = [
+        ("test-run-002-plan-ready", "plan-ready"),
+        ("test-run-002-plan-complete", "plan-complete"),
+        ("test-run-002-implement-ready", "implement-ready"),
+    ]
+
+    for state_id, phase_status in states_to_insert:
+        db.insert_state(
+            state_id=state_id,
+            run_id="test-run-002",
+            phase_status=phase_status,
+        )
+
+    # List states
+    states = db.list_states("test-run-002")
+    assert len(states) == 3
+    assert states[0]["phase_status"] == "plan-ready"
+    assert states[1]["phase_status"] == "plan-complete"
+    assert states[2]["phase_status"] == "implement-ready"
+
+
+def test_active_state(in_memory_db):
+    """Test setting and getting active state."""
+    db = in_memory_db
+
+    # Insert run
+    snapshot = RunSnapshot(run_id="test-run-003", iteration=0, phase=Phase.PLAN)
+    db.insert_run(snapshot)
+
+    # Insert state
+    db.insert_state(
+        state_id="test-run-003-plan-ready",
+        run_id="test-run-003",
+        phase_status="plan-ready",
+    )
+
+    # Set active state
+    db.update_active_state("test-run-003", "test-run-003-plan-ready")
+
+    # Get active state
+    active = db.get_active_state("test-run-003")
+    assert active is not None
+    assert active["state_id"] == "test-run-003-plan-ready"
+
+
+def test_state_with_parent(in_memory_db):
+    """Test state with parent relationship."""
+    db = in_memory_db
+
+    # Insert run
+    snapshot = RunSnapshot(run_id="test-run-004", iteration=0, phase=Phase.PLAN)
+    db.insert_run(snapshot)
+
+    # Insert parent state
+    db.insert_state(
+        state_id="test-run-004-plan-ready",
+        run_id="test-run-004",
+        phase_status="plan-ready",
+    )
+
+    # Insert child state
+    db.insert_state(
+        state_id="test-run-004-plan-complete",
+        run_id="test-run-004",
+        phase_status="plan-complete",
+        parent_state_id="test-run-004-plan-ready",
+    )
+
+    # Verify parent relationship
+    state = db.get_state("test-run-004-plan-complete")
+    assert state["parent_state_id"] == "test-run-004-plan-ready"
+
+
+def test_state_with_metadata(in_memory_db):
+    """Test state with JSON metadata."""
+    db = in_memory_db
+
+    # Insert run
+    snapshot = RunSnapshot(run_id="test-run-005", iteration=0, phase=Phase.PLAN)
+    db.insert_run(snapshot)
+
+    # Insert state with metadata
+    metadata = {
+        "branch": "main",
+        "state_branch": "duet/state/test-run-005-plan-ready",
+        "clean": True,
+    }
+
+    db.insert_state(
+        state_id="test-run-005-plan-ready",
+        run_id="test-run-005",
+        phase_status="plan-ready",
+        metadata=metadata,
+    )
+
+    # Verify metadata
+    state = db.get_state("test-run-005-plan-ready")
+    assert state["metadata"] == metadata
+
+
+def test_get_latest_state(in_memory_db):
+    """Test getting the latest state for a run."""
+    db = in_memory_db
+
+    # Insert run
+    snapshot = RunSnapshot(run_id="test-run-006", iteration=0, phase=Phase.PLAN)
+    db.insert_run(snapshot)
+
+    # Insert states
+    import time
+
+    db.insert_state(
+        state_id="test-run-006-state-1",
+        run_id="test-run-006",
+        phase_status="plan-ready",
+    )
+
+    time.sleep(0.01)  # Ensure different timestamps
+
+    db.insert_state(
+        state_id="test-run-006-state-2",
+        run_id="test-run-006",
+        phase_status="plan-complete",
+    )
+
+    # Get latest
+    latest = db.get_latest_state("test-run-006")
+    assert latest["state_id"] == "test-run-006-state-2"
 
 
 if __name__ == "__main__":

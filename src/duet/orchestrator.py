@@ -18,7 +18,7 @@ from .adapters.base import StreamEvent
 from .approval import ApprovalNotifier
 from .artifacts import ArtifactStore
 from .config import DuetConfig
-from .git_operations import GitWorkspace
+from .git_operations import GitWorkspace, GitError
 from .logging import DuetLogger
 from .models import (
     AssistantRequest,
@@ -28,6 +28,7 @@ from .models import (
     RunSnapshot,
     TransitionDecision,
 )
+from .persistence import DuetDatabase, PersistenceError
 from .streaming import EnhancedStreamingDisplay
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -857,6 +858,390 @@ class Orchestrator:
 
     def _derive_run_id(self) -> str:
         return dt.datetime.now(dt.timezone.utc).strftime("run-%Y%m%d-%H%M%S")
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Single-Phase Execution (Sprint 8)
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def run_next_phase(
+        self,
+        run_id: Optional[str] = None,
+        feedback: Optional[str] = None,
+    ) -> dict:
+        """
+        Execute the next phase for a stateful run (Sprint 8).
+
+        Args:
+            run_id: Run identifier (creates new run if None)
+            feedback: Optional user feedback to include in prompt
+
+        Returns:
+            Dictionary with:
+            - run_id: Run identifier
+            - state_id: New state identifier
+            - phase: Phase that was executed
+            - phase_status: New phase status
+            - next_action: Suggested next action (continue/blocked/done)
+            - message: Human-readable status message
+        """
+        if not self.db:
+            raise RuntimeError("Database required for stateful workflow. Initialize with DuetDatabase.")
+
+        # ──── Load or Create Run ────
+        if run_id:
+            # Load existing run
+            run = self.db.get_run(run_id)
+            if not run:
+                raise ValueError(f"Run not found: {run_id}")
+
+            # Get active state
+            active_state = self.db.get_active_state(run_id)
+            if not active_state:
+                # No active state, get latest state or start fresh
+                active_state = self.db.get_latest_state(run_id)
+                if not active_state:
+                    # Create initial state
+                    state_id = f"{run_id}-plan-ready"
+                    baseline = None
+                    if self.git.is_git_repo():
+                        try:
+                            baseline = self.git.get_current_commit()
+                        except GitError:
+                            pass
+
+                    self.db.insert_state(
+                        state_id=state_id,
+                        run_id=run_id,
+                        phase_status="plan-ready",
+                        baseline_commit=baseline,
+                        notes="Initial state",
+                    )
+                    self.db.update_active_state(run_id, state_id)
+                    active_state = self.db.get_state(state_id)
+
+            snapshot = RunSnapshot(
+                run_id=run_id,
+                iteration=run["iteration"],
+                phase=Phase(run["phase"]),
+                metadata={"started_at": run["started_at"]},
+            )
+        else:
+            # Create new run
+            run_id = self._derive_run_id()
+            snapshot = RunSnapshot(
+                run_id=run_id,
+                iteration=0,
+                phase=Phase.PLAN,
+                metadata={
+                    "started_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                    "consecutive_replans": 0,
+                },
+            )
+
+            # Insert run
+            self.db.insert_run(snapshot)
+
+            # Create initial state
+            state_id = f"{run_id}-plan-ready"
+            baseline = None
+            if self.git.is_git_repo():
+                try:
+                    baseline = self.git.get_current_commit()
+                except GitError:
+                    pass
+
+            self.db.insert_state(
+                state_id=state_id,
+                run_id=run_id,
+                phase_status="plan-ready",
+                baseline_commit=baseline,
+                notes="Initial state",
+            )
+            self.db.update_active_state(run_id, state_id)
+            active_state = self.db.get_state(state_id)
+
+        # ──── Determine Phase to Execute ────
+        phase_status = active_state["phase_status"]
+        current_phase, action_needed = self._parse_phase_status(phase_status)
+
+        if action_needed == "done":
+            return {
+                "run_id": run_id,
+                "state_id": active_state["state_id"],
+                "phase": "done",
+                "phase_status": phase_status,
+                "next_action": "done",
+                "message": "Run already completed",
+            }
+
+        if action_needed == "blocked":
+            return {
+                "run_id": run_id,
+                "state_id": active_state["state_id"],
+                "phase": current_phase.value if current_phase else "blocked",
+                "phase_status": phase_status,
+                "next_action": "blocked",
+                "message": "Run is blocked, requires intervention",
+            }
+
+        # ──── Execute Phase ────
+        snapshot.iteration += 1
+        snapshot.phase = current_phase
+        phase_start_time = dt.datetime.now(dt.timezone.utc)
+
+        self.console.rule(f"[bold cyan]{current_phase.value.upper()}[/] (Iteration {snapshot.iteration})")
+
+        # Compose request (include feedback if provided)
+        request = self._compose_request(current_phase, snapshot)
+        if feedback and current_phase == Phase.PLAN:
+            # Inject user feedback into plan request
+            request.prompt += f"\n\n──── User Feedback ────\n{feedback}\n"
+            request.context["user_feedback"] = feedback
+
+        adapter = self._select_adapter(current_phase)
+        adapter_name = adapter.__class__.__name__
+
+        # Streaming display setup
+        from .models import StreamMode
+        stream_mode = self.config.logging.stream_mode
+        if self.config.logging.quiet:
+            stream_mode = StreamMode.OFF
+
+        streaming_display = None if stream_mode == StreamMode.OFF else EnhancedStreamingDisplay(
+            console=self.console,
+            phase=current_phase,
+            iteration=snapshot.iteration,
+            mode=stream_mode.value,
+        )
+
+        # Create event handler
+        event_handler = self._create_event_handler(
+            snapshot.run_id, snapshot.iteration, current_phase, display=streaming_display
+        )
+
+        # Execute phase
+        try:
+            if streaming_display:
+                with Live(
+                    streaming_display.render(),
+                    console=self.console,
+                    refresh_per_second=4,
+                    transient=True,
+                ) as live:
+                    def live_event_handler(event: StreamEvent) -> None:
+                        event_handler(event)
+                        live.update(streaming_display.render())
+
+                    response = adapter.stream(request, on_event=live_event_handler)
+            else:
+                response = adapter.stream(request, on_event=event_handler)
+        except Exception as exc:
+            self.console.log(f"[red]Phase execution failed: {exc}[/]")
+            # Create blocked state
+            new_state_id = f"{run_id}-blocked"
+            self.db.insert_state(
+                state_id=new_state_id,
+                run_id=run_id,
+                phase_status="blocked",
+                parent_state_id=active_state["state_id"],
+                notes=f"Phase {current_phase.value} failed: {exc}",
+            )
+            self.db.update_active_state(run_id, new_state_id)
+
+            return {
+                "run_id": run_id,
+                "state_id": new_state_id,
+                "phase": current_phase.value,
+                "phase_status": "blocked",
+                "next_action": "blocked",
+                "message": f"Phase failed: {exc}",
+            }
+
+        # Extract verdict if REVIEW phase
+        if current_phase == Phase.REVIEW and "verdict" in response.metadata:
+            verdict_str = response.metadata["verdict"]
+            if isinstance(verdict_str, str):
+                verdict_lower = verdict_str.lower().strip()
+                if verdict_lower in ("approve", "approved"):
+                    response.verdict = ReviewVerdict.APPROVE
+                elif verdict_lower in ("changes_requested", "changes requested", "revise"):
+                    response.verdict = ReviewVerdict.CHANGES_REQUESTED
+                elif verdict_lower in ("blocked", "block"):
+                    response.verdict = ReviewVerdict.BLOCKED
+
+        # Check for empty response
+        if not response.content or not response.content.strip():
+            self.console.log("[yellow]Empty response detected[/]")
+            new_state_id = f"{run_id}-blocked"
+            self.db.insert_state(
+                state_id=new_state_id,
+                run_id=run_id,
+                phase_status="blocked",
+                parent_state_id=active_state["state_id"],
+                notes=f"Empty response in {current_phase.value}",
+            )
+            self.db.update_active_state(run_id, new_state_id)
+
+            return {
+                "run_id": run_id,
+                "state_id": new_state_id,
+                "phase": current_phase.value,
+                "phase_status": "blocked",
+                "next_action": "blocked",
+                "message": "Empty response received",
+            }
+
+        # ──── Decide Next Phase ────
+        decision = self._decide_next_phase(
+            current_phase,
+            response,
+            snapshot.iteration,
+            snapshot.metadata.get("consecutive_replans", 0)
+        )
+
+        # ──── Persist Iteration ────
+        git_meta = response.metadata.get("git_changes", {})
+        usage_meta = {
+            "input_tokens": response.metadata.get("input_tokens"),
+            "output_tokens": response.metadata.get("output_tokens"),
+            "cached_input_tokens": response.metadata.get("cached_input_tokens"),
+        }
+        stream_meta = {
+            "stream_events": response.metadata.get("stream_events"),
+            "thread_id": response.metadata.get("thread_id"),
+        }
+
+        self.db.insert_iteration(
+            run_id=snapshot.run_id,
+            iteration=snapshot.iteration,
+            phase=current_phase,
+            prompt=request.prompt,
+            response_content=response.content,
+            verdict=response.verdict,
+            concluded=response.concluded,
+            next_phase=decision.next_phase,
+            requires_human=decision.requires_human,
+            decision_rationale=decision.rationale,
+            git_metadata=git_meta if git_meta else None,
+            usage_metadata=usage_meta if any(usage_meta.values()) else None,
+            stream_metadata=stream_meta if any(stream_meta.values()) else None,
+        )
+
+        # ──── Create New State ────
+        new_phase_status = self._derive_phase_status(current_phase, decision.next_phase)
+        new_state_id = f"{run_id}-{new_phase_status}"
+
+        # Create git baseline if needed
+        baseline = active_state.get("baseline_commit")
+        if self.git.is_git_repo():
+            try:
+                baseline_info = self.git.create_state_baseline(new_state_id)
+                baseline = baseline_info["commit"]
+            except GitError as exc:
+                self.console.log(f"[yellow]Git baseline creation failed: {exc}[/]")
+
+        self.db.insert_state(
+            state_id=new_state_id,
+            run_id=run_id,
+            phase_status=new_phase_status,
+            baseline_commit=baseline,
+            parent_state_id=active_state["state_id"],
+            notes=decision.rationale,
+            verdict=response.verdict.value if response.verdict else None,
+            feedback=feedback,
+        )
+        self.db.update_active_state(run_id, new_state_id)
+
+        # Update run record
+        snapshot.phase = decision.next_phase
+        snapshot.iteration = snapshot.iteration
+        self.db.update_run(snapshot)
+
+        # ──── Determine Next Action ────
+        next_action = "continue"
+        if decision.next_phase == Phase.DONE:
+            next_action = "done"
+        elif decision.next_phase == Phase.BLOCKED or decision.requires_human:
+            next_action = "blocked"
+
+        message = f"Phase {current_phase.value} complete. {decision.rationale}"
+
+        self.console.log(f"[green]State created:[/] {new_state_id}")
+        self.console.log(f"[blue]{message}[/]")
+
+        return {
+            "run_id": run_id,
+            "state_id": new_state_id,
+            "phase": current_phase.value,
+            "phase_status": new_phase_status,
+            "next_action": next_action,
+            "message": message,
+        }
+
+    def _parse_phase_status(self, phase_status: str) -> tuple[Optional[Phase], str]:
+        """
+        Parse phase status to determine phase and action.
+
+        Returns:
+            Tuple of (Phase, action) where action is 'execute', 'done', or 'blocked'
+        """
+        if phase_status == "done":
+            return None, "done"
+        if phase_status == "blocked":
+            return None, "blocked"
+
+        # Parse format: <phase>-ready or <phase>-complete
+        parts = phase_status.split("-")
+        if len(parts) != 2:
+            return None, "blocked"
+
+        phase_name, status = parts
+        if phase_name == "plan":
+            phase = Phase.PLAN
+        elif phase_name == "implement":
+            phase = Phase.IMPLEMENT
+        elif phase_name == "review":
+            phase = Phase.REVIEW
+        else:
+            return None, "blocked"
+
+        if status == "ready":
+            return phase, "execute"
+        elif status == "complete":
+            # Phase completed, need to transition to next
+            if phase == Phase.PLAN:
+                return Phase.IMPLEMENT, "execute"
+            elif phase == Phase.IMPLEMENT:
+                return Phase.REVIEW, "execute"
+            elif phase == Phase.REVIEW:
+                # Review complete typically means done
+                return None, "done"
+
+        return None, "blocked"
+
+    def _derive_phase_status(self, executed_phase: Phase, next_phase: Phase) -> str:
+        """
+        Derive phase status string from executed phase and next phase.
+
+        Args:
+            executed_phase: Phase that was just executed
+            next_phase: Phase determined by decision logic
+
+        Returns:
+            Phase status string (e.g., 'plan-complete', 'implement-ready')
+        """
+        if next_phase == Phase.DONE:
+            return "done"
+        if next_phase == Phase.BLOCKED:
+            return "blocked"
+
+        # Map next phase to status
+        status_map = {
+            Phase.PLAN: "plan-ready",
+            Phase.IMPLEMENT: "implement-ready",
+            Phase.REVIEW: "review-ready",
+        }
+        return status_map.get(next_phase, "blocked")
 
     def _render_summary(self, snapshot: RunSnapshot) -> None:
         table = Table(title="Duet Run Summary")

@@ -16,7 +16,16 @@ from .models import Phase, ReviewVerdict, RunSnapshot
 # DATABASE SCHEMA
 # ──────────────────────────────────────────────────────────────────────────────
 
+# Schema version for migrations
+SCHEMA_VERSION = 2  # Sprint 8: added run_states table and active_state_id
+
 SCHEMA_DDL = """
+-- Schema version tracking
+CREATE TABLE IF NOT EXISTS schema_version (
+    version INTEGER PRIMARY KEY,
+    applied_at TEXT NOT NULL
+);
+
 -- Orchestration runs
 CREATE TABLE IF NOT EXISTS runs (
     run_id TEXT PRIMARY KEY,
@@ -30,7 +39,8 @@ CREATE TABLE IF NOT EXISTS runs (
     feature_branch TEXT,
     baseline_commit TEXT,
     latest_commit TEXT,
-    consecutive_replans INTEGER DEFAULT 0
+    consecutive_replans INTEGER DEFAULT 0,
+    active_state_id TEXT  -- Sprint 8: current checkpoint state
 );
 
 -- Per-iteration records
@@ -80,14 +90,35 @@ CREATE TABLE IF NOT EXISTS events (
     FOREIGN KEY (run_id) REFERENCES runs(run_id)
 );
 
+-- Run states for stateful workflow (Sprint 8)
+CREATE TABLE IF NOT EXISTS run_states (
+    state_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    phase_status TEXT NOT NULL,  -- plan-ready, plan-complete, implement-ready, etc.
+    created_at TEXT NOT NULL,
+    baseline_commit TEXT,  -- git commit at this checkpoint
+    parent_state_id TEXT,  -- previous state in chain
+    notes TEXT,
+    verdict TEXT,  -- review verdict if applicable
+    feedback TEXT,  -- user feedback for this state
+    metadata TEXT,  -- JSON blob for additional state data
+
+    FOREIGN KEY (run_id) REFERENCES runs(run_id),
+    FOREIGN KEY (parent_state_id) REFERENCES run_states(state_id)
+);
+
 -- Indexes for common queries
 CREATE INDEX IF NOT EXISTS idx_runs_created_at ON runs(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_runs_phase ON runs(phase);
+CREATE INDEX IF NOT EXISTS idx_runs_active_state ON runs(active_state_id);
 CREATE INDEX IF NOT EXISTS idx_iterations_run_id ON iterations(run_id);
 CREATE INDEX IF NOT EXISTS idx_iterations_phase ON iterations(phase);
 CREATE INDEX IF NOT EXISTS idx_iterations_verdict ON iterations(verdict);
 CREATE INDEX IF NOT EXISTS idx_events_run_phase ON events(run_id, phase);
 CREATE INDEX IF NOT EXISTS idx_events_run_iteration ON events(run_id, iteration);
+CREATE INDEX IF NOT EXISTS idx_run_states_run_id ON run_states(run_id);
+CREATE INDEX IF NOT EXISTS idx_run_states_phase_status ON run_states(phase_status);
+CREATE INDEX IF NOT EXISTS idx_run_states_created_at ON run_states(created_at DESC);
 """
 
 
@@ -138,16 +169,62 @@ class DuetDatabase:
         """Apply schema to a specific connection."""
         conn.executescript(SCHEMA_DDL)
         conn.commit()
+        # Apply migrations
+        self._apply_migrations(conn)
 
     def _ensure_schema(self) -> None:
         """Ensure database schema exists (creates all tables if missing)."""
         db_location = str(self.db_path) if isinstance(self.db_path, Path) else self.db_path
         conn = sqlite3.connect(db_location)
         try:
+            # Apply base schema
             conn.executescript(SCHEMA_DDL)
             conn.commit()
+
+            # Check and apply migrations
+            self._apply_migrations(conn)
         finally:
             conn.close()
+
+    def _get_schema_version(self, conn: sqlite3.Connection) -> int:
+        """Get current schema version."""
+        try:
+            cursor = conn.execute("SELECT MAX(version) as version FROM schema_version")
+            row = cursor.fetchone()
+            return row[0] if row and row[0] is not None else 0
+        except sqlite3.OperationalError:
+            # schema_version table doesn't exist yet
+            return 0
+
+    def _set_schema_version(self, conn: sqlite3.Connection, version: int) -> None:
+        """Set schema version."""
+        conn.execute(
+            "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (?, ?)",
+            (version, dt.datetime.now(dt.timezone.utc).isoformat()),
+        )
+        conn.commit()
+
+    def _apply_migrations(self, conn: sqlite3.Connection) -> None:
+        """Apply schema migrations if needed."""
+        current_version = self._get_schema_version(conn)
+
+        # Migration 1 -> 2: Add active_state_id to runs table (Sprint 8)
+        if current_version < 2:
+            try:
+                # Check if column already exists
+                cursor = conn.execute("PRAGMA table_info(runs)")
+                columns = [row[1] for row in cursor.fetchall()]
+
+                if "active_state_id" not in columns:
+                    # Add active_state_id column
+                    conn.execute("ALTER TABLE runs ADD COLUMN active_state_id TEXT")
+                    conn.commit()
+
+                # Mark version as applied
+                self._set_schema_version(conn, 2)
+            except sqlite3.OperationalError as e:
+                # Column might already exist, ignore error
+                pass
 
     # ──────────────────────────────────────────────────────────────────────────
     # Run Operations
@@ -524,3 +601,113 @@ class DuetDatabase:
 
             cursor = conn.execute(query, params)
             return [dict(row) for row in cursor.fetchall()]
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # State Operations (Sprint 8)
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def insert_state(
+        self,
+        state_id: str,
+        run_id: str,
+        phase_status: str,
+        baseline_commit: Optional[str] = None,
+        parent_state_id: Optional[str] = None,
+        notes: Optional[str] = None,
+        verdict: Optional[str] = None,
+        feedback: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Insert a new run state checkpoint."""
+        with self._conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO run_states (
+                    state_id, run_id, phase_status, created_at,
+                    baseline_commit, parent_state_id, notes, verdict, feedback, metadata
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    state_id,
+                    run_id,
+                    phase_status,
+                    dt.datetime.now(dt.timezone.utc).isoformat(),
+                    baseline_commit,
+                    parent_state_id,
+                    notes,
+                    verdict,
+                    feedback,
+                    json.dumps(metadata) if metadata else None,
+                ),
+            )
+
+    def get_state(self, state_id: str) -> Optional[Dict[str, Any]]:
+        """Get state record by ID."""
+        with self._conn() as conn:
+            cursor = conn.execute("SELECT * FROM run_states WHERE state_id = ?", (state_id,))
+            row = cursor.fetchone()
+            if row:
+                state_dict = dict(row)
+                # Parse JSON metadata
+                if state_dict.get("metadata"):
+                    state_dict["metadata"] = json.loads(state_dict["metadata"])
+                return state_dict
+            return None
+
+    def list_states(self, run_id: str) -> List[Dict[str, Any]]:
+        """List all states for a run in chronological order."""
+        with self._conn() as conn:
+            cursor = conn.execute(
+                "SELECT * FROM run_states WHERE run_id = ? ORDER BY created_at ASC",
+                (run_id,),
+            )
+            states = []
+            for row in cursor.fetchall():
+                state_dict = dict(row)
+                # Parse JSON metadata
+                if state_dict.get("metadata"):
+                    state_dict["metadata"] = json.loads(state_dict["metadata"])
+                states.append(state_dict)
+            return states
+
+    def get_active_state(self, run_id: str) -> Optional[Dict[str, Any]]:
+        """Get the active state for a run."""
+        with self._conn() as conn:
+            # Get active_state_id from runs table
+            cursor = conn.execute(
+                "SELECT active_state_id FROM runs WHERE run_id = ?", (run_id,)
+            )
+            row = cursor.fetchone()
+            if not row or not row["active_state_id"]:
+                return None
+
+            active_state_id = row["active_state_id"]
+            return self.get_state(active_state_id)
+
+    def update_active_state(self, run_id: str, state_id: str) -> None:
+        """Update the active state for a run."""
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE runs SET active_state_id = ? WHERE run_id = ?",
+                (state_id, run_id),
+            )
+
+    def get_latest_state(self, run_id: str) -> Optional[Dict[str, Any]]:
+        """Get the most recent state for a run."""
+        with self._conn() as conn:
+            cursor = conn.execute(
+                """
+                SELECT * FROM run_states
+                WHERE run_id = ?
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (run_id,),
+            )
+            row = cursor.fetchone()
+            if row:
+                state_dict = dict(row)
+                if state_dict.get("metadata"):
+                    state_dict["metadata"] = json.loads(state_dict["metadata"])
+                return state_dict
+            return None

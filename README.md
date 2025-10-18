@@ -1,4 +1,10 @@
-# Duet
+<div align="center">
+  <img src="logo-circle.png" alt="Duet Logo" width="200"/>
+
+  # Duet
+
+  **Automate the Codex ↔ Claude Code loop**
+</div>
 
 Duet orchestrates iterative software delivery by coordinating Codex for planning and review with Claude Code for implementation. It automates the plan → implement → review loop, enforces guardrails, and preserves artifacts for observability and audit.
 
@@ -40,16 +46,26 @@ Duet orchestrates iterative software delivery by coordinating Codex for planning
 
 ## CLI Reference
 
+### Core Commands
+
 | Command | Description |
 |---------|-------------|
 | `duet init` | Scaffold `.duet/` (config, prompts, context, logs, runs, SQLite DB) |
-| `duet run [--config PATH] [--run-id ID] [--quiet]` | Execute the orchestration loop with live streaming output |
-| `duet status RUN_ID` | Inspect the latest checkpoint for a run (filesystem) |
+| `duet run [--config PATH] [--run-id ID] [--quiet]` | Execute the full orchestration loop with live streaming output |
+| `duet status RUN_ID [--show-states]` | Inspect run status and state history (Sprint 8) |
 | `duet summary RUN_ID [--save]` | Display or persist a run summary (filesystem) |
 | `duet history [OPTIONS]` | List recent runs with advanced filtering and JSON export |
 | `duet inspect RUN_ID [OPTIONS]` | Show per-iteration details with streaming events and JSON export |
 | `duet migrate [--force]` | Backfill SQLite database from existing artifacts |
 | `duet show-config [--config PATH]` | Pretty-print the resolved configuration |
+
+### Stateful Workflow Commands (Sprint 8)
+
+| Command | Description |
+|---------|-------------|
+| `duet next [--run-id ID] [--feedback TEXT]` | Execute the next phase for a stateful run (creates new run if no ID) |
+| `duet cont RUN_ID [--max-phases N]` | Continue executing phases until done or blocked |
+| `duet back STATE_ID [--force]` | Restore git workspace and database to a previous state |
 
 ### Advanced Filtering (Sprint 6)
 
@@ -89,10 +105,83 @@ Artifacts inside `runs/<run-id>/` include:
 - `interactions/*.json`: raw prompt/response exchanges
 - `summary.json`: aggregated run-level summary
 
-SQLite tables (Sprint 5 & 6):
-- `runs`: Run metadata (phase, iteration, git refs, timestamps)
+SQLite tables (Sprint 5, 6 & 8):
+- `runs`: Run metadata (phase, iteration, git refs, timestamps, active_state_id)
 - `iterations`: Per-iteration details (prompts, responses, verdicts, tokens, git changes)
 - `events`: Streaming events from adapters (event_type, payload, timestamps)
+- `run_states`: State checkpoints (state_id, phase_status, baseline_commit, parent_state_id, feedback)
+
+## Stateful Workflow (Sprint 8)
+
+Sprint 8 introduces a **stateful CLI workflow** that allows you to execute orchestration runs one phase at a time, rewind to previous states, and provide feedback between phases.
+
+### State-Based Execution
+
+Each run maintains a series of **checkpoints** (states) that track:
+- Phase status (e.g., `plan-ready`, `plan-complete`, `implement-ready`, `done`, `blocked`)
+- Git baseline commit for each state
+- User feedback provided at each step
+- Parent-child relationships for state history
+
+### Workflow Commands
+
+1. **Start or continue a run phase-by-phase**:
+   ```bash
+   # Create new run and execute first phase
+   duet next
+
+   # Continue existing run
+   duet next --run-id run-20251018-142030
+
+   # Provide feedback for the next phase
+   duet next --run-id run-20251018-142030 --feedback "Try variant B"
+   ```
+
+2. **Auto-continue until completion or blocking**:
+   ```bash
+   # Execute all phases until done or blocked
+   duet cont run-20251018-142030
+
+   # Limit to 5 phases max
+   duet cont run-20251018-142030 --max-phases 5
+   ```
+
+3. **Inspect run status and state history**:
+   ```bash
+   # View current state and history
+   duet status run-20251018-142030
+
+   # Hide state history
+   duet status run-20251018-142030 --no-states
+   ```
+
+4. **Rewind to a previous state**:
+   ```bash
+   # Restore git workspace and database to a checkpoint
+   duet back run-20251018-142030-plan-complete
+
+   # Force restore even with uncommitted changes
+   duet back run-20251018-142030-plan-complete --force
+   ```
+
+### State ID Pattern
+
+States follow the pattern: `<run-id>-<phase-status>`
+
+Examples:
+- `run-20251018-142030-plan-ready`
+- `run-20251018-142030-plan-complete`
+- `run-20251018-142030-implement-ready`
+- `run-20251018-142030-done`
+- `run-20251018-142030-blocked`
+
+### Use Cases
+
+- **Incremental workflow**: Execute one phase at a time, review results, provide feedback
+- **Experimentation**: Rewind to a previous state and try different approaches
+- **Debugging**: Restore to a checkpoint to investigate what went wrong
+- **Manual approval**: Pause between phases to review before proceeding
+- **Feedback loops**: Provide specific guidance after plan or review phases
 
 ## Running and Monitoring
 
@@ -213,5 +302,7 @@ duet history --phase review --verdict changes_requested --since 2025-10-15
 
 - **Sprint 1–4**: Core orchestrator, adapters, guardrails, and `duet init` workspace bootstrapping.
 - **Sprint 5**: SQLite persistence layer, CLI history/inspect commands, artifact migration.
-- **Sprint 6** (Complete): Streaming infrastructure with real-time console output, event persistence, advanced CLI filtering, and JSON export.
-- **Upcoming**: Advanced resume/hardening (Sprint 7), TUI dashboard. See `docs/integration_plan.md` for roadmap.
+- **Sprint 6**: Streaming infrastructure with real-time console output, event persistence, advanced CLI filtering, and JSON export.
+- **Sprint 7**: Enhanced streaming displays with configurable modes (detailed/compact/off).
+- **Sprint 8** (Complete): Stateful CLI workflow with phase-by-phase execution, state checkpoints, git baseline management, and time-travel commands (`duet next`, `duet cont`, `duet back`, `duet status`).
+- **Upcoming**: TUI dashboard, `jj` backend support. See `docs/integration_plan.md` for roadmap.

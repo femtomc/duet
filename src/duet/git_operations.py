@@ -197,3 +197,131 @@ class GitWorkspace:
         result = self._run_git("rev-list", f"{base_commit}..HEAD")
         commits = [c for c in result.stdout.strip().split("\n") if c]
         return commits
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # State Baseline Management (Sprint 8)
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def create_state_baseline(
+        self, state_id: str, branch_prefix: str = "duet/state"
+    ) -> dict[str, str]:
+        """
+        Create a git baseline for a state checkpoint.
+
+        Args:
+            state_id: State identifier
+            branch_prefix: Prefix for state branch (default: duet/state)
+
+        Returns:
+            Dictionary with baseline metadata:
+            - commit: Current commit SHA
+            - branch: Current branch name
+            - state_branch: Created state branch name (if created)
+            - clean: Whether working tree is clean
+        """
+        # Get current commit and branch
+        commit = self.get_current_commit()
+        branch = self.get_current_branch()
+
+        # Check if working tree is clean
+        status_result = self._run_git("status", "--porcelain")
+        clean = not bool(status_result.stdout.strip())
+
+        # Create state branch for checkpoint (optional)
+        state_branch = f"{branch_prefix}/{state_id}"
+        if not self.branch_exists(state_branch):
+            try:
+                self._run_git("branch", state_branch)
+                self.console.log(f"[dim]Created state branch:[/] {state_branch}")
+            except GitError as exc:
+                self.console.log(f"[yellow]Warning: Could not create state branch: {exc}[/]")
+                state_branch = None
+        else:
+            state_branch = None
+
+        return {
+            "commit": commit,
+            "branch": branch,
+            "state_branch": state_branch,
+            "clean": clean,
+        }
+
+    def restore_state(
+        self,
+        baseline_commit: str,
+        original_branch: Optional[str] = None,
+        state_branch: Optional[str] = None,
+        force: bool = False,
+    ) -> None:
+        """
+        Restore git workspace to a state checkpoint.
+
+        Args:
+            baseline_commit: Commit SHA to restore to
+            original_branch: Original branch to checkout (if provided)
+            state_branch: State-specific branch to checkout (if provided)
+            force: Force reset even if working tree is dirty
+
+        Raises:
+            GitError: If restoration fails
+        """
+        # Check working tree status
+        status_result = self._run_git("status", "--porcelain")
+        dirty = bool(status_result.stdout.strip())
+
+        if dirty and not force:
+            raise GitError(
+                "Working tree has uncommitted changes. "
+                "Commit or stash changes before restoring state, or use force=True."
+            )
+
+        # Determine target: state_branch > original_branch > commit
+        if state_branch and self.branch_exists(state_branch):
+            # Checkout state branch
+            self.console.log(f"[cyan]Restoring state branch:[/] {state_branch}")
+            self._run_git("checkout", state_branch)
+        elif original_branch:
+            # Checkout original branch
+            self.console.log(f"[cyan]Restoring branch:[/] {original_branch}")
+            self._run_git("checkout", original_branch)
+            # Reset to baseline commit
+            self.console.log(f"[cyan]Resetting to commit:[/] {baseline_commit[:8]}")
+            reset_flag = "--hard" if force else "--mixed"
+            self._run_git("reset", reset_flag, baseline_commit)
+        else:
+            # Detached HEAD at baseline commit
+            self.console.log(f"[cyan]Checking out commit:[/] {baseline_commit[:8]}")
+            self._run_git("checkout", baseline_commit)
+
+        self.console.log("[green]State restored successfully[/]")
+
+    def has_uncommitted_changes(self) -> bool:
+        """Check if working tree has uncommitted changes."""
+        status_result = self._run_git("status", "--porcelain")
+        return bool(status_result.stdout.strip())
+
+    def stash_changes(self, message: Optional[str] = None) -> bool:
+        """
+        Stash current working tree changes.
+
+        Args:
+            message: Optional stash message
+
+        Returns:
+            True if changes were stashed, False if nothing to stash
+        """
+        if not self.has_uncommitted_changes():
+            return False
+
+        stash_args = ["stash", "push"]
+        if message:
+            stash_args.extend(["-m", message])
+
+        self._run_git(*stash_args)
+        self.console.log("[cyan]Stashed working tree changes[/]")
+        return True
+
+    def pop_stash(self) -> None:
+        """Pop the most recent stash."""
+        self._run_git("stash", "pop")
+        self.console.log("[cyan]Restored stashed changes[/]")
