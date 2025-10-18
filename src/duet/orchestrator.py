@@ -78,8 +78,20 @@ class Orchestrator:
         )
 
     def _build_adapter(self, assistant_cfg):
+        """
+        Build an adapter from configuration.
+
+        Unpacks assistant config as kwargs and adds workspace_root for adapters
+        that need it (e.g., Claude Code).
+        """
         adapter_name = assistant_cfg.provider
-        adapter = REGISTRY.resolve(adapter_name, config=assistant_cfg.dict())
+        adapter_kwargs = assistant_cfg.dict()
+
+        # Add workspace_root for adapters that need workspace context
+        adapter_kwargs["workspace_root"] = str(self.config.storage.workspace_root)
+
+        # Unpack kwargs to pass individual parameters (model, temperature, etc.)
+        adapter = REGISTRY.resolve(adapter_name, **adapter_kwargs)
         return adapter
 
     def _setup_signal_handlers(self) -> None:

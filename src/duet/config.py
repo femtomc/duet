@@ -21,6 +21,14 @@ class AssistantConfig(BaseModel):
         ),
     )
     temperature: float = Field(0.0, ge=0.0, le=2.0, description="Default sampling temperature")
+    timeout: Optional[int] = Field(
+        None,
+        ge=1,
+        description="CLI invocation timeout in seconds (adapter-specific defaults apply if not set)",
+    )
+    cli_path: Optional[str] = Field(
+        None, description="Custom path to CLI executable (defaults to adapter name in PATH)"
+    )
 
 
 class WorkflowConfig(BaseModel):
