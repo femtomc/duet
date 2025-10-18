@@ -8,6 +8,8 @@ from typing import Optional
 import yaml
 from pydantic import BaseModel, Field, validator
 
+from .models import StreamMode
+
 
 class AssistantConfig(BaseModel):
     """Adapter configuration for a single assistant provider."""
@@ -78,8 +80,8 @@ class LoggingConfig(BaseModel):
     quiet: bool = Field(
         False, description="Disable streaming console output during runs (Sprint 6)"
     )
-    stream_mode: str = Field(
-        "detailed",
+    stream_mode: StreamMode = Field(
+        StreamMode.DETAILED,
         description="Streaming display mode: detailed | compact | off (Sprint 7)",
     )
 

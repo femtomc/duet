@@ -43,6 +43,18 @@ class CanonicalEventType(str, Enum):
     UNKNOWN = "unknown"  # Unmapped event type
 
 
+class StreamMode(str, Enum):
+    """
+    Streaming display modes (Sprint 7).
+
+    Controls verbosity of live console output during runs.
+    """
+
+    DETAILED = "detailed"  # Full panel with status, metrics, preview, log
+    COMPACT = "compact"  # Minimal display (phase + iteration + events + time)
+    OFF = "off"  # No live display (events still persisted)
+
+
 class AssistantRequest(BaseModel):
     """Prompt details delivered to an assistant adapter."""
 

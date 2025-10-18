@@ -269,16 +269,17 @@ class Orchestrator:
             self.logger.log_adapter_call(snapshot.run_id, iteration, current_phase.value, adapter_name)
 
             # ──── Streaming Display Setup (Sprint 7: EnhancedStreamingDisplay) ────
+            from .models import StreamMode
             stream_mode = self.config.logging.stream_mode
             # Handle legacy quiet flag (maps to stream_mode="off")
             if self.config.logging.quiet:
-                stream_mode = "off"
+                stream_mode = StreamMode.OFF
 
-            streaming_display = None if stream_mode == "off" else EnhancedStreamingDisplay(
+            streaming_display = None if stream_mode == StreamMode.OFF else EnhancedStreamingDisplay(
                 console=self.console,
                 phase=current_phase,
                 iteration=iteration,
-                mode=stream_mode,
+                mode=stream_mode.value,  # Pass string value to display
             )
 
             # ──── Create Event Handler for Streaming ────

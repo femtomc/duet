@@ -12,6 +12,7 @@ from .artifacts import ArtifactStore
 from .config import DuetConfig, find_config
 from .init import DuetInitializer, InitError
 from .migrate import ArtifactMigrator
+from .models import StreamMode
 from .orchestrator import Orchestrator
 from .persistence import DuetDatabase
 
@@ -74,11 +75,17 @@ def run(
     # Override quiet mode if CLI flag provided
     if quiet:
         duet_config.logging.quiet = True
-        duet_config.logging.stream_mode = "off"
+        duet_config.logging.stream_mode = StreamMode.OFF
 
-    # Override stream_mode if CLI flag provided
+    # Override stream_mode if CLI flag provided (with validation)
     if stream_mode:
-        duet_config.logging.stream_mode = stream_mode
+        # Validate against enum values
+        valid_modes = [mode.value for mode in StreamMode]
+        if stream_mode not in valid_modes:
+            console.print(f"[red]Invalid --stream-mode: {stream_mode}[/]")
+            console.print(f"[yellow]Valid options: {', '.join(valid_modes)}[/]")
+            raise typer.Exit(1)
+        duet_config.logging.stream_mode = StreamMode(stream_mode)
 
     artifact_store = ArtifactStore(duet_config.storage.run_artifact_dir, console=console)
 
