@@ -14,9 +14,9 @@ The compiler performs:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 
-from .workflow import Agent, Guard, Phase, Transition, Workflow
+from .workflow import Agent, Channel, Guard, Phase, Transition, Workflow
 
 
 class CompilationError(Exception):
@@ -34,6 +34,7 @@ class WorkflowGraph:
 
     Attributes:
         agents: Map of agent name -> Agent
+        channels: Map of channel name -> Channel
         phases: Map of phase name -> Phase
         transitions: Map of source phase -> list of outgoing transitions
         initial_phase: Name of the starting phase
@@ -42,11 +43,12 @@ class WorkflowGraph:
     """
 
     agents: Dict[str, Agent]
+    channels: Dict[str, Channel]
     phases: Dict[str, Phase]
     transitions: Dict[str, List[Transition]]  # from_phase -> transitions
     initial_phase: str
     terminal_phases: Set[str] = field(default_factory=set)
-    metadata: Dict[str, any] = field(default_factory=dict)
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
     def get_next_transitions(self, current_phase: str) -> List[Transition]:
         """Get possible transitions from current phase, sorted by priority."""
@@ -102,6 +104,7 @@ class WorkflowCompiler:
 
         # Build indexed structures
         agents_map = {agent.name: agent for agent in workflow.agents}
+        channels_map = {channel.name: channel for channel in workflow.channels}
         phases_map = {phase.name: phase for phase in workflow.phases}
         transitions_map: Dict[str, List[Transition]] = {}
 
@@ -118,6 +121,7 @@ class WorkflowCompiler:
 
         return WorkflowGraph(
             agents=agents_map,
+            channels=channels_map,
             phases=phases_map,
             transitions=transitions_map,
             initial_phase=workflow.initial_phase,
@@ -126,13 +130,20 @@ class WorkflowCompiler:
         )
 
     def _validate_unique_names(self, workflow: Workflow) -> None:
-        """Validate that agent and phase names are unique."""
+        """Validate that agent, channel, and phase names are unique."""
         # Check agent names
         agent_names: Set[str] = set()
         for agent in workflow.agents:
             if agent.name in agent_names:
                 self.errors.append(f"Duplicate agent name: '{agent.name}'")
             agent_names.add(agent.name)
+
+        # Check channel names
+        channel_names: Set[str] = set()
+        for channel in workflow.channels:
+            if channel.name in channel_names:
+                self.errors.append(f"Duplicate channel name: '{channel.name}'")
+            channel_names.add(channel.name)
 
         # Check phase names
         phase_names: Set[str] = set()
@@ -142,8 +153,9 @@ class WorkflowCompiler:
             phase_names.add(phase.name)
 
     def _validate_references(self, workflow: Workflow) -> None:
-        """Validate that all agent and phase references exist."""
+        """Validate that all agent, channel, and phase references exist."""
         agent_names = {agent.name for agent in workflow.agents}
+        channel_names = {channel.name for channel in workflow.channels}
         phase_names = {phase.name for phase in workflow.phases}
 
         # Validate phase -> agent references
@@ -152,6 +164,19 @@ class WorkflowCompiler:
                 self.errors.append(
                     f"Phase '{phase.name}' references unknown agent: '{phase.agent}'"
                 )
+
+            # Validate phase -> channel references (consumes/publishes)
+            for channel in phase.consumes:
+                if channel not in channel_names:
+                    self.errors.append(
+                        f"Phase '{phase.name}' consumes unknown channel: '{channel}'"
+                    )
+
+            for channel in phase.publishes:
+                if channel not in channel_names:
+                    self.errors.append(
+                        f"Phase '{phase.name}' publishes to unknown channel: '{channel}'"
+                    )
 
         # Validate transition -> phase references
         for transition in workflow.transitions:

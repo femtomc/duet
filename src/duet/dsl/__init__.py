@@ -6,7 +6,7 @@ Replaces the legacy .duet/prompts/*.md template system with a type-safe,
 composable workflow definition language.
 
 Example:
-    from duet.dsl import Workflow, Agent, Phase, Transition, When
+    from duet.dsl import Workflow, Agent, Channel, Phase, Transition, When
 
     workflow = Workflow(
         agents=[
@@ -14,29 +14,39 @@ Example:
             Agent(name="implementer", provider="claude", model="sonnet"),
             Agent(name="reviewer", provider="codex", model="gpt-5-codex"),
         ],
+        channels=[
+            Channel(name="task", description="Input task specification"),
+            Channel(name="plan", description="Implementation plan from planner"),
+            Channel(name="code", description="Implementation artifacts"),
+            Channel(name="verdict", description="Review outcome"),
+        ],
         phases=[
             Phase(name="plan", agent="planner",
-                  prompt="Draft implementation plan for the task"),
+                  consumes=["task"], publishes=["plan"],
+                  description="Draft implementation plan"),
             Phase(name="implement", agent="implementer",
-                  prompt="Execute the plan and make code changes"),
+                  consumes=["plan"], publishes=["code"],
+                  description="Execute plan and make changes"),
             Phase(name="review", agent="reviewer",
-                  prompt="Review the implementation"),
+                  consumes=["plan", "code"], publishes=["verdict"],
+                  description="Review the implementation"),
             Phase(name="done", agent="reviewer",
-                  prompt="Task complete", is_terminal=True),
+                  description="Task complete", is_terminal=True),
         ],
         transitions=[
             Transition(from_phase="plan", to_phase="implement"),
             Transition(from_phase="implement", to_phase="review"),
             Transition(from_phase="review", to_phase="done",
-                       when=When.verdict("approve")),
+                       when=When.channel_has("verdict", "approve")),
             Transition(from_phase="review", to_phase="plan",
-                       when=When.verdict("changes_requested")),
+                       when=When.channel_has("verdict", "changes_requested")),
         ],
     )
 """
 
 from .workflow import (
     Agent,
+    Channel,
     Guard,
     Phase,
     Transition,
@@ -58,6 +68,7 @@ __all__ = [
     # Core DSL
     "Workflow",
     "Agent",
+    "Channel",
     "Phase",
     "Transition",
     "When",

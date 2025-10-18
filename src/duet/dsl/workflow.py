@@ -263,20 +263,51 @@ class Agent:
 
 
 @dataclass
+class Channel:
+    """
+    Defines a communication channel for message passing between phases.
+
+    Channels are the fundamental unit of communication in the syndicated workspace.
+    Phases consume messages from channels and publish results to channels.
+
+    Attributes:
+        name: Unique channel identifier
+        description: Human-readable description of the channel's purpose
+        initial_value: Optional initial value for the channel
+    """
+
+    name: str
+    description: str = ""
+    initial_value: Any = None
+
+    def __post_init__(self):
+        if not self.name:
+            raise ValueError("Channel name cannot be empty")
+
+
+@dataclass
 class Phase:
     """
-    Defines a workflow phase (plan, implement, review, etc.).
+    Defines a workflow phase with channel-based message passing.
+
+    Phases consume messages from input channels and publish results to output
+    channels, enabling a syndicated workspace model where agents communicate
+    through structured data rather than prompt templates.
 
     Attributes:
         name: Unique phase identifier
         agent: Name of the agent that executes this phase
-        prompt: Prompt template or description
+        consumes: List of channel names this phase reads from
+        publishes: List of channel names this phase writes to
+        description: Human-readable description of what this phase does
         is_terminal: Whether this phase ends the workflow
     """
 
     name: str
     agent: str
-    prompt: str
+    consumes: List[str] = field(default_factory=list)
+    publishes: List[str] = field(default_factory=list)
+    description: str = ""
     is_terminal: bool = False
 
     def __post_init__(self):
@@ -284,8 +315,7 @@ class Phase:
             raise ValueError("Phase name cannot be empty")
         if not self.agent:
             raise ValueError("Phase agent cannot be empty")
-        if not self.prompt:
-            raise ValueError("Phase prompt cannot be empty")
+        # Note: consumes/publishes can be empty for simple phases
 
 
 @dataclass
@@ -317,10 +347,14 @@ class Transition:
 @dataclass
 class Workflow:
     """
-    Top-level workflow definition.
+    Top-level workflow definition with syndicated workspace model.
+
+    Defines agents, channels for message passing, phases that consume/publish
+    to channels, and transitions between phases.
 
     Attributes:
         agents: List of agent definitions
+        channels: List of channel definitions for message passing
         phases: List of phase definitions
         transitions: List of transitions between phases
         initial_phase: Name of the starting phase (defaults to first phase)
@@ -328,6 +362,7 @@ class Workflow:
     """
 
     agents: List[Agent]
+    channels: List[Channel]
     phases: List[Phase]
     transitions: List[Transition]
     initial_phase: Optional[str] = None
@@ -340,6 +375,7 @@ class Workflow:
             raise ValueError("Workflow must have at least one phase")
         if not self.transitions:
             raise ValueError("Workflow must have at least one transition")
+        # Note: channels can be empty for simple workflows
 
         # Validate initial_phase
         if self.initial_phase:
@@ -355,6 +391,13 @@ class Workflow:
         for agent in self.agents:
             if agent.name == name:
                 return agent
+        return None
+
+    def get_channel(self, name: str) -> Optional[Channel]:
+        """Get channel by name."""
+        for channel in self.channels:
+            if channel.name == name:
+                return channel
         return None
 
     def get_phase(self, name: str) -> Optional[Phase]:
