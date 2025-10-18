@@ -134,6 +134,7 @@ def find_config(explicit_path: Optional[Path] = None) -> DuetConfig:
     candidates.extend(
         Path(p).expanduser()
         for p in (
+            "./.duet/duet.yaml",  # Primary location (duet init creates here)
             "./duet.yaml",
             "./duet.yml",
             "./config/duet.yaml",
