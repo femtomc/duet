@@ -274,11 +274,14 @@ class Channel:
         name: Unique channel identifier
         description: Human-readable description of the channel's purpose
         initial_value: Optional initial value for the channel
+        schema: Optional schema/type metadata for validation and persistence
+                Examples: "text", "json", "git_diff", "verdict", "dict", "list"
     """
 
     name: str
     description: str = ""
     initial_value: Any = None
+    schema: Optional[str] = None
 
     def __post_init__(self):
         if not self.name:
