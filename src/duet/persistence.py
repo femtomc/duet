@@ -16,15 +16,7 @@ from .models import Phase, ReviewVerdict, RunSnapshot
 # DATABASE SCHEMA
 # ──────────────────────────────────────────────────────────────────────────────
 
-SCHEMA_VERSION = 2
-
 SCHEMA_DDL = """
--- Schema version tracking
-CREATE TABLE IF NOT EXISTS schema_version (
-    version INTEGER PRIMARY KEY,
-    applied_at TEXT NOT NULL
-);
-
 -- Orchestration runs
 CREATE TABLE IF NOT EXISTS runs (
     run_id TEXT PRIMARY KEY,
@@ -145,75 +137,17 @@ class DuetDatabase:
     def _ensure_schema_on_conn(self, conn: sqlite3.Connection) -> None:
         """Apply schema to a specific connection."""
         conn.executescript(SCHEMA_DDL)
-        conn.execute(
-            "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
-            (SCHEMA_VERSION, dt.datetime.now(dt.timezone.utc).isoformat()),
-        )
         conn.commit()
 
     def _ensure_schema(self) -> None:
-        """
-        Ensure database schema exists and is up to date.
-
-        Applies migrations if schema version is outdated.
-        """
-        # Use direct connection for schema initialization (executescript auto-commits)
+        """Ensure database schema exists (creates all tables if missing)."""
         db_location = str(self.db_path) if isinstance(self.db_path, Path) else self.db_path
         conn = sqlite3.connect(db_location)
-        conn.row_factory = sqlite3.Row
-
         try:
-            # Check if schema_version table exists
-            cursor = conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='schema_version'"
-            )
-            schema_table_exists = cursor.fetchone() is not None
-
-            if not schema_table_exists:
-                # Fresh database - apply full schema
-                conn.executescript(SCHEMA_DDL)
-                conn.execute(
-                    "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
-                    (SCHEMA_VERSION, dt.datetime.now(dt.timezone.utc).isoformat()),
-                )
-                conn.commit()
-            else:
-                # Check current version
-                cursor = conn.execute("SELECT MAX(version) as version FROM schema_version")
-                row = cursor.fetchone()
-                current_version = row["version"] if row else 0
-
-                if current_version < SCHEMA_VERSION:
-                    # Apply migrations (none yet, but framework in place)
-                    self._apply_migrations(conn, current_version, SCHEMA_VERSION)
+            conn.executescript(SCHEMA_DDL)
+            conn.commit()
         finally:
             conn.close()
-
-    def _apply_migrations(self, conn: sqlite3.Connection, from_version: int, to_version: int) -> None:
-        """Apply schema migrations from one version to another."""
-        # Migration to v2: Add events table for streaming support (Sprint 6)
-        if from_version < 2 and to_version >= 2:
-            conn.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS events (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    run_id TEXT NOT NULL,
-                    iteration INTEGER,
-                    phase TEXT,
-                    timestamp TEXT NOT NULL,
-                    event_type TEXT NOT NULL,
-                    payload TEXT NOT NULL,
-                    FOREIGN KEY (run_id) REFERENCES runs(run_id)
-                );
-                CREATE INDEX IF NOT EXISTS idx_events_run_phase ON events(run_id, phase);
-                CREATE INDEX IF NOT EXISTS idx_events_run_iteration ON events(run_id, iteration);
-                """
-            )
-            conn.execute(
-                "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
-                (2, dt.datetime.now(dt.timezone.utc).isoformat()),
-            )
-            conn.commit()
 
     # ──────────────────────────────────────────────────────────────────────────
     # Run Operations

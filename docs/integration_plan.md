@@ -180,11 +180,9 @@ duet inspect run-abc123 --no-events
 }
 ```
 
-### Migration
+### Schema Initialization
 
-Existing databases (schema v1) are automatically migrated to v2 on first access:
-- `events` table is created with indexes
-- `schema_version` table is updated to version 2
-- Existing runs/iterations remain intact (backward compatible)
-
-Fresh databases start at schema v2 directly.
+All tables are created on first database access using `CREATE TABLE IF NOT EXISTS`:
+- Fresh databases get the full schema immediately
+- Existing databases add any missing tables/indexes automatically
+- Simple and idempotent (safe to run multiple times)

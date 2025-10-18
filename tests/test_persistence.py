@@ -42,21 +42,9 @@ def test_schema_creation(in_memory_db):
         )
         tables = [row["name"] for row in cursor.fetchall()]
 
-    assert "schema_version" in tables
     assert "runs" in tables
     assert "iterations" in tables
-
-
-def test_schema_version(in_memory_db):
-    """Test that schema version is recorded."""
-    db = in_memory_db
-
-    with db._conn() as conn:
-        cursor = conn.execute("SELECT version FROM schema_version")
-        version = cursor.fetchone()
-
-    assert version is not None
-    assert version["version"] >= 1
+    assert "events" in tables  # Sprint 6
 
 
 def test_insert_run(in_memory_db):
