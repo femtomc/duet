@@ -1,0 +1,18 @@
+codex:
+  provider: "echo"
+  model: "codex-mock"
+  temperature: 0.2
+
+claude:
+  provider: "echo"
+  model: "claude-mock"
+  temperature: 0.1
+
+workflow:
+  max_iterations: 3
+  require_human_approval: true
+  auto_merge_on_approval: false
+
+storage:
+  workspace_root: "./"
+  run_artifact_dir: "./runs"

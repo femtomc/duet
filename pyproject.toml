@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=65", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "duet"
+version = "0.1.0"
+description = "Workflow orchestrator coordinating Codex and Claude Code automation."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pydantic>=2.6",
+    "rich>=13.7",
+    "typer>=0.12",
+    "pyyaml>=6.0",
+]
+
+[dependency-groups]
+dev = ["pytest>=8.1"]
+
+[project.scripts]
+duet = "duet.cli:app"
+
+[tool.black]
+line-length = 100
+
+[tool.isort]
+profile = "black"
+
+[tool.pytest.ini_options]
+addopts = "-ra"

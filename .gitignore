@@ -1,0 +1,7 @@
+# Environment artifacts
+.venv/
+__pycache__/
+.pytest_cache/
+
+# Local run outputs
+runs/

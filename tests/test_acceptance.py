@@ -1,0 +1,254 @@
+"""
+Acceptance tests for Duet orchestration.
+
+These tests exercise the full orchestration loop using the echo adapter
+to verify state transitions, artifact outputs, and edge case handling.
+"""
+
+from __future__ import annotations
+
+import tempfile
+from pathlib import Path
+
+import pytest
+from rich.console import Console
+
+from duet.artifacts import ArtifactStore
+from duet.config import AssistantConfig, DuetConfig, LoggingConfig, StorageConfig, WorkflowConfig
+from duet.models import Phase
+from duet.orchestrator import Orchestrator
+
+
+@pytest.fixture
+def temp_workspace():
+    """Create a temporary workspace for testing."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        yield Path(tmpdir)
+
+
+@pytest.fixture
+def temp_artifacts_dir():
+    """Create a temporary artifacts directory for testing."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        yield Path(tmpdir)
+
+
+@pytest.fixture
+def echo_config(temp_workspace, temp_artifacts_dir):
+    """Create a test configuration using echo adapters."""
+    return DuetConfig(
+        codex=AssistantConfig(
+            provider="echo",
+            model="echo-v1",
+        ),
+        claude=AssistantConfig(
+            provider="echo",
+            model="echo-v1",
+        ),
+        workflow=WorkflowConfig(
+            max_iterations=3,
+            require_human_approval=False,
+        ),
+        storage=StorageConfig(
+            workspace_root=temp_workspace,
+            run_artifact_dir=temp_artifacts_dir,
+        ),
+        logging=LoggingConfig(
+            enable_jsonl=True,
+            jsonl_dir=temp_artifacts_dir / "logs",
+        ),
+    )
+
+
+def test_basic_orchestration_loop(echo_config, temp_artifacts_dir):
+    """Test that the orchestration loop runs with echo adapters."""
+    console = Console()
+    artifact_store = ArtifactStore(temp_artifacts_dir, console=console)
+    orchestrator = Orchestrator(echo_config, artifact_store, console=console)
+
+    # Run orchestration
+    snapshot = orchestrator.run(run_id="test-basic-run")
+
+    # Assertions
+    assert snapshot.run_id == "test-basic-run"
+    assert snapshot.phase == Phase.BLOCKED  # Echo adapter never sets concluded=True
+    assert snapshot.iteration == 3  # Should hit max iterations
+    assert "Max iterations" in snapshot.notes
+
+    # Verify checkpoint was created
+    checkpoint = artifact_store.load_checkpoint("test-basic-run")
+    assert checkpoint is not None
+    assert checkpoint.run_id == "test-basic-run"
+    assert checkpoint.phase == Phase.BLOCKED
+
+
+def test_artifact_persistence(echo_config, temp_artifacts_dir):
+    """Test that artifacts are persisted correctly."""
+    console = Console()
+    artifact_store = ArtifactStore(temp_artifacts_dir, console=console)
+    orchestrator = Orchestrator(echo_config, artifact_store, console=console)
+
+    snapshot = orchestrator.run(run_id="test-artifacts")
+
+    # Check that iterations were persisted
+    iterations = artifact_store.list_iterations("test-artifacts")
+    assert len(iterations) > 0, "Should have persisted iteration records"
+
+    # Load and verify iteration structure
+    first_iter = artifact_store.load_iteration("test-artifacts", iterations[0])
+    assert "timestamp" in first_iter
+    assert "iteration" in first_iter
+    assert "phase" in first_iter
+    assert "request" in first_iter
+    assert "response" in first_iter
+    assert "decision" in first_iter
+
+    # Verify request structure
+    request = first_iter["request"]
+    assert "role" in request
+    assert "prompt" in request
+    assert "context" in request
+
+    # Verify response structure
+    response = first_iter["response"]
+    assert "content" in response
+    assert "metadata" in response
+
+    # Verify decision structure
+    decision = first_iter["decision"]
+    assert "next_phase" in decision
+    assert "rationale" in decision
+
+
+def test_run_summary_generation(echo_config, temp_artifacts_dir):
+    """Test that run summaries are generated correctly."""
+    console = Console()
+    artifact_store = ArtifactStore(temp_artifacts_dir, console=console)
+    orchestrator = Orchestrator(echo_config, artifact_store, console=console)
+
+    snapshot = orchestrator.run(run_id="test-summary")
+
+    # Verify summary was created
+    summary_path = temp_artifacts_dir / "test-summary" / "summary.json"
+    assert summary_path.exists(), "Summary file should be created"
+
+    # Load and verify summary structure
+    summary = artifact_store.generate_run_summary("test-summary")
+    assert summary["run_id"] == "test-summary"
+    assert "checkpoint" in summary
+    assert "iterations" in summary
+    assert "statistics" in summary
+
+    # Verify statistics
+    stats = summary["statistics"]
+    assert stats["total_iterations"] > 0
+    assert "phase_counts" in stats
+    assert stats["final_phase"] == Phase.BLOCKED.value
+
+
+def test_jsonl_logging(echo_config, temp_artifacts_dir):
+    """Test that JSONL logging works when enabled."""
+    console = Console()
+    artifact_store = ArtifactStore(temp_artifacts_dir, console=console)
+    orchestrator = Orchestrator(echo_config, artifact_store, console=console)
+
+    snapshot = orchestrator.run(run_id="test-logging")
+
+    # Verify JSONL log file was created
+    log_file = temp_artifacts_dir / "logs" / "duet.jsonl"
+    assert log_file.exists(), "JSONL log file should be created"
+
+    # Read and verify log entries
+    import json
+
+    with log_file.open("r") as f:
+        logs = [json.loads(line) for line in f if line.strip()]
+
+    assert len(logs) > 0, "Should have logged events"
+
+    # Verify log structure
+    for log in logs:
+        assert "timestamp" in log
+        assert "event" in log
+        assert "level" in log
+
+    # Verify expected events
+    events = [log["event"] for log in logs]
+    assert "iteration_start" in events
+    assert "state_transition" in events
+    assert "run_complete" in events
+
+
+def test_max_iterations_edge_case(temp_workspace, temp_artifacts_dir):
+    """Test that max iterations limit is enforced."""
+    config = DuetConfig(
+        codex=AssistantConfig(provider="echo", model="echo-v1"),
+        claude=AssistantConfig(provider="echo", model="echo-v1"),
+        workflow=WorkflowConfig(
+            max_iterations=1,  # Only 1 iteration
+            require_human_approval=False,
+        ),
+        storage=StorageConfig(
+            workspace_root=temp_workspace,
+            run_artifact_dir=temp_artifacts_dir,
+        ),
+    )
+
+    console = Console()
+    artifact_store = ArtifactStore(temp_artifacts_dir, console=console)
+    orchestrator = Orchestrator(config, artifact_store, console=console)
+
+    snapshot = orchestrator.run(run_id="test-max-iter")
+
+    assert snapshot.iteration == 1
+    assert snapshot.phase == Phase.BLOCKED
+    assert "Max iterations" in snapshot.notes
+
+
+def test_state_transitions(echo_config, temp_artifacts_dir):
+    """Test that state transitions follow expected flow."""
+    console = Console()
+    artifact_store = ArtifactStore(temp_artifacts_dir, console=console)
+    orchestrator = Orchestrator(echo_config, artifact_store, console=console)
+
+    snapshot = orchestrator.run(run_id="test-transitions")
+
+    # Load iterations and verify phase progression
+    iterations = artifact_store.list_iterations("test-transitions")
+    phases = []
+    for iter_file in iterations:
+        record = artifact_store.load_iteration("test-transitions", iter_file)
+        phases.append(record["phase"])
+
+    # First iteration should be: PLAN
+    # Then each iteration should cycle: PLAN → IMPLEMENT → REVIEW → PLAN (loop)
+    assert phases[0] == "plan", "First phase should be PLAN"
+
+    # Verify we see expected phase transitions
+    assert "plan" in phases
+    assert "implement" in phases
+    assert "review" in phases
+
+
+def test_checkpoint_resumability(echo_config, temp_artifacts_dir):
+    """Test that checkpoints contain sufficient data for resumption."""
+    console = Console()
+    artifact_store = ArtifactStore(temp_artifacts_dir, console=console)
+    orchestrator = Orchestrator(echo_config, artifact_store, console=console)
+
+    snapshot = orchestrator.run(run_id="test-checkpoint")
+
+    # Load checkpoint
+    checkpoint = artifact_store.load_checkpoint("test-checkpoint")
+
+    # Verify checkpoint has required fields for resumption
+    assert checkpoint.run_id == "test-checkpoint"
+    assert checkpoint.iteration >= 0
+    assert checkpoint.phase in [Phase.BLOCKED, Phase.DONE]
+    assert checkpoint.created_at is not None
+    assert "started_at" in checkpoint.metadata
+    assert "completed_at" in checkpoint.metadata
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

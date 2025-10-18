@@ -1,0 +1,111 @@
+"""Configuration models and loader for the Duet orchestrator."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Optional
+
+import yaml
+from pydantic import BaseModel, Field, validator
+
+
+class AssistantConfig(BaseModel):
+    """Adapter configuration for a single assistant provider."""
+
+    provider: str = Field(..., description="Human readable provider name, e.g., codex or claude")
+    model: str = Field(..., description="Model identifier to request from the provider")
+    api_key_env: Optional[str] = Field(
+        None,
+        description=(
+            "Optional environment variable that provides credentials when CLI-based auth is absent"
+        ),
+    )
+    temperature: float = Field(0.0, ge=0.0, le=2.0, description="Default sampling temperature")
+
+
+class WorkflowConfig(BaseModel):
+    """General settings that govern orchestration runs."""
+
+    max_iterations: int = Field(5, ge=1, description="Maximum plan→implement→review loops per run")
+    require_human_approval: bool = Field(
+        True, description="Pause after review and wait for human approval before continuing"
+    )
+    auto_merge_on_approval: bool = Field(
+        False, description="Automatically merge when review passes and guardrails allow"
+    )
+
+
+class LoggingConfig(BaseModel):
+    """Logging and observability settings."""
+
+    enable_jsonl: bool = Field(
+        False, description="Enable JSONL structured logging to file"
+    )
+    jsonl_dir: Path = Field(
+        Path("./logs"), description="Directory for JSONL log files"
+    )
+
+    @validator("jsonl_dir")
+    def _expand_path(cls, value: Path) -> Path:
+        return value.expanduser().resolve()
+
+
+class StorageConfig(BaseModel):
+    """Persistence and artifact storage settings."""
+
+    workspace_root: Path = Field(
+        ..., description="Directory containing the target repository to automate"
+    )
+    run_artifact_dir: Path = Field(
+        Path("./runs"), description="Directory where orchestration artifacts are stored"
+    )
+
+    @validator("workspace_root", "run_artifact_dir")
+    def _expand_path(cls, value: Path) -> Path:
+        return value.expanduser().resolve()
+
+
+class DuetConfig(BaseModel):
+    """Top-level configuration that ties everything together."""
+
+    codex: AssistantConfig
+    claude: AssistantConfig
+    workflow: WorkflowConfig = WorkflowConfig()
+    storage: StorageConfig
+    logging: LoggingConfig = LoggingConfig()
+
+    @classmethod
+    def load(cls, file_path: Path | str) -> "DuetConfig":
+        """Load configuration from a YAML file."""
+        path = Path(file_path)
+        if not path.exists():
+            raise FileNotFoundError(f"Configuration file not found: {path}")
+
+        with path.open("r", encoding="utf-8") as handle:
+            payload = yaml.safe_load(handle) or {}
+        return cls.parse_obj(payload)
+
+
+def find_config(explicit_path: Optional[Path] = None) -> DuetConfig:
+    """Locate and load configuration using precedence rules."""
+    candidates: list[Path] = []
+    if explicit_path:
+        candidates.append(explicit_path)
+    candidates.extend(
+        Path(p).expanduser()
+        for p in (
+            "./duet.yaml",
+            "./duet.yml",
+            "./config/duet.yaml",
+            "./config/duet.yml",
+        )
+    )
+
+    for candidate in candidates:
+        if candidate.exists():
+            return DuetConfig.load(candidate)
+
+    raise FileNotFoundError(
+        "Unable to locate duet configuration file. "
+        "Provide --config Path or create config/duet.yaml."
+    )
