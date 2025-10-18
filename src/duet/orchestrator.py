@@ -28,77 +28,7 @@ from .models import (
     RunSnapshot,
     TransitionDecision,
 )
-
-# ──────────────────────────────────────────────────────────────────────────────
-# STREAMING DISPLAY (Sprint 6)
-# ──────────────────────────────────────────────────────────────────────────────
-
-
-class StreamingDisplay:
-    """
-    Rich Live display for streaming adapter events.
-
-    Shows a rolling log of recent events, phase information, and event counts.
-    """
-
-    def __init__(self, console: Console, phase: Phase, iteration: int, max_events: int = 10):
-        self.console = console
-        self.phase = phase
-        self.iteration = iteration
-        self.max_events = max_events
-        self.events: list[StreamEvent] = []
-        self.event_counts: dict[str, int] = {}
-
-    def add_event(self, event: StreamEvent) -> None:
-        """Add an event to the display."""
-        # Track event type counts
-        event_type = event["event_type"]
-        self.event_counts[event_type] = self.event_counts.get(event_type, 0) + 1
-
-        # Keep only recent events
-        self.events.append(event)
-        if len(self.events) > self.max_events:
-            self.events.pop(0)
-
-    def render(self) -> Panel:
-        """Render the current state as a Rich Panel."""
-        # Build event log
-        log_lines = []
-        for event in self.events[-5:]:  # Show last 5 events
-            event_type = event["event_type"]
-            timestamp = event["timestamp"].strftime("%H:%M:%S")
-
-            # Format event based on type
-            if event_type == "item.completed":
-                item = event["payload"].get("item", {})
-                item_type = item.get("type", "unknown")
-                if item_type == "agent_message":
-                    log_lines.append(f"[cyan]{timestamp}[/] [green]✓[/] Assistant message received")
-                elif item_type == "reasoning":
-                    log_lines.append(f"[cyan]{timestamp}[/] [yellow]…[/] Reasoning...")
-                else:
-                    log_lines.append(f"[cyan]{timestamp}[/] [dim]{item_type}[/]")
-            elif event_type == "turn.completed":
-                usage = event["payload"].get("usage", {})
-                tokens = usage.get("output_tokens", 0)
-                log_lines.append(f"[cyan]{timestamp}[/] [green]✓[/] Turn complete ({tokens} tokens)")
-            elif event_type == "parse_error":
-                log_lines.append(f"[cyan]{timestamp}[/] [red]✗[/] Parse error")
-            elif event_type == "output":
-                log_lines.append(f"[cyan]{timestamp}[/] [dim]Output event[/]")
-            else:
-                log_lines.append(f"[cyan]{timestamp}[/] [dim]{event_type}[/]")
-
-        # Build summary
-        total_events = sum(self.event_counts.values())
-        summary = f"Phase: [bold]{self.phase.value.upper()}[/] | Iteration: {self.iteration} | Events: {total_events}"
-
-        if not log_lines:
-            log_lines.append("[dim]Waiting for events...[/]")
-
-        content = "\n".join([summary, "", *log_lines])
-        return Panel(content, title="[bold cyan]Streaming Output[/]", border_style="cyan")
-
+from .streaming import EnhancedStreamingDisplay
 
 # ──────────────────────────────────────────────────────────────────────────────
 # STATE MACHINE TRANSITION RULES
@@ -338,10 +268,17 @@ class Orchestrator:
             adapter_name = adapter.__class__.__name__
             self.logger.log_adapter_call(snapshot.run_id, iteration, current_phase.value, adapter_name)
 
-            # ──── Streaming Display Setup ────
-            quiet_mode = self.config.logging.quiet
-            streaming_display = None if quiet_mode else StreamingDisplay(
-                self.console, current_phase, iteration
+            # ──── Streaming Display Setup (Sprint 7: EnhancedStreamingDisplay) ────
+            stream_mode = self.config.logging.stream_mode
+            # Handle legacy quiet flag (maps to stream_mode="off")
+            if self.config.logging.quiet:
+                stream_mode = "off"
+
+            streaming_display = None if stream_mode == "off" else EnhancedStreamingDisplay(
+                console=self.console,
+                phase=current_phase,
+                iteration=iteration,
+                mode=stream_mode,
             )
 
             # ──── Create Event Handler for Streaming ────
