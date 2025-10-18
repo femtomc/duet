@@ -147,11 +147,16 @@ def status(
 
 @app.command()
 def history(
-    phase: Optional[str] = typer.Option(None, help="Filter by phase (plan/implement/review/done/blocked)"),
+    phase: Optional[str] = typer.Option(None, "--phase", help="Filter by phase (plan/implement/review/done/blocked)"),
+    verdict: Optional[str] = typer.Option(None, "--verdict", help="Filter by review verdict (approve/changes_requested/blocked)"),
+    since: Optional[str] = typer.Option(None, "--since", help="Filter runs created after this date (ISO format: YYYY-MM-DD)"),
+    until: Optional[str] = typer.Option(None, "--until", help="Filter runs created before this date (ISO format: YYYY-MM-DD)"),
+    contains: Optional[str] = typer.Option(None, "--contains", help="Search for text in run notes"),
     limit: int = typer.Option(20, help="Maximum number of runs to display"),
+    format: Optional[str] = typer.Option(None, "--format", help="Output format: json for machine-readable export"),
     config: Optional[Path] = typer.Option(None, "--config", "-c", help="Config file path."),
 ) -> None:
-    """List recent orchestration runs."""
+    """List recent orchestration runs with advanced filtering."""
     from rich.table import Table
 
     duet_config = find_config(config)
@@ -164,12 +169,45 @@ def history(
         return
 
     db = DuetDatabase(db_path)
-    runs = db.list_runs(phase=phase, limit=limit)
+
+    # Use search_runs for advanced filtering
+    runs = db.search_runs(
+        phase=phase,
+        date_from=since,
+        date_to=until,
+        run_id_prefix=None,
+        limit=limit,
+    )
+
+    # Additional filtering (verdict, contains) in Python
+    if verdict:
+        # Filter by verdict - need to check iterations for review verdicts
+        filtered_runs = []
+        for run in runs:
+            iterations = db.list_iterations(run["run_id"])
+            has_verdict = any(
+                it.get("verdict") and verdict.lower() in it["verdict"].lower()
+                for it in iterations
+            )
+            if has_verdict:
+                filtered_runs.append(run)
+        runs = filtered_runs
+
+    if contains:
+        # Filter by text in notes
+        runs = [r for r in runs if r.get("notes") and contains.lower() in r["notes"].lower()]
 
     if not runs:
-        console.print("[yellow]No runs found in database.[/]")
+        console.print("[yellow]No runs found matching filters.[/]")
         return
 
+    # JSON export mode
+    if format == "json":
+        import json
+        console.print_json(data=runs)
+        return
+
+    # Display as table
     table = Table(title=f"Recent Runs (limit={limit})")
     table.add_column("Run ID", style="cyan")
     table.add_column("Phase", style="magenta")
@@ -191,13 +229,15 @@ def history(
         )
 
     console.print(table)
-    console.print(f"\n[dim]Showing {len(runs)} of {limit} runs[/]")
+    console.print(f"\n[dim]Showing {len(runs)} runs (after filters)[/]")
 
 
 @app.command()
 def inspect(
     run_id: str = typer.Argument(..., help="Run ID to inspect"),
     config: Optional[Path] = typer.Option(None, "--config", "-c", help="Config file path."),
+    show_events: bool = typer.Option(True, "--show-events/--no-events", help="Display streaming events (Sprint 6)."),
+    output: Optional[str] = typer.Option(None, "--output", help="Output format: json for structured export."),
 ) -> None:
     """Display detailed per-iteration information for a run."""
     from rich.panel import Panel
@@ -219,6 +259,22 @@ def inspect(
         console.print(f"[red]Run not found: {run_id}[/]")
         raise typer.Exit(1)
 
+    # Get iterations and events
+    iterations = db.list_iterations(run_id)
+    events = db.list_events(run_id) if show_events else []
+
+    # JSON export mode
+    if output == "json":
+        import json
+        export_data = {
+            "run": run,
+            "iterations": iterations,
+            "events": events if show_events else [],
+            "statistics": db.get_run_statistics(run_id),
+        }
+        console.print_json(data=export_data)
+        return
+
     # Display run overview
     console.print(Panel(f"[bold cyan]Run: {run_id}[/]", expand=False))
     console.print(f"[bold]Phase:[/] {run['phase'].upper()}")
@@ -237,7 +293,6 @@ def inspect(
         console.print(f"  Cached Tokens: {stats['total_cached_tokens']:,}")
 
     # Display iteration details
-    iterations = db.list_iterations(run_id)
     if iterations:
         console.print(f"\n[bold]Iterations:[/] {len(iterations)}")
         table = Table()
@@ -269,6 +324,44 @@ def inspect(
             )
 
         console.print(table)
+
+    # Display streaming events (Sprint 6)
+    if show_events and events:
+        console.print(f"\n[bold]Streaming Events:[/] {len(events)}")
+
+        # Group events by iteration/phase
+        from collections import defaultdict
+        events_by_iter = defaultdict(list)
+        for event in events:
+            key = (event.get("iteration"), event.get("phase"))
+            events_by_iter[key].append(event)
+
+        # Display events grouped by iteration/phase
+        for (iter_num, phase), iter_events in sorted(events_by_iter.items()):
+            header = f"Iteration {iter_num} - {phase.upper() if phase else 'N/A'}"
+            console.print(f"\n[cyan]{header}[/] ({len(iter_events)} events)")
+
+            # Show sample of events (first 10)
+            for event in iter_events[:10]:
+                timestamp = event["timestamp"][:19] if event.get("timestamp") else "N/A"
+                event_type = event["event_type"]
+
+                # Format based on event type
+                if event_type == "item.completed":
+                    item_type = event["payload"].get("item", {}).get("type", "unknown")
+                    console.print(f"  [dim]{timestamp}[/] [green]✓[/] {event_type} ({item_type})")
+                elif event_type == "turn.completed":
+                    tokens = event["payload"].get("usage", {}).get("output_tokens", 0)
+                    console.print(f"  [dim]{timestamp}[/] [green]✓[/] {event_type} ({tokens} tokens)")
+                elif event_type == "parse_error":
+                    console.print(f"  [dim]{timestamp}[/] [red]✗[/] {event_type}")
+                else:
+                    console.print(f"  [dim]{timestamp}[/] {event_type}")
+
+            if len(iter_events) > 10:
+                console.print(f"  [dim]... and {len(iter_events) - 10} more events[/]")
+    elif show_events and not events:
+        console.print("\n[dim]No streaming events recorded for this run[/]")
 
 
 @app.command()
