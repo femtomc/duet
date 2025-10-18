@@ -151,6 +151,102 @@ workflow:
 
 ---
 
+## Streaming API (Sprint 6)
+
+Starting in Sprint 6, all adapters implement a **streaming interface** that provides real-time event feedback during execution:
+
+### Interface
+
+```python
+from .base import AssistantAdapter, StreamEvent
+
+class MyAdapter(AssistantAdapter):
+    def stream(
+        self,
+        request: AssistantRequest,
+        on_event: Optional[Callable[[StreamEvent], None]] = None,
+    ) -> AssistantResponse:
+        """
+        Execute request with streaming support.
+
+        Args:
+            request: The assistant request to process
+            on_event: Optional callback invoked for each streaming event
+
+        Returns:
+            Final AssistantResponse after stream completes
+        """
+        # Implementation uses subprocess.Popen to read stdout line-by-line
+        # Calls on_event(stream_event) for each event
+        # Returns final AssistantResponse with metadata
+```
+
+### StreamEvent Structure
+
+```python
+class StreamEvent(TypedDict):
+    event_type: str                    # Event category
+    payload: Dict[str, Any]            # Event-specific data
+    timestamp: datetime.datetime       # When event occurred
+```
+
+### Event Types
+
+**Codex Adapter** (JSONL streaming):
+- `thread.started` - Execution thread initialized
+- `turn.started` - Turn beginning
+- `item.completed` - Item finished (reasoning, tool_use, agent_message)
+- `turn.completed` - Turn finished with usage metadata
+- `parse_error` - Malformed JSON line encountered
+
+**Claude Code Adapter** (JSON/JSONL):
+- `output` - Generic output event
+- `result` - Final result event
+- `parse_error` - JSON parsing failure
+
+**Echo Adapter**:
+- `echo` - Simple echo event with prompt metadata
+
+### Timeout Protection
+
+All streaming adapters use **background threads** with timeout polling to prevent hung CLIs:
+
+```python
+# Reader thread reads stdout line-by-line
+def reader_thread():
+    for line in process.stdout:
+        line_queue.put(("line", line))
+
+# Main thread polls with timeout protection
+start_time = time.time()
+while True:
+    if time.time() - start_time > self.timeout:
+        process.kill()
+        raise TimeoutError
+
+    msg_type, data = line_queue.get(timeout=1.0)
+    # Process events...
+```
+
+This ensures:
+- Hung CLIs are always terminated after configured timeout
+- Streaming events are processed in real-time
+- No blocking I/O prevents timeout detection
+
+### Backward Compatibility
+
+The `generate()` method is now a wrapper around `stream()`:
+
+```python
+def generate(self, request: AssistantRequest) -> AssistantResponse:
+    """Non-streaming wrapper for backward compatibility."""
+    return self.stream(request, on_event=None)
+```
+
+Existing code using `generate()` continues to work without modification, but streaming events are not exposed.
+
+---
+
 ## Implementing Custom Adapters
 
 To implement a custom adapter:
@@ -160,8 +256,11 @@ To implement a custom adapter:
 ```python
 """My custom adapter."""
 
+import datetime
+from typing import Callable, Optional
+
 from ..models import AssistantRequest, AssistantResponse
-from .base import AssistantAdapter, register_adapter
+from .base import AssistantAdapter, StreamEvent, register_adapter
 
 
 @register_adapter("my-adapter")
@@ -176,14 +275,38 @@ class MyAdapter(AssistantAdapter):
         self.model = kwargs.get("model", "default-model")
         self.timeout = kwargs.get("timeout", 300)
 
-    def generate(self, request: AssistantRequest) -> AssistantResponse:
-        # Your implementation here
+    def stream(
+        self,
+        request: AssistantRequest,
+        on_event: Optional[Callable[[StreamEvent], None]] = None,
+    ) -> AssistantResponse:
+        """Implement streaming interface (Sprint 6)."""
+        # Emit start event
+        if on_event:
+            on_event({
+                "event_type": "adapter.started",
+                "payload": {"model": self.model},
+                "timestamp": datetime.datetime.now(datetime.timezone.utc),
+            })
+
+        # Your implementation here (e.g., subprocess.Popen, API calls, etc.)
         content = f"Response to: {request.prompt}"
+
+        # Emit completion event
+        if on_event:
+            on_event({
+                "event_type": "adapter.completed",
+                "payload": {"content_length": len(content)},
+                "timestamp": datetime.datetime.now(datetime.timezone.utc),
+            })
+
         return AssistantResponse(
             content=content,
             concluded=False,
             metadata={"adapter": self.name}
         )
+
+    # generate() is auto-provided by base class as wrapper around stream()
 ```
 
 2. **Register the adapter** by importing it in `src/duet/adapters/__init__.py`:
