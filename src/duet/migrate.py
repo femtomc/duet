@@ -82,7 +82,7 @@ class ArtifactMigrator:
 
         # Summary
         self.console.print()
-        self.console.print(f"[green bold]✓ Migration complete[/]")
+        self.console.print(f"[green bold]Migration complete[/]")
         self.console.print(f"  Migrated: {migrated}")
         self.console.print(f"  Skipped: {skipped}")
         if errors > 0:

@@ -66,10 +66,11 @@ def run(
     duet_config = find_config(config)
     artifact_store = ArtifactStore(duet_config.storage.run_artifact_dir, console=console)
 
-    # Initialize database if .duet/duet.db exists
+    # Initialize database if duet.db exists
+    # DB is in parent of run_artifact_dir (e.g., .duet/runs -> .duet/duet.db)
     db = None
-    db_path = duet_config.storage.workspace_root / ".duet" / "duet.db"
-    if db_path.exists() and db_path.stat().st_size > 0:  # Non-empty DB file
+    db_path = Path(duet_config.storage.run_artifact_dir).parent / "duet.db"
+    if db_path.exists():
         db = DuetDatabase(db_path)
         console.log("[dim]Using SQLite database for persistence[/]")
 
@@ -147,40 +148,42 @@ def history(
 
     duet_config = find_config(config)
 
-    # Try to use database if available
-    db_path = duet_config.storage.workspace_root / ".duet" / "duet.db"
-    if db_path.exists() and db_path.stat().st_size > 0:
-        db = DuetDatabase(db_path)
-        runs = db.list_runs(phase=phase, limit=limit)
-
-        if not runs:
-            console.print("[yellow]No runs found in database.[/]")
-            return
-
-        table = Table(title=f"Recent Runs (limit={limit})")
-        table.add_column("Run ID", style="cyan")
-        table.add_column("Phase", style="magenta")
-        table.add_column("Iteration", justify="right")
-        table.add_column("Started", style="dim")
-        table.add_column("Status", style="green")
-
-        for run in runs:
-            status_emoji = "✓" if run["phase"] == "done" else ("⚠" if run["phase"] == "blocked" else "→")
-            completed = "Done" if run["completed_at"] else "In Progress"
-
-            table.add_row(
-                run["run_id"],
-                run["phase"].upper(),
-                str(run["iteration"]),
-                run["started_at"][:19] if run["started_at"] else "N/A",
-                f"{status_emoji} {completed}",
-            )
-
-        console.print(table)
-        console.print(f"\n[dim]Showing {len(runs)} of {limit} runs[/]")
-    else:
+    # Derive database path from run_artifact_dir
+    db_path = Path(duet_config.storage.run_artifact_dir).parent / "duet.db"
+    if not db_path.exists():
         console.print("[yellow]Database not found. Initialize with: uv run duet init[/]")
         console.print("[dim]Or use: uv run duet summary <run-id> for filesystem-based history[/]")
+        return
+
+    db = DuetDatabase(db_path)
+    runs = db.list_runs(phase=phase, limit=limit)
+
+    if not runs:
+        console.print("[yellow]No runs found in database.[/]")
+        return
+
+    table = Table(title=f"Recent Runs (limit={limit})")
+    table.add_column("Run ID", style="cyan")
+    table.add_column("Phase", style="magenta")
+    table.add_column("Iteration", justify="right")
+    table.add_column("Started", style="dim")
+    table.add_column("Status", style="green")
+
+    for run in runs:
+        # No emoji - use text labels
+        status_label = "DONE" if run["phase"] == "done" else ("BLOCKED" if run["phase"] == "blocked" else "RUNNING")
+        completed = "Complete" if run["completed_at"] else "In Progress"
+
+        table.add_row(
+            run["run_id"],
+            run["phase"].upper(),
+            str(run["iteration"]),
+            run["started_at"][:19] if run["started_at"] else "N/A",
+            f"{status_label}: {completed}",
+        )
+
+    console.print(table)
+    console.print(f"\n[dim]Showing {len(runs)} of {limit} runs[/]")
 
 
 @app.command()
@@ -194,9 +197,9 @@ def inspect(
 
     duet_config = find_config(config)
 
-    # Try to use database
-    db_path = duet_config.storage.workspace_root / ".duet" / "duet.db"
-    if not db_path.exists() or db_path.stat().st_size == 0:
+    # Derive database path from run_artifact_dir
+    db_path = Path(duet_config.storage.run_artifact_dir).parent / "duet.db"
+    if not db_path.exists():
         console.print("[yellow]Database not found. Use: uv run duet summary <run-id>[/]")
         raise typer.Exit(1)
 
@@ -325,18 +328,14 @@ def migrate(
     """Migrate filesystem artifacts to SQLite database."""
     duet_config = find_config(config)
 
-    # Check if database exists
-    db_path = duet_config.storage.workspace_root / ".duet" / "duet.db"
+    # Derive database path from run_artifact_dir
+    db_path = Path(duet_config.storage.run_artifact_dir).parent / "duet.db"
     if not db_path.exists():
         console.print("[red]Database not found. Initialize with: uv run duet init[/]")
         raise typer.Exit(1)
 
-    if db_path.stat().st_size == 0:
-        console.print("[yellow]Database is empty (placeholder file). Initializing schema...[/]")
-        db = DuetDatabase(db_path)
-        console.print("[green]Schema initialized.[/]")
-    else:
-        db = DuetDatabase(db_path)
+    # Initialize database (schema auto-created if needed)
+    db = DuetDatabase(db_path)
 
     artifact_store = ArtifactStore(duet_config.storage.run_artifact_dir, console=console)
     migrator = ArtifactMigrator(artifact_store, db, console=console)
@@ -348,4 +347,4 @@ def migrate(
     migrator.migrate_all(force=force)
 
     console.print()
-    console.print("[green]✓ Migration complete. Use 'duet history' to view runs.[/]")
+    console.print("[green]Migration complete. Use 'duet history' to view runs.[/]")
