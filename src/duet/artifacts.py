@@ -64,9 +64,11 @@ class ArtifactStore:
 
         Filename format: iterations/iter-{iteration:03d}-{phase}-{timestamp}.json
         """
-        timestamp = dt.datetime.now(dt.timezone.utc).isoformat()
+        now = dt.datetime.now(dt.timezone.utc)
+        timestamp_iso = now.isoformat()  # For record data
+        timestamp_safe = now.strftime("%Y%m%dT%H%M%S%fZ")  # For filename (Windows-safe)
         record = {
-            "timestamp": timestamp,
+            "timestamp": timestamp_iso,
             "iteration": iteration,
             "phase": phase.value,
             "request": request.dict(),
@@ -79,7 +81,7 @@ class ArtifactStore:
         if summary:
             record["summary"] = summary
 
-        filename = f"iterations/iter-{iteration:03d}-{phase.value}-{timestamp}.json"
+        filename = f"iterations/iter-{iteration:03d}-{phase.value}-{timestamp_safe}.json"
         self.write_json(run_id, filename, record)
 
     def list_iterations(self, run_id: str) -> list[Path]:

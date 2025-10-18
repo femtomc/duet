@@ -3,5 +3,13 @@
 __pycache__/
 .pytest_cache/
 
+# Build artifacts
+*.egg-info/
+dist/
+build/
+*.pyc
+*.pyo
+
 # Local run outputs
 runs/
+logs/

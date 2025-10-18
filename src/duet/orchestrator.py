@@ -431,14 +431,16 @@ class Orchestrator:
     def _persist_interaction(
         self, run_id: str, phase: Phase, request: AssistantRequest, response: AssistantResponse
     ) -> None:
-        timestamp = dt.datetime.now(dt.timezone.utc).isoformat()
+        now = dt.datetime.now(dt.timezone.utc)
+        timestamp_iso = now.isoformat()  # For payload
+        timestamp_safe = now.strftime("%Y%m%dT%H%M%S%fZ")  # For filename (Windows-safe)
         payload = {
             "phase": phase.value,
-            "timestamp": timestamp,
+            "timestamp": timestamp_iso,
             "request": request.dict(),
             "response": response.dict(),
         }
-        filename = f"{timestamp}-{phase.value}.json"
+        filename = f"{timestamp_safe}-{phase.value}.json"
         self.artifacts.write_json(run_id, f"interactions/{filename}", payload)
 
     def _derive_run_id(self) -> str:
