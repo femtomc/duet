@@ -995,14 +995,18 @@ class Orchestrator:
                     # Create initial state
                     state_id = f"{run_id}-plan-ready"
                     baseline = None
-                    initial_metadata = None
+                    initial_metadata = {}
                     if self.git.is_git_repo():
                         try:
                             baseline_info = self.git.create_state_baseline(state_id)
                             baseline = baseline_info["commit"]
-                            initial_metadata = baseline_info
+                            initial_metadata.update(baseline_info)
                         except GitError:
                             pass
+
+                    # Add initial channel snapshot (Sprint 10)
+                    if self.workflow_executor:
+                        initial_metadata["channel_snapshot"] = self.workflow_executor.get_current_channels()
 
                     self.db.insert_state(
                         state_id=state_id,
@@ -1010,10 +1014,17 @@ class Orchestrator:
                         phase_status="plan-ready",
                         baseline_commit=baseline,
                         notes="Initial state",
-                        metadata=initial_metadata,
+                        metadata=initial_metadata if initial_metadata else None,
                     )
                     self.db.update_active_state(run_id, state_id)
                     active_state = self.db.get_state(state_id)
+
+            # Restore channel snapshot if available (Sprint 10)
+            if self.workflow_executor and active_state.get("metadata"):
+                channel_snapshot = active_state["metadata"].get("channel_snapshot")
+                if channel_snapshot:
+                    self.workflow_executor.restore_channels(channel_snapshot)
+                    self.console.log(f"[dim]Restored channel snapshot:[/] {len(channel_snapshot)} channels")
 
             snapshot = RunSnapshot(
                 run_id=run_id,
@@ -1046,14 +1057,18 @@ class Orchestrator:
             # Create initial state
             state_id = f"{run_id}-plan-ready"
             baseline = None
-            initial_metadata = None
+            initial_metadata = {}
             if self.git.is_git_repo():
                 try:
                     baseline_info = self.git.create_state_baseline(state_id)
                     baseline = baseline_info["commit"]
-                    initial_metadata = baseline_info
+                    initial_metadata.update(baseline_info)
                 except GitError:
                     pass
+
+            # Add initial channel snapshot (Sprint 10)
+            if self.workflow_executor:
+                initial_metadata["channel_snapshot"] = self.workflow_executor.get_current_channels()
 
             self.db.insert_state(
                 state_id=state_id,
@@ -1061,7 +1076,7 @@ class Orchestrator:
                 phase_status="plan-ready",
                 baseline_commit=baseline,
                 notes="Initial state",
-                metadata=initial_metadata,
+                metadata=initial_metadata if initial_metadata else None,
             )
             self.db.update_active_state(run_id, state_id)
             active_state = self.db.get_state(state_id)
@@ -1239,15 +1254,21 @@ class Orchestrator:
 
         # Create git baseline if needed
         baseline = active_state.get("baseline_commit")
-        state_metadata = None
+        state_metadata = {}
         if self.git.is_git_repo():
             try:
                 baseline_info = self.git.create_state_baseline(new_state_id)
                 baseline = baseline_info["commit"]
                 # Store full baseline info (branch, state_branch, clean) for duet back
-                state_metadata = baseline_info
+                state_metadata.update(baseline_info)
             except GitError as exc:
                 self.console.log(f"[yellow]Git baseline creation failed: {exc}[/]")
+
+        # Add channel snapshot to state metadata (Sprint 10)
+        if self.workflow_executor:
+            channel_snapshot = self.workflow_executor.get_current_channels()
+            state_metadata["channel_snapshot"] = channel_snapshot
+            self.console.log(f"[dim]Saved channel snapshot:[/] {len(channel_snapshot)} channels")
 
         self.db.insert_state(
             state_id=new_state_id,
@@ -1258,7 +1279,7 @@ class Orchestrator:
             notes=decision.rationale,
             verdict=response.verdict.value if response.verdict else None,
             feedback=feedback,
-            metadata=state_metadata,  # Preserve branch info for restoration
+            metadata=state_metadata if state_metadata else None,
         )
         self.db.update_active_state(run_id, new_state_id)
 
