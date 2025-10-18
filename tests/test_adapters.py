@@ -86,16 +86,23 @@ def test_codex_adapter_success_response():
     adapter = CodexAdapter(model="gpt-4")
     request = AssistantRequest(role="planner", prompt="Create a plan")
 
-    # Mock subprocess.run with JSONL output (one JSON object per line)
+    # Mock subprocess.run with JSONL output (actual Codex event structure)
     mock_result = Mock()
     mock_result.returncode = 0
-    # Simulate Codex JSONL stream with multiple events
+    # Simulate Codex JSONL stream with actual event types
     mock_result.stdout = "\n".join(
         [
-            json.dumps({"type": "session_start", "session_id": "abc123"}),
-            json.dumps({"type": "message", "role": "user", "content": "Create a plan"}),
-            json.dumps({"type": "message", "role": "assistant", "content": "Here is the plan..."}),
-            json.dumps({"type": "usage", "input_tokens": 10, "output_tokens": 20}),
+            json.dumps({"type": "thread.started", "thread_id": "abc123"}),
+            json.dumps({"type": "turn.started"}),
+            json.dumps(
+                {"type": "item.completed", "item": {"id": "item_0", "type": "reasoning", "text": "Thinking..."}}
+            ),
+            json.dumps(
+                {"type": "item.completed", "item": {"id": "item_1", "type": "agent_message", "text": "Here is the plan..."}}
+            ),
+            json.dumps(
+                {"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 20, "cached_input_tokens": 0}}
+            ),
         ]
     )
     mock_result.stderr = ""
@@ -107,7 +114,7 @@ def test_codex_adapter_success_response():
     assert response.concluded is False
     assert response.metadata["adapter"] == "codex"
     assert response.metadata["model"] == "gpt-4"
-    assert response.metadata["stream_events"] == 4
+    assert response.metadata["stream_events"] == 5
     assert response.metadata["input_tokens"] == 10
     assert response.metadata["output_tokens"] == 20
 
@@ -122,9 +129,11 @@ def test_codex_adapter_jsonl_partial_lines():
     mock_result.returncode = 0
     mock_result.stdout = "\n".join(
         [
-            json.dumps({"type": "session_start", "session_id": "xyz"}),
+            json.dumps({"type": "thread.started", "thread_id": "xyz"}),
             "{invalid json line",  # Invalid JSON
-            json.dumps({"type": "message", "role": "assistant", "content": "Valid response"}),
+            json.dumps(
+                {"type": "item.completed", "item": {"type": "agent_message", "text": "Valid response"}}
+            ),
         ]
     )
     mock_result.stderr = ""
@@ -134,7 +143,7 @@ def test_codex_adapter_jsonl_partial_lines():
 
     # Should successfully extract message despite invalid line
     assert response.content == "Valid response"
-    assert "parse_error" in [e.get("type") for e in response.metadata.get("event_types", [])]
+    assert "parse_error" in metadata["event_types"] for metadata in [response.metadata]
 
 
 def test_codex_adapter_cli_failure():
@@ -191,14 +200,15 @@ def test_codex_adapter_no_assistant_message():
     adapter = CodexAdapter(model="gpt-4")
     request = AssistantRequest(role="planner", prompt="Test")
 
-    # Mock JSONL with events but no assistant message
+    # Mock JSONL with events but no agent_message
     mock_result = Mock()
     mock_result.returncode = 0
     mock_result.stdout = "\n".join(
         [
-            json.dumps({"type": "session_start", "session_id": "abc"}),
-            json.dumps({"type": "message", "role": "user", "content": "Test"}),
-            # No assistant message
+            json.dumps({"type": "thread.started", "thread_id": "abc"}),
+            json.dumps({"type": "turn.started"}),
+            json.dumps({"type": "turn.completed", "usage": {}}),
+            # No item.completed with type=agent_message
         ]
     )
     mock_result.stderr = ""
@@ -215,14 +225,25 @@ def test_codex_adapter_tool_usage_metadata():
     adapter = CodexAdapter(model="gpt-4")
     request = AssistantRequest(role="planner", prompt="Test")
 
-    # Mock JSONL with tool usage events
+    # Mock JSONL with actual Codex structure including usage
     mock_result = Mock()
     mock_result.returncode = 0
     mock_result.stdout = "\n".join(
         [
-            json.dumps({"type": "message", "role": "assistant", "content": "Using tools..."}),
-            json.dumps({"type": "tool_use", "tool_name": "bash"}),
-            json.dumps({"type": "tool_use", "tool_name": "read_file"}),
+            json.dumps({"type": "thread.started", "thread_id": "test-thread"}),
+            json.dumps(
+                {"type": "item.completed", "item": {"type": "agent_message", "text": "Response with metadata"}}
+            ),
+            json.dumps(
+                {
+                    "type": "turn.completed",
+                    "usage": {
+                        "input_tokens": 100,
+                        "output_tokens": 50,
+                        "cached_input_tokens": 20,
+                    },
+                }
+            ),
         ]
     )
     mock_result.stderr = ""
@@ -230,9 +251,11 @@ def test_codex_adapter_tool_usage_metadata():
     with patch("subprocess.run", return_value=mock_result):
         response = adapter.generate(request)
 
-    assert response.content == "Using tools..."
-    assert "tool_calls" in response.metadata
-    assert response.metadata["tool_calls"] == ["bash", "read_file"]
+    assert response.content == "Response with metadata"
+    assert response.metadata["input_tokens"] == 100
+    assert response.metadata["output_tokens"] == 50
+    assert response.metadata["cached_input_tokens"] == 20
+    assert response.metadata["thread_id"] == "test-thread"
 
 
 def test_codex_adapter_cli_not_found():

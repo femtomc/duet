@@ -54,7 +54,8 @@ class CodexAdapter(AssistantAdapter):
         """
         try:
             # Invoke Codex CLI with JSON output
-            # Format: codex exec --json --model <model> --ask-for-approval never --sandbox read-only <prompt>
+            # Format: codex exec --json --model <model> <prompt>
+            # Note: exec mode doesn't support --ask-for-approval, --sandbox, etc.
             result = subprocess.run(
                 [
                     self.cli_path,
@@ -62,11 +63,6 @@ class CodexAdapter(AssistantAdapter):
                     "--json",  # JSONL streaming output
                     "--model",
                     self.model,
-                    "--ask-for-approval",
-                    "never",
-                    "--sandbox",
-                    "read-only",
-                    "--skip-git-repo-check",
                     request.prompt,  # Positional argument
                 ],
                 capture_output=True,
@@ -99,29 +95,25 @@ class CodexAdapter(AssistantAdapter):
                 event_type = event.get("type")
                 metadata["event_types"].append(event_type)
 
-                # Extract assistant message from message events
-                if event_type == "message":
-                    role = event.get("role")
-                    content = event.get("content")
-                    if role == "assistant" and content:
-                        assistant_message = content
+                # Extract assistant message from item.completed events with type=agent_message
+                if event_type == "item.completed":
+                    item = event.get("item", {})
+                    if item.get("type") == "agent_message":
+                        text = item.get("text")
+                        if text:
+                            assistant_message = text
 
-                # Extract usage/token metadata
-                if event_type == "usage" or "usage" in event:
-                    usage = event.get("usage", event)
+                # Extract usage/token metadata from turn.completed
+                if event_type == "turn.completed" and "usage" in event:
+                    usage = event["usage"]
                     metadata["tokens"] = usage
                     metadata["input_tokens"] = usage.get("input_tokens")
                     metadata["output_tokens"] = usage.get("output_tokens")
+                    metadata["cached_input_tokens"] = usage.get("cached_input_tokens")
 
-                # Extract tool usage
-                if event_type == "tool_use":
-                    if "tool_calls" not in metadata:
-                        metadata["tool_calls"] = []
-                    metadata["tool_calls"].append(event.get("tool_name"))
-
-                # Preserve session info
-                if "session_id" in event:
-                    metadata["session_id"] = event["session_id"]
+                # Preserve thread/session info
+                if "thread_id" in event:
+                    metadata["thread_id"] = event["thread_id"]
 
             if not assistant_message:
                 raise CodexError(
