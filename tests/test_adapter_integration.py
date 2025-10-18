@@ -7,6 +7,7 @@ orchestration loop, using mocked CLI responses.
 
 from __future__ import annotations
 
+import io
 import json
 import tempfile
 from pathlib import Path
@@ -18,6 +19,22 @@ from rich.console import Console
 from duet.artifacts import ArtifactStore
 from duet.config import AssistantConfig, DuetConfig, StorageConfig, WorkflowConfig
 from duet.orchestrator import Orchestrator
+
+
+def mock_popen_jsonl(stdout_lines: list[str], returncode: int = 0):
+    """Create mock Popen for JSONL streaming."""
+    mock_process = Mock()
+    mock_process.stdout = iter(stdout_lines)
+    mock_process.stderr = io.StringIO("")
+    mock_process.returncode = returncode
+    mock_process.wait = Mock(return_value=returncode)
+    mock_process.poll = Mock(return_value=returncode)
+    mock_process.kill = Mock()
+    mock_process.communicate = Mock(return_value=("", ""))
+    # Support context manager protocol (for subprocess.run compatibility)
+    mock_process.__enter__ = Mock(return_value=mock_process)
+    mock_process.__exit__ = Mock(return_value=None)
+    return mock_process
 
 
 @pytest.fixture
@@ -49,20 +66,18 @@ def test_orchestration_with_codex_adapter(temp_workspace, temp_artifacts_dir):
     artifact_store = ArtifactStore(temp_artifacts_dir, console=console)
     orchestrator = Orchestrator(config, artifact_store, console=console)
 
-    # Mock Codex CLI response (JSONL format)
-    mock_result = Mock()
-    mock_result.returncode = 0
-    mock_result.stdout = "\n".join([
-        json.dumps({"type": "thread.started", "thread_id": "test"}),
+    # Mock Codex CLI response (JSONL format) for Popen
+    stdout_lines = [
+        json.dumps({"type": "thread.started", "thread_id": "test"}) + "\n",
         json.dumps({"type": "item.completed", "item": {
             "type": "agent_message",
             "text": "Plan: Implement the feature step by step..."
-        }}),
-        json.dumps({"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 20}})
-    ])
-    mock_result.stderr = ""
+        }}) + "\n",
+        json.dumps({"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 20}}) + "\n",
+    ]
+    mock_process = mock_popen_jsonl(stdout_lines, returncode=0)
 
-    with patch("subprocess.run", return_value=mock_result):
+    with patch("subprocess.Popen", return_value=mock_process):
         snapshot = orchestrator.run(run_id="test-codex-integration")
 
     # Verify orchestration completed
@@ -89,20 +104,17 @@ def test_orchestration_with_claude_code_adapter(temp_workspace, temp_artifacts_d
     artifact_store = ArtifactStore(temp_artifacts_dir, console=console)
     orchestrator = Orchestrator(config, artifact_store, console=console)
 
-    # Mock Claude Code CLI response
-    mock_result = Mock()
-    mock_result.returncode = 0
-    mock_result.stdout = json.dumps(
-        {
-            "content": "Implementation complete. Modified 3 files.",
-            "concluded": False,
-            "files_modified": ["src/main.py", "src/utils.py", "tests/test_main.py"],
-            "commands_executed": ["pytest"],
-        }
-    )
-    mock_result.stderr = ""
+    # Mock Claude Code CLI response (JSON format) for Popen
+    json_response = json.dumps({
+        "result": "Implementation complete. Modified 3 files.",
+        "concluded": False,
+        "files_modified": ["src/main.py", "src/utils.py", "tests/test_main.py"],
+        "commands_executed": ["pytest"],
+    })
+    stdout_lines = [json_response + "\n"]
+    mock_process = mock_popen_jsonl(stdout_lines, returncode=0)
 
-    with patch("subprocess.run", return_value=mock_result):
+    with patch("subprocess.Popen", return_value=mock_process):
         snapshot = orchestrator.run(run_id="test-claude-integration")
 
     # Verify orchestration completed
@@ -135,39 +147,46 @@ def test_orchestration_with_both_real_adapters(temp_workspace, temp_artifacts_di
     artifact_store = ArtifactStore(temp_artifacts_dir, console=console)
     orchestrator = Orchestrator(config, artifact_store, console=console)
 
-    # Create a mock that returns different responses based on the command
-    def mock_subprocess_run(cmd, **kwargs):
-        mock_result = Mock()
-        mock_result.returncode = 0
-        mock_result.stderr = ""
+    # Create a mock that returns different responses based on the command (Popen)
+    def mock_subprocess_popen(cmd, **kwargs):
+        mock_process = Mock()
+        mock_process.returncode = 0
+        mock_process.wait = Mock(return_value=0)
+        mock_process.poll = Mock(return_value=0)
+        mock_process.kill = Mock()
+        mock_process.communicate = Mock(return_value=("", ""))
+        mock_process.stderr = io.StringIO("")
+        # Support context manager protocol
+        mock_process.__enter__ = Mock(return_value=mock_process)
+        mock_process.__exit__ = Mock(return_value=None)
 
         # Check which CLI is being called
         if "codex" in str(cmd[0]):
             # Codex response (planning/review) - JSONL format
-            mock_result.stdout = "\n".join([
-                json.dumps({"type": "thread.started", "thread_id": "test"}),
+            stdout_lines = [
+                json.dumps({"type": "thread.started", "thread_id": "test"}) + "\n",
                 json.dumps({"type": "item.completed", "item": {
                     "type": "agent_message",
                     "text": "This is a Codex response for planning/review"
-                }}),
-                json.dumps({"type": "turn.completed", "usage": {}})
-            ])
+                }}) + "\n",
+                json.dumps({"type": "turn.completed", "usage": {}}) + "\n",
+            ]
+            mock_process.stdout = iter(stdout_lines)
         elif "claude" in str(cmd[0]):
             # Claude Code response (implementation) - JSON with "result" field
-            mock_result.stdout = json.dumps(
-                {
-                    "result": "This is a Claude Code response for implementation",
-                    "type": "result",
-                    "subtype": "success"
-                }
-            )
+            json_response = json.dumps({
+                "result": "This is a Claude Code response for implementation",
+                "type": "result",
+                "subtype": "success"
+            })
+            mock_process.stdout = iter([json_response + "\n"])
         else:
             # Fallback
-            mock_result.stdout = json.dumps({"content": "Unknown CLI", "concluded": False})
+            mock_process.stdout = iter([json.dumps({"content": "Unknown CLI", "concluded": False}) + "\n"])
 
-        return mock_result
+        return mock_process
 
-    with patch("subprocess.run", side_effect=mock_subprocess_run):
+    with patch("subprocess.Popen", side_effect=mock_subprocess_popen):
         snapshot = orchestrator.run(run_id="test-both-adapters")
 
     # Verify orchestration completed multiple iterations

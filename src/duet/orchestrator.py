@@ -11,6 +11,7 @@ from rich.console import Console
 from rich.table import Table
 
 from .adapters import REGISTRY, AssistantAdapter
+from .adapters.base import StreamEvent
 from .approval import ApprovalNotifier
 from .artifacts import ArtifactStore
 from .config import DuetConfig
@@ -128,6 +129,45 @@ class Orchestrator:
         signal.signal(signal.SIGINT, _handle_stop)
         signal.signal(signal.SIGTERM, _handle_stop)
 
+    def _create_event_handler(
+        self, run_id: str, iteration: int, phase: Phase
+    ):
+        """
+        Create an event handler for streaming adapter events.
+
+        The handler persists events to SQLite (if database available) and can
+        optionally display them in the console for real-time feedback.
+
+        Args:
+            run_id: Current run identifier
+            iteration: Current iteration number
+            phase: Current phase
+
+        Returns:
+            Callable event handler for adapter streaming
+        """
+        def handle_event(event: StreamEvent) -> None:
+            """Handle streaming event from adapter."""
+            # Persist to SQLite if database available
+            if self.db:
+                try:
+                    self.db.insert_event(
+                        run_id=run_id,
+                        event_type=event["event_type"],
+                        payload=event["payload"],
+                        iteration=iteration,
+                        phase=phase.value,
+                        timestamp=event["timestamp"].isoformat(),
+                    )
+                except Exception as e:
+                    # Don't fail the run if event persistence fails
+                    self.console.log(f"[yellow]Warning: Failed to persist event: {e}[/]")
+
+            # TODO (Sprint 6): Add Rich Live display for streaming console output
+            # For now, we'll silently collect events; console display comes next
+
+        return handle_event
+
     def run(self, run_id: Optional[str] = None) -> RunSnapshot:
         """Execute orchestration loop until termination."""
         iteration = 0
@@ -222,9 +262,12 @@ class Orchestrator:
             adapter_name = adapter.__class__.__name__
             self.logger.log_adapter_call(snapshot.run_id, iteration, current_phase.value, adapter_name)
 
+            # ──── Create Event Handler for Streaming ────
+            event_handler = self._create_event_handler(snapshot.run_id, iteration, current_phase)
+
             # ──── Edge Case: Adapter Failure ────
             try:
-                response = adapter.generate(request)
+                response = adapter.stream(request, on_event=event_handler)
             except Exception as exc:
                 snapshot.phase = Phase.BLOCKED
                 snapshot.notes = f"Adapter failure during {current_phase.value}: {exc}"
