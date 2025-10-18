@@ -193,6 +193,7 @@ storage:
 logging:
   enable_jsonl: true
   jsonl_dir: "{self.config_path / 'logs'}"
+  quiet: false  # Set to true to disable live streaming output (Sprint 6)
 
 # ────────────────────────────────────────────────────────────────────────────
 # Tips:
