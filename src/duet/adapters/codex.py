@@ -198,41 +198,6 @@ class CodexAdapter(AssistantAdapter):
                 raise
             raise CodexError(f"Unexpected error invoking Codex: {exc}") from exc
 
-    def _parse_jsonl_stream(self, stdout: str) -> list[Dict[str, Any]]:
-        """
-        Parse JSONL stream from Codex --json output.
-
-        Each line is a JSON object representing an event.
-        Handles partial/invalid lines gracefully.
-
-        Returns:
-            List of parsed event dictionaries
-        """
-        events = []
-        lines = stdout.strip().split("\n")
-
-        for line_num, line in enumerate(lines, 1):
-            line = line.strip()
-            if not line:
-                continue  # Skip empty lines
-
-            try:
-                event = json.loads(line)
-                events.append(event)
-            except json.JSONDecodeError as exc:
-                # Log but don't fail on invalid lines (may be partial output)
-                # Store as error event for debugging
-                events.append(
-                    {
-                        "type": "parse_error",
-                        "line_num": line_num,
-                        "error": str(exc),
-                        "raw_line": line[:100],  # Truncate for safety
-                    }
-                )
-
-        return events
-
     def _normalize_response(self, data: Dict[str, Any]) -> AssistantResponse:
         """
         Normalize Codex CLI response to AssistantResponse format.

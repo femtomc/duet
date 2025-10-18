@@ -7,6 +7,7 @@ requiring actual Codex/Claude Code installations.
 
 from __future__ import annotations
 
+import io
 import json
 import subprocess
 from pathlib import Path
@@ -15,9 +16,45 @@ from unittest.mock import MagicMock, Mock, patch
 import pytest
 
 from duet.adapters import ClaudeCodeAdapter, CodexAdapter, EchoAdapter, REGISTRY
+from duet.adapters.base import StreamEvent
 from duet.adapters.claude_code import ClaudeCodeError
 from duet.adapters.codex import CodexError
 from duet.models import AssistantRequest
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Mock Helpers for Popen
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def mock_popen_success(stdout_lines: list[str], returncode: int = 0, stderr: str = ""):
+    """
+    Create a mock Popen process that yields stdout lines and returns exit code.
+
+    Args:
+        stdout_lines: List of lines to yield from stdout
+        returncode: Exit code to return from wait()
+        stderr: stderr content
+
+    Returns:
+        Mock process object compatible with Popen
+    """
+    mock_process = Mock()
+    mock_process.stdout = iter(stdout_lines)
+    mock_process.stderr = io.StringIO(stderr)
+    mock_process.wait = Mock(return_value=returncode)
+    mock_process.kill = Mock()
+    return mock_process
+
+
+def mock_popen_timeout(timeout_seconds: float = 1.0):
+    """Create a mock Popen that raises TimeoutExpired on wait()."""
+    mock_process = Mock()
+    mock_process.stdout = iter([])
+    mock_process.stderr = io.StringIO("")
+    mock_process.wait = Mock(side_effect=subprocess.TimeoutExpired("cmd", timeout_seconds))
+    mock_process.kill = Mock()
+    return mock_process
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -69,6 +106,22 @@ def test_echo_adapter_basic():
     assert response.metadata["adapter"] == "echo"
 
 
+def test_echo_adapter_streaming():
+    """Test that echo adapter supports streaming interface."""
+    adapter = EchoAdapter(model="test-model")
+    request = AssistantRequest(role="planner", prompt="Test streaming")
+
+    events_received = []
+    def on_event(event: StreamEvent):
+        events_received.append(event)
+
+    response = adapter.stream(request, on_event=on_event)
+
+    assert "ECHO ADAPTER" in response.content
+    # Echo adapter should emit at least one event
+    assert len(events_received) >= 1
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Codex Adapter Tests
 # ──────────────────────────────────────────────────────────────────────────────
@@ -86,28 +139,24 @@ def test_codex_adapter_success_response():
     adapter = CodexAdapter(model="gpt-4")
     request = AssistantRequest(role="planner", prompt="Create a plan")
 
-    # Mock subprocess.run with JSONL output (actual Codex event structure)
-    mock_result = Mock()
-    mock_result.returncode = 0
-    # Simulate Codex JSONL stream with actual event types
-    mock_result.stdout = "\n".join(
-        [
-            json.dumps({"type": "thread.started", "thread_id": "abc123"}),
-            json.dumps({"type": "turn.started"}),
-            json.dumps(
-                {"type": "item.completed", "item": {"id": "item_0", "type": "reasoning", "text": "Thinking..."}}
-            ),
-            json.dumps(
-                {"type": "item.completed", "item": {"id": "item_1", "type": "agent_message", "text": "Here is the plan..."}}
-            ),
-            json.dumps(
-                {"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 20, "cached_input_tokens": 0}}
-            ),
-        ]
-    )
-    mock_result.stderr = ""
+    # Mock Popen with JSONL output (actual Codex event structure)
+    stdout_lines = [
+        json.dumps({"type": "thread.started", "thread_id": "abc123"}) + "\n",
+        json.dumps({"type": "turn.started"}) + "\n",
+        json.dumps(
+            {"type": "item.completed", "item": {"id": "item_0", "type": "reasoning", "text": "Thinking..."}}
+        ) + "\n",
+        json.dumps(
+            {"type": "item.completed", "item": {"id": "item_1", "type": "agent_message", "text": "Here is the plan..."}}
+        ) + "\n",
+        json.dumps(
+            {"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 20, "cached_input_tokens": 0}}
+        ) + "\n",
+    ]
 
-    with patch("subprocess.run", return_value=mock_result):
+    mock_process = mock_popen_success(stdout_lines, returncode=0)
+
+    with patch("subprocess.Popen", return_value=mock_process):
         response = adapter.generate(request)
 
     assert response.content == "Here is the plan..."
@@ -119,31 +168,63 @@ def test_codex_adapter_success_response():
     assert response.metadata["output_tokens"] == 20
 
 
+def test_codex_adapter_streaming_with_callback():
+    """Test Codex adapter streaming with on_event callback."""
+    adapter = CodexAdapter(model="gpt-4")
+    request = AssistantRequest(role="planner", prompt="Test")
+
+    stdout_lines = [
+        json.dumps({"type": "thread.started", "thread_id": "xyz"}) + "\n",
+        json.dumps(
+            {"type": "item.completed", "item": {"type": "agent_message", "text": "Response"}}
+        ) + "\n",
+    ]
+
+    mock_process = mock_popen_success(stdout_lines, returncode=0)
+
+    events_received = []
+    def on_event(event: StreamEvent):
+        events_received.append(event)
+
+    with patch("subprocess.Popen", return_value=mock_process):
+        response = adapter.stream(request, on_event=on_event)
+
+    assert response.content == "Response"
+    assert len(events_received) == 2
+    assert events_received[0]["event_type"] == "thread.started"
+    assert events_received[1]["event_type"] == "item.completed"
+
+
 def test_codex_adapter_jsonl_partial_lines():
     """Test Codex adapter handling of partial/invalid JSON lines."""
     adapter = CodexAdapter(model="gpt-4")
     request = AssistantRequest(role="planner", prompt="Test")
 
     # Mock JSONL with one invalid line
-    mock_result = Mock()
-    mock_result.returncode = 0
-    mock_result.stdout = "\n".join(
-        [
-            json.dumps({"type": "thread.started", "thread_id": "xyz"}),
-            "{invalid json line",  # Invalid JSON
-            json.dumps(
-                {"type": "item.completed", "item": {"type": "agent_message", "text": "Valid response"}}
-            ),
-        ]
-    )
-    mock_result.stderr = ""
+    stdout_lines = [
+        json.dumps({"type": "thread.started", "thread_id": "xyz"}) + "\n",
+        "{invalid json line\n",  # Invalid JSON
+        json.dumps(
+            {"type": "item.completed", "item": {"type": "agent_message", "text": "Valid response"}}
+        ) + "\n",
+    ]
 
-    with patch("subprocess.run", return_value=mock_result):
-        response = adapter.generate(request)
+    mock_process = mock_popen_success(stdout_lines, returncode=0)
+
+    events_received = []
+    def on_event(event: StreamEvent):
+        events_received.append(event)
+
+    with patch("subprocess.Popen", return_value=mock_process):
+        response = adapter.stream(request, on_event=on_event)
 
     # Should successfully extract message despite invalid line
     assert response.content == "Valid response"
-    assert "parse_error" in response.metadata["event_types"]
+    assert response.metadata["parse_errors"] == 1
+
+    # Verify parse_error event was emitted
+    error_events = [e for e in events_received if e["event_type"] == "parse_error"]
+    assert len(error_events) == 1
 
 
 def test_codex_adapter_cli_failure():
@@ -152,12 +233,13 @@ def test_codex_adapter_cli_failure():
     request = AssistantRequest(role="planner", prompt="Test")
 
     # Mock failed CLI invocation
-    mock_result = Mock()
-    mock_result.returncode = 1
-    mock_result.stdout = ""
-    mock_result.stderr = "Authentication failed"
+    mock_process = mock_popen_success(
+        stdout_lines=[],
+        returncode=1,
+        stderr="Authentication failed"
+    )
 
-    with patch("subprocess.run", return_value=mock_result):
+    with patch("subprocess.Popen", return_value=mock_process):
         with pytest.raises(CodexError) as exc_info:
             adapter.generate(request)
 
@@ -170,11 +252,15 @@ def test_codex_adapter_timeout():
     adapter = CodexAdapter(model="gpt-4", timeout=1)
     request = AssistantRequest(role="planner", prompt="Test")
 
-    with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("codex", 1)):
+    mock_process = mock_popen_timeout(timeout_seconds=1.0)
+
+    with patch("subprocess.Popen", return_value=mock_process):
         with pytest.raises(CodexError) as exc_info:
             adapter.generate(request)
 
-    assert "timeout" in str(exc_info.value).lower()
+    # Check for "timeout" or "timed out" in error message
+    error_msg = str(exc_info.value).lower()
+    assert "timeout" in error_msg or "timed out" in error_msg
 
 
 def test_codex_adapter_empty_stream():
@@ -183,12 +269,9 @@ def test_codex_adapter_empty_stream():
     request = AssistantRequest(role="planner", prompt="Test")
 
     # Mock response with empty output
-    mock_result = Mock()
-    mock_result.returncode = 0
-    mock_result.stdout = ""
-    mock_result.stderr = ""
+    mock_process = mock_popen_success(stdout_lines=[], returncode=0)
 
-    with patch("subprocess.run", return_value=mock_result):
+    with patch("subprocess.Popen", return_value=mock_process):
         with pytest.raises(CodexError) as exc_info:
             adapter.generate(request)
 
@@ -201,19 +284,16 @@ def test_codex_adapter_no_assistant_message():
     request = AssistantRequest(role="planner", prompt="Test")
 
     # Mock JSONL with events but no agent_message
-    mock_result = Mock()
-    mock_result.returncode = 0
-    mock_result.stdout = "\n".join(
-        [
-            json.dumps({"type": "thread.started", "thread_id": "abc"}),
-            json.dumps({"type": "turn.started"}),
-            json.dumps({"type": "turn.completed", "usage": {}}),
-            # No item.completed with type=agent_message
-        ]
-    )
-    mock_result.stderr = ""
+    stdout_lines = [
+        json.dumps({"type": "thread.started", "thread_id": "abc"}) + "\n",
+        json.dumps({"type": "turn.started"}) + "\n",
+        json.dumps({"type": "turn.completed", "usage": {}}) + "\n",
+        # No item.completed with type=agent_message
+    ]
 
-    with patch("subprocess.run", return_value=mock_result):
+    mock_process = mock_popen_success(stdout_lines, returncode=0)
+
+    with patch("subprocess.Popen", return_value=mock_process):
         with pytest.raises(CodexError) as exc_info:
             adapter.generate(request)
 
@@ -226,29 +306,26 @@ def test_codex_adapter_tool_usage_metadata():
     request = AssistantRequest(role="planner", prompt="Test")
 
     # Mock JSONL with actual Codex structure including usage
-    mock_result = Mock()
-    mock_result.returncode = 0
-    mock_result.stdout = "\n".join(
-        [
-            json.dumps({"type": "thread.started", "thread_id": "test-thread"}),
-            json.dumps(
-                {"type": "item.completed", "item": {"type": "agent_message", "text": "Response with metadata"}}
-            ),
-            json.dumps(
-                {
-                    "type": "turn.completed",
-                    "usage": {
-                        "input_tokens": 100,
-                        "output_tokens": 50,
-                        "cached_input_tokens": 20,
-                    },
-                }
-            ),
-        ]
-    )
-    mock_result.stderr = ""
+    stdout_lines = [
+        json.dumps({"type": "thread.started", "thread_id": "test-thread"}) + "\n",
+        json.dumps(
+            {"type": "item.completed", "item": {"type": "agent_message", "text": "Response with metadata"}}
+        ) + "\n",
+        json.dumps(
+            {
+                "type": "turn.completed",
+                "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 50,
+                    "cached_input_tokens": 20,
+                },
+            }
+        ) + "\n",
+    ]
 
-    with patch("subprocess.run", return_value=mock_result):
+    mock_process = mock_popen_success(stdout_lines, returncode=0)
+
+    with patch("subprocess.Popen", return_value=mock_process):
         response = adapter.generate(request)
 
     assert response.content == "Response with metadata"
@@ -263,7 +340,7 @@ def test_codex_adapter_cli_not_found():
     adapter = CodexAdapter(model="gpt-4", cli_path="/nonexistent/codex")
     request = AssistantRequest(role="planner", prompt="Test")
 
-    with patch("subprocess.run", side_effect=FileNotFoundError()):
+    with patch("subprocess.Popen", side_effect=FileNotFoundError()):
         with pytest.raises(CodexError) as exc_info:
             adapter.generate(request)
 
@@ -290,19 +367,19 @@ def test_claude_code_adapter_success_response():
     adapter = ClaudeCodeAdapter(model="claude-sonnet-4")
     request = AssistantRequest(role="implementer", prompt="Implement feature")
 
-    # Mock subprocess.run
-    mock_result = Mock()
-    mock_result.returncode = 0
-    mock_result.stdout = json.dumps(
+    # Mock Popen - Claude Code returns single JSON object
+    json_response = json.dumps(
         {
-            "content": "Implementation complete",
+            "result": "Implementation complete",
             "concluded": False,
             "metadata": {"files_modified": ["src/main.py"]},
         }
     )
-    mock_result.stderr = ""
 
-    with patch("subprocess.run", return_value=mock_result):
+    stdout_lines = [json_response + "\n"]
+    mock_process = mock_popen_success(stdout_lines, returncode=0)
+
+    with patch("subprocess.Popen", return_value=mock_process):
         response = adapter.generate(request)
 
     assert response.content == "Implementation complete"
@@ -311,25 +388,65 @@ def test_claude_code_adapter_success_response():
     assert response.metadata["model"] == "claude-sonnet-4"
 
 
+def test_claude_code_adapter_streaming_with_callback():
+    """Test Claude Code adapter streaming with on_event callback."""
+    adapter = ClaudeCodeAdapter(model="claude-sonnet-4")
+    request = AssistantRequest(role="implementer", prompt="Test")
+
+    json_response = json.dumps({"result": "Done"})
+    stdout_lines = [json_response + "\n"]
+    mock_process = mock_popen_success(stdout_lines, returncode=0)
+
+    events_received = []
+    def on_event(event: StreamEvent):
+        events_received.append(event)
+
+    with patch("subprocess.Popen", return_value=mock_process):
+        response = adapter.stream(request, on_event=on_event)
+
+    assert response.content == "Done"
+    assert len(events_received) >= 1
+    assert events_received[0]["event_type"] in ["output", "result"]
+
+
+def test_claude_code_adapter_multiline_json():
+    """Test Claude Code adapter with JSON split across multiple lines."""
+    adapter = ClaudeCodeAdapter(model="claude-sonnet-4")
+    request = AssistantRequest(role="implementer", prompt="Test")
+
+    # Simulate JSON split across lines (common with pretty-printed output)
+    stdout_lines = [
+        '{\n',
+        '  "result": "Multiline response",\n',
+        '  "type": "success"\n',
+        '}\n',
+    ]
+    mock_process = mock_popen_success(stdout_lines, returncode=0)
+
+    with patch("subprocess.Popen", return_value=mock_process):
+        response = adapter.generate(request)
+
+    assert response.content == "Multiline response"
+
+
 def test_claude_code_adapter_code_metadata():
     """Test Claude Code adapter captures code-specific metadata."""
     adapter = ClaudeCodeAdapter(model="claude-sonnet-4")
     request = AssistantRequest(role="implementer", prompt="Implement feature")
 
     # Mock response with code metadata
-    mock_result = Mock()
-    mock_result.returncode = 0
-    mock_result.stdout = json.dumps(
+    json_response = json.dumps(
         {
-            "content": "Done",
+            "result": "Done",
             "files_modified": ["a.py", "b.py"],
             "commands_executed": ["pytest"],
             "commit_sha": "abc123",
         }
     )
-    mock_result.stderr = ""
+    stdout_lines = [json_response + "\n"]
+    mock_process = mock_popen_success(stdout_lines, returncode=0)
 
-    with patch("subprocess.run", return_value=mock_result):
+    with patch("subprocess.Popen", return_value=mock_process):
         response = adapter.generate(request)
 
     assert response.metadata["files_modified"] == ["a.py", "b.py"]
@@ -343,12 +460,13 @@ def test_claude_code_adapter_cli_failure():
     request = AssistantRequest(role="implementer", prompt="Test")
 
     # Mock failed CLI invocation
-    mock_result = Mock()
-    mock_result.returncode = 1
-    mock_result.stdout = ""
-    mock_result.stderr = "Permission denied"
+    mock_process = mock_popen_success(
+        stdout_lines=[],
+        returncode=1,
+        stderr="Permission denied"
+    )
 
-    with patch("subprocess.run", return_value=mock_result):
+    with patch("subprocess.Popen", return_value=mock_process):
         with pytest.raises(ClaudeCodeError) as exc_info:
             adapter.generate(request)
 
@@ -361,11 +479,15 @@ def test_claude_code_adapter_timeout():
     adapter = ClaudeCodeAdapter(model="claude-sonnet-4", timeout=1)
     request = AssistantRequest(role="implementer", prompt="Test")
 
-    with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("claude", 1)):
+    mock_process = mock_popen_timeout(timeout_seconds=1.0)
+
+    with patch("subprocess.Popen", return_value=mock_process):
         with pytest.raises(ClaudeCodeError) as exc_info:
             adapter.generate(request)
 
-    assert "timeout" in str(exc_info.value).lower()
+    # Check for "timeout" or "timed out" in error message
+    error_msg = str(exc_info.value).lower()
+    assert "timeout" in error_msg or "timed out" in error_msg
 
 
 def test_claude_code_adapter_invalid_json():
@@ -374,16 +496,14 @@ def test_claude_code_adapter_invalid_json():
     request = AssistantRequest(role="implementer", prompt="Test")
 
     # Mock response with invalid JSON
-    mock_result = Mock()
-    mock_result.returncode = 0
-    mock_result.stdout = "Invalid JSON response"
-    mock_result.stderr = ""
+    stdout_lines = ["Invalid JSON response\n"]
+    mock_process = mock_popen_success(stdout_lines, returncode=0)
 
-    with patch("subprocess.run", return_value=mock_result):
+    with patch("subprocess.Popen", return_value=mock_process):
         with pytest.raises(ClaudeCodeError) as exc_info:
             adapter.generate(request)
 
-    assert "parse" in str(exc_info.value).lower()
+    assert "no valid json" in str(exc_info.value).lower()
 
 
 def test_claude_code_adapter_workspace_context():
@@ -391,16 +511,15 @@ def test_claude_code_adapter_workspace_context():
     adapter = ClaudeCodeAdapter(model="claude-sonnet-4", workspace_root="/my/workspace")
     request = AssistantRequest(role="implementer", prompt="Test")
 
-    mock_result = Mock()
-    mock_result.returncode = 0
-    mock_result.stdout = json.dumps({"result": "Done"})  # Claude uses "result" field
-    mock_result.stderr = ""
+    json_response = json.dumps({"result": "Done"})
+    stdout_lines = [json_response + "\n"]
+    mock_process = mock_popen_success(stdout_lines, returncode=0)
 
-    with patch("subprocess.run", return_value=mock_result) as mock_run:
+    with patch("subprocess.Popen", return_value=mock_process) as mock_popen:
         adapter.generate(request)
 
         # Verify workspace was passed via cwd (not --workspace flag)
-        call_args = mock_run.call_args
+        call_args = mock_popen.call_args
         assert call_args[1]["cwd"] == "/my/workspace"
 
 
