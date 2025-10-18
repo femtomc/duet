@@ -1127,16 +1127,6 @@ class Orchestrator:
         new_phase_status = self._derive_phase_status(current_phase, decision.next_phase)
         new_state_id = f"{run_id}-{new_phase_status}"
 
-        # Persist channel messages before creating state
-        if self.db and self.workflow_executor:
-            self._persist_channel_messages(
-                run_id=run_id,
-                phase=current_phase,
-                iteration=snapshot.iteration,
-                state_id=new_state_id,
-            )
-            self.console.log(f"[dim]Persisted channel messages for state[/]")
-
         # Create git baseline if needed
         baseline = active_state.get("baseline_commit")
         state_metadata = {}
@@ -1155,6 +1145,7 @@ class Orchestrator:
             state_metadata["channel_snapshot"] = channel_snapshot
             self.console.log(f"[dim]Saved channel snapshot:[/] {len(channel_snapshot)} channels")
 
+        # Insert state first (required for FK constraint)
         self.db.insert_state(
             state_id=new_state_id,
             run_id=run_id,
@@ -1167,6 +1158,16 @@ class Orchestrator:
             metadata=state_metadata if state_metadata else None,
         )
         self.db.update_active_state(run_id, new_state_id)
+
+        # Persist channel messages AFTER state exists (FK constraint)
+        if self.db and self.workflow_executor:
+            self._persist_channel_messages(
+                run_id=run_id,
+                phase=current_phase,
+                iteration=snapshot.iteration,
+                state_id=new_state_id,
+            )
+            self.console.log(f"[dim]Persisted channel messages for state[/]")
 
         # Update run record and track consecutive replans
         snapshot.phase = decision.next_phase
