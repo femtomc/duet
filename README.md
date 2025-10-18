@@ -1,4 +1,4 @@
-# Duet Orchestrator
+# Duet
 
 Prototype automation tool that coordinates the existing Codex (design/review) and Claude Code (implementation) workflow.
 
