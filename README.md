@@ -251,6 +251,31 @@ Edit `.duet/workflow.py` to customize your workflow:
 - Set conditional transitions with guards
 - Adjust priorities for deterministic routing
 
+### Prompt Programming (Sprint 10)
+
+Prompts are now built programmatically from channel payloads:
+
+```python
+# Channels flow through the workflow
+task → [plan phase] → plan → [implement phase] → code → [review phase] → verdict
+```
+
+**Default Builders** automatically construct prompts:
+- **PlanningBuilder**: Reads `task` + `feedback` channels
+- **ImplementationBuilder**: Reads `plan` channel
+- **ReviewBuilder**: Reads `plan` + `code` channels
+
+**Custom Builders** (advanced):
+```python
+from duet.prompt_builder import PromptBuilder, PromptContext
+
+class CustomPlanBuilder(PromptBuilder):
+    def build(self, context: PromptContext) -> AssistantRequest:
+        task = context.get_channel("task", "")
+        prompt = f"Custom plan for: {task}"
+        return AssistantRequest(role="planner", prompt=prompt)
+```
+
 See `docs/workflow_dsl.md` for comprehensive DSL reference.
 
 ## Running and Monitoring
@@ -375,5 +400,6 @@ duet history --phase review --verdict changes_requested --since 2025-10-15
 - **Sprint 6**: Streaming infrastructure with real-time console output, event persistence, advanced CLI filtering, and JSON export.
 - **Sprint 7**: Enhanced streaming displays with configurable modes (detailed/compact/off).
 - **Sprint 8**: Stateful CLI workflow with phase-by-phase execution, state checkpoints, git baseline management, and time-travel commands (`duet next`, `duet cont`, `duet back`, `duet status`).
-- **Sprint 9** (Complete): Python DSL for workflow definitions with channel-based messaging, guard system for conditional transitions, semantic validation compiler, and dynamic workflow loader. Replaces legacy prompt templates with `.duet/ide.py` declarative workflows.
-- **Upcoming**: Runtime integration (channel payload routing), orchestrator DSL wiring, TUI dashboard, `jj` backend support. See `docs/integration_plan.md` for roadmap.
+- **Sprint 9**: Python DSL for workflow definitions with channel-based messaging, guard system for conditional transitions, semantic validation compiler, and dynamic workflow loader. Replaces legacy prompt templates with `.duet/workflow.py` declarative workflows.
+- **Sprint 10** (Complete): Workflow runtime integration with ChannelStore for payload management, PromptBuilder framework for programmable prompt generation, WorkflowExecutor for graph-driven execution, GuardEvaluator for transition decisions, and channel snapshot persistence for state checkpoints.
+- **Upcoming**: Message persistence (Sprint 11), full guard-driven transitions, TUI dashboard, `jj` backend support. See `docs/integration_plan.md` for roadmap.
