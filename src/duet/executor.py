@@ -275,8 +275,9 @@ class WorkflowExecutor:
 
         # Execute adapter
         try:
-            # Note: streaming handled by caller
-            response = adapter.execute(request)
+            # Use stream() method (adapters don't have execute())
+            # Streaming events handled by caller if needed
+            response = adapter.stream(request, on_event=lambda e: None)
         except Exception as exc:
             return PhaseExecutionResult(
                 phase_name=phase_name,

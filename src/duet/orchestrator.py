@@ -204,12 +204,14 @@ class Orchestrator:
         self.console.rule(f"Starting Duet run {snapshot.run_id}")
         self.artifacts.checkpoint(snapshot)
 
-        # ──── Seed Channels (Sprint 10) ────
+        # ──── Reset and Seed Channels (Sprint 10) ────
         if self.workflow_executor:
+            # Clear any previous run's channel state
+            self.workflow_executor.channel_store.clear()
             # Seed task channel from metadata or default
             task_input = snapshot.metadata.get("task", "Implement the requested changes")
             self.workflow_executor.seed_channel("task", task_input)
-            self.console.log(f"[dim]Seeded task channel[/]")
+            self.console.log(f"[dim]Initialized channels, seeded task[/]")
 
         # ──── Database: Insert Run Record ────
         if self.db:
@@ -458,7 +460,41 @@ class Orchestrator:
                     response.metadata["git_changes"] = {"error": str(exc)}
 
             # ──── Decide Next Phase ────
-            decision = self._decide_next_phase(current_phase, response, iteration, consecutive_replans)
+            # Sprint 10: Use WorkflowExecutor guard evaluation if available
+            if self.workflow_executor:
+                # Build guard context
+                guard_context = self.workflow_executor.guard_evaluator.build_guard_context(
+                    self.workflow_executor.channel_store,
+                    response=response,
+                    git_changes=response.metadata.get("git_changes"),
+                )
+
+                # Evaluate transitions
+                guard_result = self.workflow_executor.guard_evaluator.evaluate_transitions(
+                    current_phase=current_phase.value,
+                    workflow_graph=self.workflow_graph,
+                    guard_context=guard_context,
+                )
+
+                # Convert to TransitionDecision format
+                if guard_result.next_phase:
+                    next_phase_enum = Phase(guard_result.next_phase)
+                    decision = TransitionDecision(
+                        next_phase=next_phase_enum,
+                        rationale=guard_result.rationale,
+                        requires_human=False,  # Guards determine this
+                    )
+                else:
+                    # No guards passed - blocked
+                    decision = TransitionDecision(
+                        next_phase=Phase.BLOCKED,
+                        rationale=guard_result.rationale,
+                        requires_human=True,
+                    )
+            else:
+                # Legacy mode
+                decision = self._decide_next_phase(current_phase, response, iteration, consecutive_replans)
+
             self.console.log(f"[blue]Decision:[/] {decision.rationale}")
 
             # ──── Persist Complete Iteration Record ────
@@ -655,8 +691,10 @@ class Orchestrator:
 
     def _get_agent_for_phase(self, phase: Phase) -> str:
         """Get agent name for a phase (for workflow mode)."""
-        if phase in (Phase.PLAN, Phase.REVIEW):
-            return "planner"  # or "reviewer"
+        if phase == Phase.PLAN:
+            return "planner"
+        elif phase == Phase.REVIEW:
+            return "reviewer"
         elif phase == Phase.IMPLEMENT:
             return "implementer"
         return "system"
@@ -1054,6 +1092,13 @@ class Orchestrator:
             # Insert run
             self.db.insert_run(snapshot)
 
+            # Reset and seed channels for new run (Sprint 10)
+            if self.workflow_executor:
+                self.workflow_executor.channel_store.clear()
+                task_input = snapshot.metadata.get("task", "Implement the requested changes")
+                self.workflow_executor.seed_channel("task", task_input)
+                self.console.log(f"[dim]Initialized channels for new run[/]")
+
             # Create initial state
             state_id = f"{run_id}-plan-ready"
             baseline = None
@@ -1190,6 +1235,9 @@ class Orchestrator:
                 elif verdict_lower in ("blocked", "block"):
                     response.verdict = ReviewVerdict.BLOCKED
 
+        # ──── Update Channels (Sprint 10) ────
+        self._update_channels_from_response(current_phase, response)
+
         # Check for empty response
         if not response.content or not response.content.strip():
             self.console.log("[yellow]Empty response detected[/]")
@@ -1213,12 +1261,45 @@ class Orchestrator:
             }
 
         # ──── Decide Next Phase ────
-        decision = self._decide_next_phase(
-            current_phase,
-            response,
-            snapshot.iteration,
-            snapshot.metadata.get("consecutive_replans", 0)
-        )
+        # Sprint 10: Use WorkflowExecutor guard evaluation if available
+        if self.workflow_executor:
+            # Build guard context
+            guard_context = self.workflow_executor.guard_evaluator.build_guard_context(
+                self.workflow_executor.channel_store,
+                response=response,
+                git_changes=response.metadata.get("git_changes"),
+            )
+
+            # Evaluate transitions
+            guard_result = self.workflow_executor.guard_evaluator.evaluate_transitions(
+                current_phase=current_phase.value,
+                workflow_graph=self.workflow_graph,
+                guard_context=guard_context,
+            )
+
+            # Convert to TransitionDecision format
+            if guard_result.next_phase:
+                next_phase_enum = Phase(guard_result.next_phase)
+                decision = TransitionDecision(
+                    next_phase=next_phase_enum,
+                    rationale=guard_result.rationale,
+                    requires_human=False,
+                )
+            else:
+                # No guards passed - blocked
+                decision = TransitionDecision(
+                    next_phase=Phase.BLOCKED,
+                    rationale=guard_result.rationale,
+                    requires_human=True,
+                )
+        else:
+            # Legacy mode
+            decision = self._decide_next_phase(
+                current_phase,
+                response,
+                snapshot.iteration,
+                snapshot.metadata.get("consecutive_replans", 0)
+            )
 
         # ──── Persist Iteration ────
         git_meta = response.metadata.get("git_changes", {})

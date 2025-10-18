@@ -424,7 +424,7 @@ def test_workflow_executor_execute_phase_with_mock_adapter():
 
     # Mock adapter
     mock_adapter = Mock()
-    mock_adapter.execute.return_value = AssistantResponse(
+    mock_adapter.stream.return_value = AssistantResponse(
         content="Step 1: Create files\nStep 2: Write tests",
         metadata={},
     )
@@ -480,7 +480,7 @@ def test_workflow_executor_guard_based_routing():
 
     # Mock adapter returning approve verdict
     mock_adapter = Mock()
-    mock_adapter.execute.return_value = AssistantResponse(
+    mock_adapter.stream.return_value = AssistantResponse(
         content="Looks good",
         verdict=ReviewVerdict.APPROVE,
     )
@@ -520,7 +520,7 @@ def test_workflow_executor_channel_outputs_extracted():
     executor = WorkflowExecutor(graph)
 
     mock_adapter = Mock()
-    mock_adapter.execute.return_value = AssistantResponse(
+    mock_adapter.stream.return_value = AssistantResponse(
         content="Detailed implementation plan...",
     )
 
