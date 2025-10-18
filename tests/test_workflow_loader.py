@@ -302,6 +302,34 @@ workflow = Workflow(
     assert "fallback" in graph.agents
 
 
+def test_resolve_workspace_missing_fallback(tmp_path, monkeypatch):
+    """Test fallback to current directory when workspace file missing."""
+    # Create workspace WITHOUT .duet/ide.py
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    # Intentionally don't create workspace/.duet/ide.py
+
+    # Create .duet/ide.py in current directory
+    monkeypatch.chdir(tmp_path)
+    duet_dir = tmp_path / ".duet"
+    duet_dir.mkdir()
+    fallback_workflow = duet_dir / "ide.py"
+    fallback_workflow.write_text("""
+from duet.dsl import Agent, Phase, Transition, Workflow
+workflow = Workflow(
+    agents=[Agent(name="fallback_agent", provider="codex", model="gpt-5")],
+    channels=[],
+    phases=[Phase(name="p", agent="fallback_agent"), Phase(name="d", agent="fallback_agent", is_terminal=True)],
+    transitions=[Transition(from_phase="p", to_phase="d")],
+)
+""")
+
+    # Should fall back to current directory when workspace file missing
+    graph = load_workflow(workspace_root=workspace)
+    assert graph is not None
+    assert "fallback_agent" in graph.agents
+
+
 def test_resolve_precedence_order(tmp_path, monkeypatch):
     """Test that resolution follows correct precedence order."""
     # Setup: Create workflows in multiple locations
