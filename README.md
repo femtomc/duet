@@ -83,15 +83,27 @@ uv run duet show-config
 
 ### Testing
 
-Run the test suite:
+**Automated tests** (mocked, no real CLI required):
 ```bash
 uv run pytest
 ```
 
-Run manual acceptance test:
+**Manual acceptance test** (echo adapter):
 ```bash
 uv run python tests/manual_test.py
 ```
+
+**Smoke tests** (requires real CLIs - run before production):
+```bash
+# Test both Codex and Claude Code adapters
+python tests/smoke_tests.py --both
+
+# Test individual adapters
+python tests/smoke_tests.py --codex
+python tests/smoke_tests.py --claude
+```
+
+See [Smoke Testing Guide](docs/smoke_testing.md) for details.
 
 ## Architecture
 

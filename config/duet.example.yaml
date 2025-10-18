@@ -26,6 +26,13 @@ workflow:
   require_human_approval: true
   auto_merge_on_approval: false
 
+  # Guardrails
+  max_consecutive_replans: 3  # Max replans before human approval
+  # max_phase_runtime_seconds: 600  # Optional: max runtime per phase
+  require_git_changes: true  # Fail IMPLEMENT if no changes detected
+  use_feature_branches: true  # Create duet/<run-id> branches
+  restore_branch_on_complete: true  # Restore original branch when done
+
 # ──── Storage Settings ────
 storage:
   workspace_root: "./"

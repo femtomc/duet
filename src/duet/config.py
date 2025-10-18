@@ -41,6 +41,30 @@ class WorkflowConfig(BaseModel):
         False, description="Automatically merge when review passes and guardrails allow"
     )
 
+    # ──── Guardrail Settings ────
+    max_consecutive_replans: int = Field(
+        3,
+        ge=1,
+        description="Maximum consecutive PLAN phases before requiring human intervention",
+    )
+    max_phase_runtime_seconds: Optional[int] = Field(
+        None,
+        ge=1,
+        description="Maximum runtime per phase in seconds (None = no limit)",
+    )
+    require_git_changes: bool = Field(
+        True,
+        description="Fail IMPLEMENT phase if no repository changes detected",
+    )
+    use_feature_branches: bool = Field(
+        True,
+        description="Create and switch to feature branch (<run-id>) for each run",
+    )
+    restore_branch_on_complete: bool = Field(
+        True,
+        description="Restore original branch when run completes or blocks",
+    )
+
 
 class LoggingConfig(BaseModel):
     """Logging and observability settings."""

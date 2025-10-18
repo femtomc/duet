@@ -11,6 +11,7 @@ from rich.console import Console
 from rich.table import Table
 
 from .adapters import REGISTRY, AssistantAdapter
+from .approval import ApprovalNotifier
 from .artifacts import ArtifactStore
 from .config import DuetConfig
 from .git_operations import GitWorkspace
@@ -88,6 +89,9 @@ class Orchestrator:
         # Initialize git workspace for change detection
         self.git = GitWorkspace(self.config.storage.workspace_root, console=self.console)
 
+        # Initialize approval notifier
+        self.approver = ApprovalNotifier(artifact_store, console=self.console)
+
     def _build_adapter(self, assistant_cfg):
         """
         Build an adapter from configuration.
@@ -125,12 +129,39 @@ class Orchestrator:
             run_id=run_id or self._derive_run_id(),
             iteration=iteration,
             phase=Phase.PLAN,
-            metadata={"started_at": dt.datetime.now(dt.timezone.utc).isoformat()},
+            metadata={
+                "started_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                "consecutive_replans": 0,
+            },
         )
         self.console.rule(f"Starting Duet run {snapshot.run_id}")
         self.artifacts.checkpoint(snapshot)
 
+        # ──── Git Branch Management ────
+        original_branch = None
+        if self.config.workflow.use_feature_branches and self.git.is_git_repo():
+            try:
+                original_branch = self.git.get_current_branch()
+                snapshot.metadata["original_branch"] = original_branch
+
+                # Create and checkout feature branch
+                feature_branch = f"duet/{snapshot.run_id}"
+                if self.git.branch_exists(feature_branch):
+                    self.console.log(
+                        f"[yellow]Feature branch already exists:[/] {feature_branch}"
+                    )
+                    self.git.checkout_branch(feature_branch)
+                else:
+                    self.git.checkout_branch(feature_branch, create=True)
+
+                snapshot.metadata["feature_branch"] = feature_branch
+                self.console.log(f"[green]Working on feature branch:[/] {feature_branch}")
+            except Exception as exc:
+                self.console.log(f"[yellow]Git branch setup failed: {exc}[/]")
+                self.console.log("[yellow]Continuing on current branch[/]")
+
         current_phase = Phase.PLAN
+        consecutive_replans = 0
         while True:
             # ──── Edge Case: Manual Stop ────
             if self._stop_requested:
@@ -157,6 +188,7 @@ class Orchestrator:
             iteration += 1
             snapshot.iteration = iteration
             snapshot.phase = current_phase
+            phase_start_time = dt.datetime.now(dt.timezone.utc)
             self.logger.log_iteration_start(snapshot.run_id, iteration, current_phase.value)
 
             # ──── Compose Request ────
@@ -190,8 +222,23 @@ class Orchestrator:
                 self._persist_interaction(snapshot.run_id, current_phase, request, response)
                 break
 
+            # ──── Guardrail: Phase Runtime Limit ────
+            if self.config.workflow.max_phase_runtime_seconds:
+                phase_duration = (dt.datetime.now(dt.timezone.utc) - phase_start_time).total_seconds()
+                if phase_duration > self.config.workflow.max_phase_runtime_seconds:
+                    snapshot.phase = Phase.BLOCKED
+                    snapshot.notes = (
+                        f"Phase {current_phase.value} exceeded maximum runtime "
+                        f"({self.config.workflow.max_phase_runtime_seconds}s)"
+                    )
+                    self.console.log(
+                        f"[red]Phase runtime limit exceeded: {phase_duration:.1f}s[/]"
+                    )
+                    self._persist_interaction(snapshot.run_id, current_phase, request, response)
+                    break
+
             # ──── Implementation Validation: Detect Repository Changes ────
-            if current_phase == Phase.IMPLEMENT:
+            if current_phase == Phase.IMPLEMENT and self.config.workflow.require_git_changes:
                 try:
                     if self.git.is_git_repo():
                         changes = self.git.detect_changes()
@@ -207,7 +254,7 @@ class Orchestrator:
                             "diff_stat": changes.diff_stat,
                         }
 
-                        # Fail iteration if no changes detected
+                        # Fail iteration if no changes detected (guardrail enforcement)
                         if not changes.has_changes:
                             snapshot.phase = Phase.BLOCKED
                             snapshot.notes = (
@@ -225,13 +272,15 @@ class Orchestrator:
                             f"[green]Detected changes:[/] {changes.files_changed} files, "
                             f"+{changes.insertions}/-{changes.deletions}"
                         )
+                    else:
+                        self.console.log("[yellow]Workspace is not a git repository, skipping change detection[/]")
                 except Exception as exc:
                     # Git detection failure shouldn't block the run, just warn
                     self.console.log(f"[yellow]Git change detection failed: {exc}[/]")
                     response.metadata["git_changes"] = {"error": str(exc)}
 
             # ──── Decide Next Phase ────
-            decision = self._decide_next_phase(current_phase, response, iteration)
+            decision = self._decide_next_phase(current_phase, response, iteration, consecutive_replans)
             self.console.log(f"[blue]Decision:[/] {decision.rationale}")
 
             # ──── Persist Complete Iteration Record ────
@@ -250,12 +299,24 @@ class Orchestrator:
             if decision.requires_human and self.config.workflow.require_human_approval:
                 snapshot.phase = Phase.BLOCKED
                 snapshot.notes = "Awaiting human approval."
-                self.console.log("[yellow]Human intervention requested; halting run[/]")
+                self.approver.request_approval(snapshot, decision.rationale)
                 break
 
-            # ──── Log State Transition ────
+            # ──── Log State Transition & Track Replans ────
             prev_phase = current_phase
             current_phase = decision.next_phase
+
+            # Track consecutive replans for guardrail enforcement
+            if prev_phase == Phase.REVIEW and current_phase == Phase.PLAN:
+                consecutive_replans += 1
+                snapshot.metadata["consecutive_replans"] = consecutive_replans
+                self.console.log(
+                    f"[yellow]Consecutive replans: {consecutive_replans}/{self.config.workflow.max_consecutive_replans}[/]"
+                )
+            elif current_phase == Phase.DONE:
+                consecutive_replans = 0
+                snapshot.metadata["consecutive_replans"] = 0
+
             self.logger.log_state_transition(
                 snapshot.run_id, iteration, prev_phase.value, current_phase.value, decision.rationale
             )
@@ -263,6 +324,28 @@ class Orchestrator:
 
         snapshot.metadata["completed_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
         self.artifacts.checkpoint(snapshot)
+
+        # ──── Git Branch Cleanup ────
+        if (
+            original_branch
+            and self.config.workflow.restore_branch_on_complete
+            and self.git.is_git_repo()
+        ):
+            try:
+                current_branch = self.git.get_current_branch()
+                if current_branch != original_branch:
+                    self.console.log(
+                        f"[cyan]Restoring original branch:[/] {original_branch}"
+                    )
+                    self.git.checkout_branch(original_branch)
+                    self.console.log(
+                        f"[green]Restored to:[/] {original_branch} "
+                        f"(feature branch '{current_branch}' preserved)"
+                    )
+            except Exception as exc:
+                self.console.log(
+                    f"[yellow]Failed to restore original branch: {exc}[/]"
+                )
 
         # Generate and save run summary
         self.artifacts.save_run_summary(snapshot.run_id)
@@ -451,7 +534,11 @@ class Orchestrator:
         return self.codex_adapter
 
     def _decide_next_phase(
-        self, phase: Phase, response: AssistantResponse, iteration: int
+        self,
+        phase: Phase,
+        response: AssistantResponse,
+        iteration: int,
+        consecutive_replans: int = 0,
     ) -> TransitionDecision:
         """
         Determine next phase based on current phase and response.
@@ -459,11 +546,13 @@ class Orchestrator:
         Transition Rules:
         - PLAN → IMPLEMENT (always, if valid response)
         - IMPLEMENT → REVIEW (always, if valid response)
-        - REVIEW → DONE (if response.concluded == True)
-        - REVIEW → PLAN (if response.concluded == False and iterations remain)
+        - REVIEW → DONE (if response.verdict == APPROVE or concluded == True)
+        - REVIEW → PLAN (if response.verdict == CHANGES_REQUESTED)
+        - REVIEW → BLOCKED (if response.verdict == BLOCKED)
 
-        Edge Cases:
+        Guardrails:
         - Approaching max iterations: set requires_human = True
+        - Max consecutive replans exceeded: set requires_human = True
         - Invalid/ambiguous response: could set requires_human = True
         """
         # ──── PLAN Phase ────
@@ -493,10 +582,20 @@ class Orchestrator:
                     )
 
                 elif response.verdict == ReviewVerdict.CHANGES_REQUESTED:
-                    approaching_limit = iteration >= self.max_iterations - 1
-                    requires_human = approaching_limit
+                    # ──── Guardrail: Check Consecutive Replans ────
+                    approaching_iteration_limit = iteration >= self.max_iterations - 1
+                    exceeds_replan_limit = (
+                        consecutive_replans >= self.config.workflow.max_consecutive_replans - 1
+                    )
+                    requires_human = approaching_iteration_limit or exceeds_replan_limit
 
-                    if approaching_limit:
+                    if exceeds_replan_limit:
+                        rationale = (
+                            f"Review verdict: CHANGES_REQUESTED - consecutive replans "
+                            f"{consecutive_replans + 1}/{self.config.workflow.max_consecutive_replans} "
+                            "(replan limit reached, human approval needed)."
+                        )
+                    elif approaching_iteration_limit:
                         rationale = (
                             f"Review verdict: CHANGES_REQUESTED - iteration {iteration}/{self.max_iterations} "
                             "(approaching limit, human approval may be needed)."
@@ -513,11 +612,20 @@ class Orchestrator:
                 rationale = "Review approved (legacy concluded=True); marking run as DONE."
                 return TransitionDecision(next_phase=Phase.DONE, rationale=rationale)
 
-            # Default: request changes and loop back
-            approaching_limit = iteration >= self.max_iterations - 1
-            requires_human = approaching_limit
+            # Default: request changes and loop back (legacy path)
+            approaching_iteration_limit = iteration >= self.max_iterations - 1
+            exceeds_replan_limit = (
+                consecutive_replans >= self.config.workflow.max_consecutive_replans - 1
+            )
+            requires_human = approaching_iteration_limit or exceeds_replan_limit
 
-            if approaching_limit:
+            if exceeds_replan_limit:
+                rationale = (
+                    f"Review requested changes - consecutive replans "
+                    f"{consecutive_replans + 1}/{self.config.workflow.max_consecutive_replans} "
+                    "(replan limit reached, human approval needed)."
+                )
+            elif approaching_iteration_limit:
                 rationale = (
                     f"Review requested changes; iteration {iteration}/{self.max_iterations} "
                     "(approaching limit, human approval may be needed)."
