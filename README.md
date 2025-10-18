@@ -14,10 +14,14 @@ Workflow orchestrator that automates the collaboration between Codex (planning/r
 - Extensive test coverage (unit + integration tests)
 - Cross-platform compatibility (Windows, macOS, Linux)
 
-🚧 **In Progress**:
-- Real Codex and Claude Code CLI integrations
+✅ **Recent Additions**:
+- Codex and Claude Code CLI integrations (smoke tested)
 - Git operations and commit tracking
-- Advanced workflow policies and approval routing
+- Workflow policies and approval routing
+- Review verdict parsing (APPROVE/CHANGES_REQUESTED/BLOCKED)
+- Guardrail enforcement (iterations, replans, runtime)
+- Feature branch isolation
+- JSONL streaming support (Codex)
 
 ## Quick Start
 

@@ -1,0 +1,526 @@
+"""Bootstrap utilities for initializing a new Duet workspace."""
+
+from __future__ import annotations
+
+import subprocess
+from pathlib import Path
+from typing import Optional
+
+from rich.console import Console
+from rich.panel import Panel
+
+
+class InitError(Exception):
+    """Exception raised during duet init."""
+
+    pass
+
+
+class DuetInitializer:
+    """Handles duet init command for workspace bootstrapping."""
+
+    def __init__(
+        self,
+        workspace_root: Path,
+        config_path: Optional[Path] = None,
+        force: bool = False,
+        skip_discovery: bool = False,
+        model_codex: str = "gpt-5-codex",
+        model_claude: str = "sonnet",
+        console: Optional[Console] = None,
+    ):
+        self.workspace_root = workspace_root.resolve()
+        self.config_path = config_path or (self.workspace_root / ".duet")
+        self.force = force
+        self.skip_discovery = skip_discovery
+        self.model_codex = model_codex
+        self.model_claude = model_claude
+        self.console = console or Console()
+
+    def _display_path(self, path: Path) -> str:
+        """Get display path (relative to workspace if possible, otherwise absolute)."""
+        try:
+            return str(path.relative_to(self.workspace_root))
+        except ValueError:
+            return str(path)
+
+    def init(self) -> None:
+        """
+        Initialize Duet workspace.
+
+        Creates:
+        - .duet/ directory structure
+        - duet.yaml configuration
+        - Prompt templates
+        - Context discovery (optional)
+        - Scaffold files (.gitkeep, placeholder DB)
+        """
+        self.console.print(
+            Panel(
+                "[bold cyan]Duet Workspace Initialization[/]\n\n"
+                f"[bold]Workspace:[/] {self.workspace_root}\n"
+                f"[bold]Config Path:[/] {self.config_path}",
+                title="duet init",
+                expand=False,
+            )
+        )
+
+        # Check if .duet already exists
+        if self.config_path.exists() and not self.force:
+            raise InitError(
+                f".duet directory already exists at: {self.config_path}\n"
+                "Use --force to overwrite existing configuration."
+            )
+
+        # Create directory structure
+        self._create_directories()
+
+        # Generate configuration
+        self._create_config()
+
+        # Create prompt templates
+        self._create_prompt_templates()
+
+        # Create scaffold files
+        self._create_scaffold_files()
+
+        # Run context discovery (optional)
+        if not self.skip_discovery:
+            self._run_context_discovery()
+        else:
+            self._create_placeholder_context()
+
+        self.console.print()
+        self.console.print("[green bold]✓ Duet workspace initialized successfully![/]")
+        self.console.print()
+        self.console.print("[bold]Next steps:[/]")
+        self.console.print("  1. Review configuration: cat .duet/duet.yaml")
+        self.console.print("  2. Customize prompts in: .duet/prompts/")
+        self.console.print("  3. Run orchestration: uv run duet run")
+        self.console.print()
+
+    def _create_directories(self) -> None:
+        """Create .duet directory structure."""
+        directories = [
+            self.config_path,
+            self.config_path / "prompts",
+            self.config_path / "runs",
+            self.config_path / "logs",
+            self.config_path / "context",
+        ]
+
+        for directory in directories:
+            directory.mkdir(parents=True, exist_ok=True)
+            self.console.log(f"[green]Created:[/] {self._display_path(directory)}")
+
+        # Create README in .duet/
+        readme_content = """# Duet Workspace
+
+This directory contains Duet orchestration artifacts and configuration.
+
+## Structure
+
+- **duet.yaml**: Configuration file (models, workflow, guardrails)
+- **prompts/**: Prompt templates for PLAN, IMPLEMENT, REVIEW phases
+- **runs/**: Orchestration run artifacts (checkpoints, iterations, summaries)
+- **logs/**: Structured JSONL event logs
+- **context/**: Repository context and discovery outputs
+- **duet.db**: (Future) SQLite database for run metadata
+
+## Usage
+
+Start an orchestration run:
+```bash
+uv run duet run
+```
+
+Check run status:
+```bash
+uv run duet status <run-id>
+```
+
+View run summary:
+```bash
+uv run duet summary <run-id>
+```
+
+## Documentation
+
+See https://github.com/femtomc/duet for full documentation.
+"""
+        readme_path = self.config_path / "README.md"
+        readme_path.write_text(readme_content, encoding="utf-8")
+        self.console.log(f"[green]Created:[/] {self._display_path(readme_path)}")
+
+    def _create_config(self) -> None:
+        """Generate duet.yaml configuration file."""
+        config_content = f"""# ────────────────────────────────────────────────────────────────────────────
+# Duet Configuration
+# Generated by: duet init
+# ────────────────────────────────────────────────────────────────────────────
+
+# ──── Codex Configuration (Planning & Review) ────
+codex:
+  provider: "codex"
+  model: "{self.model_codex}"
+  timeout: 300
+
+# ──── Claude Code Configuration (Implementation) ────
+claude:
+  provider: "claude-code"
+  model: "{self.model_claude}"
+  timeout: 600
+
+# ──── Workflow Settings ────
+workflow:
+  max_iterations: 5
+  require_human_approval: true
+  auto_merge_on_approval: false
+
+  # Guardrails
+  max_consecutive_replans: 3
+  # max_phase_runtime_seconds: 600  # Optional: max runtime per phase
+  require_git_changes: true
+  use_feature_branches: true
+  restore_branch_on_complete: true
+
+# ──── Storage Settings ────
+storage:
+  workspace_root: "{self.workspace_root}"
+  run_artifact_dir: "{self.config_path / 'runs'}"
+
+# ──── Logging Settings ────
+logging:
+  enable_jsonl: true
+  jsonl_dir: "{self.config_path / 'logs'}"
+
+# ────────────────────────────────────────────────────────────────────────────
+# Tips:
+# - To use echo adapters for testing, set provider: "echo"
+# - Customize prompts in .duet/prompts/ directory
+# - Review context discovery in .duet/context/context.md
+# - Monitor runs in .duet/runs/<run-id>/
+# ────────────────────────────────────────────────────────────────────────────
+"""
+        config_file = self.config_path / "duet.yaml"
+        config_file.write_text(config_content, encoding="utf-8")
+        self.console.log(f"[green]Created:[/] {self._display_path(config_file)}")
+
+    def _create_prompt_templates(self) -> None:
+        """Create prompt template files."""
+        prompts_dir = self.config_path / "prompts"
+
+        # PLAN prompt
+        plan_prompt = """# Plan Phase Prompt Template
+
+**Role**: Planner (Codex)
+
+**Objective**: Draft an implementation plan for the next increment.
+
+## Instructions
+
+1. Review the task requirements and any prior review feedback
+2. Break down the implementation into concrete steps
+3. Identify files that need to be modified
+4. Note any potential risks or dependencies
+5. Provide a clear, actionable plan for the implementer
+
+## Output Format
+
+Provide a structured plan with:
+- **Overview**: High-level summary of changes
+- **Steps**: Numbered list of implementation tasks
+- **Files**: List of files to modify/create
+- **Risks**: Potential issues or dependencies
+- **Testing**: How to verify the implementation
+
+---
+
+**Current Template** (used if this file is consumed in future versions):
+{prompt_from_orchestrator}
+
+---
+
+<!-- Edit this template to customize planning prompts -->
+"""
+
+        # IMPLEMENT prompt
+        implement_prompt = """# Implement Phase Prompt Template
+
+**Role**: Implementer (Claude Code)
+
+**Objective**: Apply the plan to the repository and commit changes.
+
+## Instructions
+
+1. Follow the implementation plan carefully
+2. Modify/create files as specified
+3. Write clean, well-documented code
+4. Run tests to verify functionality
+5. Create clear commit messages
+6. Ensure all changes are committed
+
+## Guidelines
+
+- **Code Quality**: Follow repository conventions and style
+- **Testing**: Run existing tests, add new tests if needed
+- **Git**: Stage and commit all changes with descriptive messages
+- **Documentation**: Update docs if interface changes
+
+## Output Format
+
+Provide:
+- **Summary**: What was implemented
+- **Files Modified**: List of changed files
+- **Commits**: Commit SHAs created
+- **Tests**: Test results (pass/fail)
+- **Notes**: Any issues or deviations from plan
+
+---
+
+**Current Template** (used if this file is consumed in future versions):
+{prompt_from_orchestrator}
+
+---
+
+<!-- Edit this template to customize implementation prompts -->
+"""
+
+        # REVIEW prompt
+        review_prompt = """# Review Phase Prompt Template
+
+**Role**: Reviewer (Codex)
+
+**Objective**: Review implementation and provide structured verdict.
+
+## Instructions
+
+1. Compare implementation against the original plan
+2. Review code quality, correctness, and completeness
+3. Check that tests pass and coverage is adequate
+4. Verify commit messages are clear
+5. Provide actionable feedback if changes needed
+
+## Review Criteria
+
+- **Correctness**: Does the implementation match the plan?
+- **Quality**: Is the code well-structured and documented?
+- **Testing**: Are tests comprehensive and passing?
+- **Completeness**: Are all requirements addressed?
+- **Safety**: Any security or reliability concerns?
+
+## Verdict Options
+
+Provide one of:
+
+- **APPROVE**: Implementation is acceptable, ready to merge
+  - Use when all criteria met
+  - Set in metadata: `{{"verdict": "approve"}}`
+
+- **CHANGES_REQUESTED**: Revisions needed, loop back to planning
+  - Use for minor issues or missing requirements
+  - Provide specific feedback for next iteration
+  - Set in metadata: `{{"verdict": "changes_requested"}}`
+
+- **BLOCKED**: Critical issues requiring human intervention
+  - Use for major problems or unclear requirements
+  - Explain why human review is needed
+  - Set in metadata: `{{"verdict": "blocked"}}`
+
+## Output Format
+
+Provide:
+- **Summary**: Overall assessment
+- **Verdict**: APPROVE | CHANGES_REQUESTED | BLOCKED
+- **Strengths**: What was done well
+- **Issues**: Problems found (if any)
+- **Recommendations**: Specific changes needed (if CHANGES_REQUESTED)
+
+Include verdict in response metadata as: `{{"verdict": "approve"}}` (or changes_requested/blocked)
+
+---
+
+**Current Template** (used if this file is consumed in future versions):
+{prompt_from_orchestrator}
+
+---
+
+<!-- Edit this template to customize review prompts -->
+"""
+
+        templates = {
+            "plan.md": plan_prompt,
+            "implement.md": implement_prompt,
+            "review.md": review_prompt,
+        }
+
+        for filename, content in templates.items():
+            template_path = prompts_dir / filename
+            template_path.write_text(content, encoding="utf-8")
+            self.console.log(f"[green]Created:[/] {self._display_path(template_path)}")
+
+    def _create_scaffold_files(self) -> None:
+        """Create .gitkeep files and placeholder database."""
+        # .gitkeep files
+        gitkeep_paths = [
+            self.config_path / "logs" / ".gitkeep",
+            self.config_path / "runs" / ".gitkeep",
+            self.config_path / "context" / ".gitkeep",
+        ]
+
+        for gitkeep in gitkeep_paths:
+            gitkeep.write_text("", encoding="utf-8")
+            self.console.log(f"[green]Created:[/] {self._display_path(gitkeep)}")
+
+        # Placeholder SQLite database (for Sprint 5)
+        db_path = self.config_path / "duet.db"
+        if not db_path.exists():
+            # Touch the file to reserve the path
+            db_path.write_bytes(b"")
+            self.console.log(f"[dim]Reserved:[/] {self._display_path(db_path)} (for future use)")
+
+    def _run_context_discovery(self) -> None:
+        """
+        Run Codex discovery to map repository structure.
+
+        Invokes Codex with a discovery prompt and saves output to context.md.
+        Gracefully handles failures (CLI missing, auth issues, etc.).
+        """
+        self.console.print()
+        self.console.print("[cyan]Running repository context discovery with Codex...[/]")
+
+        discovery_prompt = """Analyze this repository and provide a comprehensive overview:
+
+1. **Project Purpose**: What does this project do?
+2. **Structure**: Key directories and their roles
+3. **Technologies**: Languages, frameworks, build tools
+4. **Entry Points**: Main files, CLI commands, APIs
+5. **Dependencies**: Package managers, key dependencies
+6. **TODOs/Issues**: Notable TODOs or open issues in code
+7. **Development Workflow**: How to build, test, run
+
+Be concise but comprehensive. This will help the orchestrator understand the codebase.
+"""
+
+        try:
+            result = subprocess.run(
+                [
+                    "codex",
+                    "exec",
+                    "--json",
+                    "--model",
+                    self.model_codex,
+                    discovery_prompt,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=120,  # 2 minute timeout for discovery
+                check=False,
+                cwd=self.workspace_root,
+            )
+
+            if result.returncode != 0:
+                self.console.log(
+                    f"[yellow]Context discovery failed (exit code {result.returncode})[/]"
+                )
+                self.console.log(
+                    f"[dim]Error: {result.stderr.strip()[:200]}[/]"
+                )
+                self._create_placeholder_context()
+                return
+
+            # Parse JSONL output to extract agent message
+            import json
+
+            lines = result.stdout.strip().split("\n")
+            context_text = None
+
+            for line in lines:
+                if not line.strip():
+                    continue
+                try:
+                    event = json.loads(line)
+                    if event.get("type") == "item.completed":
+                        item = event.get("item", {})
+                        if item.get("type") == "agent_message":
+                            context_text = item.get("text")
+                except json.JSONDecodeError:
+                    continue
+
+            if not context_text:
+                self.console.log("[yellow]No context extracted from Codex response[/]")
+                self._create_placeholder_context()
+                return
+
+            # Write context to file
+            import datetime as dt
+
+            timestamp = dt.datetime.now(dt.timezone.utc).isoformat()
+            context_content = f"""# Repository Context
+
+**Generated**: {timestamp}
+**Model**: {self.model_codex}
+**Method**: Codex repository discovery
+
+---
+
+{context_text}
+
+---
+
+**Rerun Discovery**: `uv run duet init --force --skip-discovery=false`
+
+<!-- This file can be manually edited to improve orchestrator context -->
+"""
+
+            context_file = self.config_path / "context" / "context.md"
+            context_file.write_text(context_content, encoding="utf-8")
+            self.console.log(f"[green]Created:[/] {self._display_path(context_file)}")
+            self.console.print("[green]✓ Context discovery complete[/]")
+
+        except FileNotFoundError:
+            self.console.log(
+                "[yellow]Codex CLI not found - skipping context discovery[/]"
+            )
+            self._create_placeholder_context()
+        except subprocess.TimeoutExpired:
+            self.console.log(
+                "[yellow]Context discovery timeout - skipping[/]"
+            )
+            self._create_placeholder_context()
+        except Exception as exc:
+            self.console.log(
+                f"[yellow]Context discovery error: {exc}[/]"
+            )
+            self._create_placeholder_context()
+
+    def _create_placeholder_context(self) -> None:
+        """Create placeholder context.md when discovery is skipped or fails."""
+        context_content = """# Repository Context
+
+**Status**: Discovery skipped or failed
+
+To generate context discovery:
+```bash
+uv run duet init --force
+```
+
+Or manually document your repository context here:
+
+## Project Purpose
+<!-- What does this project do? -->
+
+## Structure
+<!-- Key directories and their roles -->
+
+## Technologies
+<!-- Languages, frameworks, tools -->
+
+## Development Workflow
+<!-- How to build, test, run -->
+
+<!-- This file helps the orchestrator understand your codebase -->
+"""
+        context_file = self.config_path / "context" / "context.md"
+        context_file.write_text(context_content, encoding="utf-8")
+        self.console.log(f"[dim]Created:[/] {self._display_path(context_file)} (placeholder)")

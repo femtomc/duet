@@ -10,10 +10,47 @@ from rich.console import Console
 
 from .artifacts import ArtifactStore
 from .config import DuetConfig, find_config
+from .init import DuetInitializer, InitError
 from .orchestrator import Orchestrator
 
 app = typer.Typer(help="Automate the Codex ↔ Claude workflow.")
 console = Console()
+
+
+@app.command()
+def init(
+    workspace: Path = typer.Argument(
+        Path("."), help="Workspace root directory (default: current directory)"
+    ),
+    config_path: Optional[Path] = typer.Option(
+        None, "--config-path", help="Custom path for .duet directory (default: <workspace>/.duet)"
+    ),
+    force: bool = typer.Option(False, "--force", help="Overwrite existing .duet directory"),
+    skip_discovery: bool = typer.Option(
+        False, "--skip-discovery", help="Skip Codex repository context discovery"
+    ),
+    model_codex: str = typer.Option(
+        "gpt-5-codex", "--model-codex", help="Codex model for planning/review"
+    ),
+    model_claude: str = typer.Option(
+        "sonnet", "--model-claude", help="Claude Code model for implementation"
+    ),
+) -> None:
+    """Initialize a new Duet workspace with configuration and scaffolding."""
+    try:
+        initializer = DuetInitializer(
+            workspace_root=workspace,
+            config_path=config_path,
+            force=force,
+            skip_discovery=skip_discovery,
+            model_codex=model_codex,
+            model_claude=model_claude,
+            console=console,
+        )
+        initializer.init()
+    except InitError as exc:
+        console.print(f"[red]Initialization failed:[/] {exc}")
+        raise typer.Exit(1)
 
 
 @app.command()

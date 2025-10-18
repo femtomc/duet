@@ -1,0 +1,282 @@
+"""
+Tests for duet init command.
+
+Tests workspace initialization, directory scaffolding, config generation,
+and context discovery.
+"""
+
+from __future__ import annotations
+
+import tempfile
+from pathlib import Path
+from unittest.mock import Mock, patch
+
+import pytest
+from rich.console import Console
+
+from duet.init import DuetInitializer, InitError
+
+
+@pytest.fixture
+def temp_workspace():
+    """Create a temporary workspace for testing."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        yield Path(tmpdir)
+
+
+def test_init_creates_directory_structure(temp_workspace):
+    """Test that init creates all required directories."""
+    initializer = DuetInitializer(
+        workspace_root=temp_workspace,
+        skip_discovery=True,  # Skip discovery for faster test
+        console=Console(),
+    )
+
+    initializer.init()
+
+    # Verify directories created
+    duet_dir = temp_workspace / ".duet"
+    assert duet_dir.exists()
+    assert (duet_dir / "prompts").exists()
+    assert (duet_dir / "runs").exists()
+    assert (duet_dir / "logs").exists()
+    assert (duet_dir / "context").exists()
+
+
+def test_init_creates_config_file(temp_workspace):
+    """Test that init creates duet.yaml with correct content."""
+    initializer = DuetInitializer(
+        workspace_root=temp_workspace,
+        model_codex="test-codex-model",
+        model_claude="test-claude-model",
+        skip_discovery=True,
+        console=Console(),
+    )
+
+    initializer.init()
+
+    config_file = temp_workspace / ".duet" / "duet.yaml"
+    assert config_file.exists()
+
+    content = config_file.read_text()
+    assert "test-codex-model" in content
+    assert "test-claude-model" in content
+    assert "workspace_root" in content
+    assert "workflow" in content
+
+
+def test_init_creates_prompt_templates(temp_workspace):
+    """Test that init creates all prompt templates."""
+    initializer = DuetInitializer(
+        workspace_root=temp_workspace,
+        skip_discovery=True,
+        console=Console(),
+    )
+
+    initializer.init()
+
+    prompts_dir = temp_workspace / ".duet" / "prompts"
+    assert (prompts_dir / "plan.md").exists()
+    assert (prompts_dir / "implement.md").exists()
+    assert (prompts_dir / "review.md").exists()
+
+    # Verify content
+    plan_content = (prompts_dir / "plan.md").read_text()
+    assert "Plan Phase" in plan_content
+    assert "Instructions" in plan_content
+
+
+def test_init_creates_gitkeep_files(temp_workspace):
+    """Test that init creates .gitkeep files."""
+    initializer = DuetInitializer(
+        workspace_root=temp_workspace,
+        skip_discovery=True,
+        console=Console(),
+    )
+
+    initializer.init()
+
+    duet_dir = temp_workspace / ".duet"
+    assert (duet_dir / "logs" / ".gitkeep").exists()
+    assert (duet_dir / "runs" / ".gitkeep").exists()
+    assert (duet_dir / "context" / ".gitkeep").exists()
+
+
+def test_init_creates_placeholder_db(temp_workspace):
+    """Test that init creates placeholder database file."""
+    initializer = DuetInitializer(
+        workspace_root=temp_workspace,
+        skip_discovery=True,
+        console=Console(),
+    )
+
+    initializer.init()
+
+    db_path = temp_workspace / ".duet" / "duet.db"
+    assert db_path.exists()
+
+
+def test_init_fails_without_force_when_exists(temp_workspace):
+    """Test that init fails if .duet exists without --force."""
+    duet_dir = temp_workspace / ".duet"
+    duet_dir.mkdir()
+
+    initializer = DuetInitializer(
+        workspace_root=temp_workspace,
+        force=False,
+        skip_discovery=True,
+        console=Console(),
+    )
+
+    with pytest.raises(InitError) as exc_info:
+        initializer.init()
+
+    assert "already exists" in str(exc_info.value)
+    assert "--force" in str(exc_info.value)
+
+
+def test_init_overwrites_with_force(temp_workspace):
+    """Test that init overwrites existing .duet with --force."""
+    duet_dir = temp_workspace / ".duet"
+    duet_dir.mkdir()
+    (duet_dir / "old_file.txt").write_text("old content")
+
+    initializer = DuetInitializer(
+        workspace_root=temp_workspace,
+        force=True,
+        skip_discovery=True,
+        console=Console(),
+    )
+
+    # Should not raise
+    initializer.init()
+
+    # Should have created new structure
+    assert (duet_dir / "prompts").exists()
+    assert (duet_dir / "duet.yaml").exists()
+
+
+def test_init_skip_discovery_creates_placeholder(temp_workspace):
+    """Test that --skip-discovery creates placeholder context."""
+    initializer = DuetInitializer(
+        workspace_root=temp_workspace,
+        skip_discovery=True,
+        console=Console(),
+    )
+
+    initializer.init()
+
+    context_file = temp_workspace / ".duet" / "context" / "context.md"
+    assert context_file.exists()
+
+    content = context_file.read_text()
+    assert "Discovery skipped" in content or "placeholder" in content.lower()
+
+
+def test_init_context_discovery_success(temp_workspace):
+    """Test successful context discovery with Codex."""
+    initializer = DuetInitializer(
+        workspace_root=temp_workspace,
+        model_codex="test-model",
+        skip_discovery=False,
+        console=Console(),
+    )
+
+    # Mock Codex CLI response (JSONL format)
+    import json
+
+    mock_result = Mock()
+    mock_result.returncode = 0
+    mock_result.stdout = "\n".join(
+        [
+            json.dumps({"type": "thread.started", "thread_id": "test"}),
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "agent_message",
+                        "text": "This is a test project for unit testing.",
+                    },
+                }
+            ),
+            json.dumps({"type": "turn.completed", "usage": {}}),
+        ]
+    )
+    mock_result.stderr = ""
+
+    with patch("subprocess.run", return_value=mock_result):
+        initializer.init()
+
+    context_file = temp_workspace / ".duet" / "context" / "context.md"
+    assert context_file.exists()
+
+    content = context_file.read_text()
+    assert "test project" in content.lower()
+    assert "test-model" in content
+
+
+def test_init_context_discovery_cli_failure(temp_workspace):
+    """Test that init handles Codex CLI failures gracefully."""
+    initializer = DuetInitializer(
+        workspace_root=temp_workspace,
+        skip_discovery=False,
+        console=Console(),
+    )
+
+    # Mock failed Codex CLI
+    mock_result = Mock()
+    mock_result.returncode = 1
+    mock_result.stderr = "Authentication failed"
+    mock_result.stdout = ""
+
+    with patch("subprocess.run", return_value=mock_result):
+        # Should not raise, should create placeholder instead
+        initializer.init()
+
+    context_file = temp_workspace / ".duet" / "context" / "context.md"
+    assert context_file.exists()
+
+    content = context_file.read_text()
+    assert "skipped" in content.lower() or "failed" in content.lower()
+
+
+def test_init_custom_config_path(temp_workspace):
+    """Test init with custom config path."""
+    custom_path = temp_workspace / "custom" / "duet-config"
+
+    initializer = DuetInitializer(
+        workspace_root=temp_workspace,
+        config_path=custom_path,
+        skip_discovery=True,
+        console=Console(),
+    )
+
+    initializer.init()
+
+    # Verify custom path used
+    assert custom_path.exists()
+    assert (custom_path / "duet.yaml").exists()
+    assert (custom_path / "prompts").exists()
+
+
+def test_init_creates_readme(temp_workspace):
+    """Test that init creates README.md in .duet/."""
+    initializer = DuetInitializer(
+        workspace_root=temp_workspace,
+        skip_discovery=True,
+        console=Console(),
+    )
+
+    initializer.init()
+
+    readme = temp_workspace / ".duet" / "README.md"
+    assert readme.exists()
+
+    content = readme.read_text()
+    assert "Duet Workspace" in content
+    assert "Structure" in content
+    assert "duet run" in content
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])
