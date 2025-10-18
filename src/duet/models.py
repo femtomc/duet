@@ -18,6 +18,14 @@ class Phase(str, Enum):
     BLOCKED = "blocked"
 
 
+class ReviewVerdict(str, Enum):
+    """Review outcome from Codex reviewer."""
+
+    APPROVE = "approve"  # Changes approved, ready to merge/continue
+    CHANGES_REQUESTED = "changes_requested"  # Revisions needed, loop back to planning
+    BLOCKED = "blocked"  # Critical issues, requires human intervention
+
+
 class AssistantRequest(BaseModel):
     """Prompt details delivered to an assistant adapter."""
 
@@ -31,7 +39,8 @@ class AssistantResponse(BaseModel):
 
     content: str
     metadata: Dict[str, Any] = Field(default_factory=dict)
-    concluded: bool = False
+    concluded: bool = False  # Legacy field: True if task is complete
+    verdict: Optional[ReviewVerdict] = None  # Structured review outcome (REVIEW phase only)
 
 
 class TransitionDecision(BaseModel):

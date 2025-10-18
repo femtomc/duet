@@ -13,8 +13,16 @@ from rich.table import Table
 from .adapters import REGISTRY, AssistantAdapter
 from .artifacts import ArtifactStore
 from .config import DuetConfig
+from .git_operations import GitWorkspace
 from .logging import DuetLogger
-from .models import AssistantRequest, AssistantResponse, Phase, RunSnapshot, TransitionDecision
+from .models import (
+    AssistantRequest,
+    AssistantResponse,
+    Phase,
+    ReviewVerdict,
+    RunSnapshot,
+    TransitionDecision,
+)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # STATE MACHINE TRANSITION RULES
@@ -76,6 +84,9 @@ class Orchestrator:
             jsonl_path=jsonl_path,
             enable_jsonl=config.logging.enable_jsonl,
         )
+
+        # Initialize git workspace for change detection
+        self.git = GitWorkspace(self.config.storage.workspace_root, console=self.console)
 
     def _build_adapter(self, assistant_cfg):
         """
@@ -178,6 +189,46 @@ class Orchestrator:
                 self.console.log("[yellow]Empty response detected, marking run as BLOCKED[/]")
                 self._persist_interaction(snapshot.run_id, current_phase, request, response)
                 break
+
+            # ──── Implementation Validation: Detect Repository Changes ────
+            if current_phase == Phase.IMPLEMENT:
+                try:
+                    if self.git.is_git_repo():
+                        changes = self.git.detect_changes()
+
+                        # Store change summary in response metadata
+                        response.metadata["git_changes"] = {
+                            "has_changes": changes.has_changes,
+                            "files_changed": changes.files_changed,
+                            "insertions": changes.insertions,
+                            "deletions": changes.deletions,
+                            "staged_files": changes.staged_files,
+                            "commit_sha": changes.commit_sha,
+                            "diff_stat": changes.diff_stat,
+                        }
+
+                        # Fail iteration if no changes detected
+                        if not changes.has_changes:
+                            snapshot.phase = Phase.BLOCKED
+                            snapshot.notes = (
+                                "Implementation phase produced no repository changes. "
+                                "Claude must modify files, stage changes, or create commits."
+                            )
+                            self.console.log(
+                                "[red]No repository changes detected after IMPLEMENT phase[/]"
+                            )
+                            self._persist_interaction(snapshot.run_id, current_phase, request, response)
+                            break
+
+                        # Log detected changes
+                        self.console.log(
+                            f"[green]Detected changes:[/] {changes.files_changed} files, "
+                            f"+{changes.insertions}/-{changes.deletions}"
+                        )
+                except Exception as exc:
+                    # Git detection failure shouldn't block the run, just warn
+                    self.console.log(f"[yellow]Git change detection failed: {exc}[/]")
+                    response.metadata["git_changes"] = {"error": str(exc)}
 
             # ──── Decide Next Phase ────
             decision = self._decide_next_phase(current_phase, response, iteration)
@@ -328,7 +379,7 @@ class Orchestrator:
     def _compose_review_request(self, snapshot: RunSnapshot) -> tuple[str, dict]:
         """Compose request for REVIEW phase with plan + implementation response."""
         prompt_parts = [
-            "Review the latest changes and provide approval status.",
+            "Review the latest changes and provide a structured verdict.",
             "",
             f"Iteration: {snapshot.iteration}/{self.max_iterations}",
         ]
@@ -359,7 +410,14 @@ class Orchestrator:
             [
                 "",
                 "Assess whether the implementation meets the plan's requirements.",
-                "Set 'concluded' to True if approved, False if changes needed.",
+                "",
+                "Provide your verdict as one of:",
+                "- APPROVE: Changes are acceptable, ready to proceed",
+                "- CHANGES_REQUESTED: Revisions needed, will loop back to planning",
+                "- BLOCKED: Critical issues requiring human intervention",
+                "",
+                "Include your verdict in the response metadata as 'verdict'.",
+                "Set 'concluded' to True only if verdict is APPROVE.",
             ]
         )
 
@@ -420,11 +478,42 @@ class Orchestrator:
 
         # ──── REVIEW Phase ────
         if phase == Phase.REVIEW:
+            # Honor structured verdict if provided
+            if response.verdict:
+                if response.verdict == ReviewVerdict.APPROVE:
+                    rationale = "Review verdict: APPROVE - marking run as DONE."
+                    return TransitionDecision(next_phase=Phase.DONE, rationale=rationale)
+
+                elif response.verdict == ReviewVerdict.BLOCKED:
+                    rationale = "Review verdict: BLOCKED - critical issues require human intervention."
+                    return TransitionDecision(
+                        next_phase=Phase.BLOCKED,
+                        rationale=rationale,
+                        requires_human=True,
+                    )
+
+                elif response.verdict == ReviewVerdict.CHANGES_REQUESTED:
+                    approaching_limit = iteration >= self.max_iterations - 1
+                    requires_human = approaching_limit
+
+                    if approaching_limit:
+                        rationale = (
+                            f"Review verdict: CHANGES_REQUESTED - iteration {iteration}/{self.max_iterations} "
+                            "(approaching limit, human approval may be needed)."
+                        )
+                    else:
+                        rationale = "Review verdict: CHANGES_REQUESTED - looping back to planning."
+
+                    return TransitionDecision(
+                        next_phase=Phase.PLAN, rationale=rationale, requires_human=requires_human
+                    )
+
+            # Fallback to legacy 'concluded' field if no verdict
             if response.concluded:
-                rationale = "Review approved; marking run as DONE."
+                rationale = "Review approved (legacy concluded=True); marking run as DONE."
                 return TransitionDecision(next_phase=Phase.DONE, rationale=rationale)
 
-            # Review requested changes - loop back to PLAN
+            # Default: request changes and loop back
             approaching_limit = iteration >= self.max_iterations - 1
             requires_human = approaching_limit
 
