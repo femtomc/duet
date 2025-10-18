@@ -92,11 +92,11 @@ All commands accept `--config PATH` to point to an alternate `duet.yaml`. If omi
 ```
 .duet/
 ├── duet.yaml           # Adapter configuration and workflow guardrails
-├── prompts/            # Prompt templates for PLAN / IMPLEMENT / REVIEW
+├── ide.py              # Workflow definition using Python DSL (Sprint 9)
 ├── context/            # Repository discovery notes
 ├── runs/               # Run artifacts (checkpoints, iterations, summaries)
 ├── logs/               # JSONL event stream (optional)
-└── duet.db             # SQLite persistence (runs, iterations, events, stats)
+└── duet.db             # SQLite persistence (runs, iterations, events, states)
 ```
 
 Artifacts inside `runs/<run-id>/` include:
@@ -185,6 +185,73 @@ Examples:
 - **Debugging**: Restore to a checkpoint to investigate what went wrong
 - **Manual approval**: Pause between phases to review before proceeding
 - **Feedback loops**: Provide specific guidance after plan or review phases
+
+## Workflow DSL (Sprint 9)
+
+Sprint 9 introduces a **Python DSL** for defining workflows programmatically, replacing legacy prompt templates with a type-safe, channel-based messaging system.
+
+### Channel-Based Messaging
+
+Workflows now use **channels** for structured communication between phases:
+
+```python
+from duet.dsl import Agent, Channel, Phase, Transition, When, Workflow
+
+workflow = Workflow(
+    agents=[
+        Agent(name="planner", provider="codex", model="gpt-5-codex"),
+        Agent(name="implementer", provider="claude", model="sonnet"),
+    ],
+    channels=[
+        Channel(name="task", schema="text"),
+        Channel(name="plan", schema="text"),
+        Channel(name="code", schema="git_diff"),
+    ],
+    phases=[
+        Phase(name="plan", agent="planner",
+              consumes=["task"], publishes=["plan"]),
+        Phase(name="implement", agent="implementer",
+              consumes=["plan"], publishes=["code"]),
+    ],
+    transitions=[
+        Transition(from_phase="plan", to_phase="implement"),
+    ],
+)
+```
+
+### Key Concepts
+
+**Agents** - AI models that execute phases (Codex, Claude Code, custom)
+
+**Channels** - Communication pathways carrying typed data (text, JSON, git diffs, verdicts)
+
+**Phases** - Workflow steps that consume from channels and publish results
+- `consumes: List[str]` - Input channels
+- `publishes: List[str]` - Output channels
+- `description: str` - Human-readable purpose
+
+**Transitions** - Conditional state changes with guard predicates
+- `when: Guard` - Condition that must evaluate to True
+- `priority: int` - For conflict resolution (higher = preferred)
+
+**Guards** - Predicates for transition conditions
+- `When.always()` - Always fires
+- `When.channel_has("verdict", "approve")` - Check channel value
+- `When.git_changes(required=True)` - Verify git changes
+- `When.all(guard1, guard2)` - Boolean AND
+- `When.any(guard1, guard2)` - Boolean OR
+- `When.not_(guard)` - Boolean NOT
+
+### Customization
+
+Edit `.duet/ide.py` to customize your workflow:
+- Add/remove agents for different models
+- Define custom channels for domain-specific data
+- Configure phase dependencies (consumes/publishes)
+- Set conditional transitions with guards
+- Adjust priorities for deterministic routing
+
+See `docs/workflow_dsl.md` for comprehensive DSL reference.
 
 ## Running and Monitoring
 
@@ -307,5 +374,6 @@ duet history --phase review --verdict changes_requested --since 2025-10-15
 - **Sprint 5**: SQLite persistence layer, CLI history/inspect commands, artifact migration.
 - **Sprint 6**: Streaming infrastructure with real-time console output, event persistence, advanced CLI filtering, and JSON export.
 - **Sprint 7**: Enhanced streaming displays with configurable modes (detailed/compact/off).
-- **Sprint 8** (Complete): Stateful CLI workflow with phase-by-phase execution, state checkpoints, git baseline management, and time-travel commands (`duet next`, `duet cont`, `duet back`, `duet status`).
-- **Upcoming**: TUI dashboard, `jj` backend support. See `docs/integration_plan.md` for roadmap.
+- **Sprint 8**: Stateful CLI workflow with phase-by-phase execution, state checkpoints, git baseline management, and time-travel commands (`duet next`, `duet cont`, `duet back`, `duet status`).
+- **Sprint 9** (Complete): Python DSL for workflow definitions with channel-based messaging, guard system for conditional transitions, semantic validation compiler, and dynamic workflow loader. Replaces legacy prompt templates with `.duet/ide.py` declarative workflows.
+- **Upcoming**: Runtime integration (channel payload routing), orchestrator DSL wiring, TUI dashboard, `jj` backend support. See `docs/integration_plan.md` for roadmap.
