@@ -423,6 +423,9 @@ Be concise but comprehensive. This will help the orchestrator understand the cod
             event_count = 0
             reasoning_count = 0
             agent_message_snippet = None
+            reasoning_snippet = None
+            last_command = None
+            command_output = None
             token_count = 0
 
             def render_progress():
@@ -446,13 +449,23 @@ Be concise but comprehensive. This will help the orchestrator understand the cod
                 if agent_message_snippet:
                     lines.append("")
                     lines.append(f"[bold]Latest Analysis:[/]")
-                    # Truncate to 200 chars and show first line or two
                     snippet = agent_message_snippet[:200]
-                    if "\n" in snippet:
-                        first_line = snippet.split("\n")[0]
+                    first_line = snippet.split("\n", 1)[0]
+                    lines.append(f"  [dim]{first_line}...[/]")
+                elif reasoning_snippet:
+                    lines.append("")
+                    lines.append(f"[bold]Current Focus:[/]")
+                    snippet = reasoning_snippet[:200]
+                    first_line = snippet.split("\n", 1)[0]
+                    lines.append(f"  [dim]{first_line}[/]")
+                elif last_command:
+                    lines.append("")
+                    lines.append(f"[bold]Last Command:[/]")
+                    lines.append(f"  [dim]{last_command}[/]")
+                    if command_output:
+                        preview = command_output[:120]
+                        first_line = preview.split("\n", 1)[0]
                         lines.append(f"  [dim]{first_line}...[/]")
-                    else:
-                        lines.append(f"  [dim]{snippet}...[/]")
                 else:
                     lines.append("")
                     lines.append("[dim]Waiting for Codex response...[/]")
@@ -461,29 +474,37 @@ Be concise but comprehensive. This will help the orchestrator understand the cod
                 return Panel(content, border_style="cyan", expand=False)
 
             def on_event(event: StreamEvent) -> None:
-                """Handle streaming events during discovery."""
-                nonlocal event_count, reasoning_count, agent_message_snippet, token_count
+                """Handle streaming events during discovery (Sprint 7: canonical events)."""
+                nonlocal event_count, reasoning_count, agent_message_snippet, token_count, reasoning_snippet, last_command, command_output
                 event_count += 1
 
                 event_type = event["event_type"]
-                payload = event["payload"]
 
-                # Extract agent message for display
-                if event_type == "item.completed":
-                    item = payload.get("item", {})
-                    item_type = item.get("type")
+                # Extract agent message from enriched field (Sprint 7)
+                if event_type == "assistant_message":
+                    text = event.get("text_snippet", "")
+                    if text:
+                        agent_message_snippet = text
 
-                    if item_type == "agent_message":
-                        text = item.get("text", "")
-                        if text:
-                            agent_message_snippet = text
-                    elif item_type == "reasoning":
-                        reasoning_count += 1
+                # Track reasoning steps and capture text (Sprint 7)
+                elif event_type == "reasoning":
+                    reasoning_count += 1
+                    text = event.get("text_snippet", "")
+                    if text:
+                        reasoning_snippet = text
 
-                # Extract token usage
-                elif event_type == "turn.completed":
-                    usage = payload.get("usage", {})
-                    token_count = usage.get("output_tokens", 0)
+                # Track tool use (Sprint 7)
+                elif event_type == "tool_use":
+                    tool_info = event.get("tool_info", {})
+                    if tool_info:
+                        last_command = tool_info.get("tool_name", "unknown")
+                        command_output = tool_info.get("output_preview", "")
+
+                # Extract token usage from enriched field (Sprint 7)
+                elif event_type == "turn_complete":
+                    usage = event.get("usage", {})
+                    if usage:
+                        token_count = usage.get("output_tokens", 0)
 
             # Run discovery with live display
             with Live(render_progress(), console=self.console, refresh_per_second=4, transient=True) as live:
