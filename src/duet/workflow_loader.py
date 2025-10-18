@@ -103,29 +103,40 @@ def _resolve_workflow_path(
     """
     Resolve workflow module path using precedence rules.
 
+    Only returns paths that exist, allowing fallback to work correctly.
+
     Args:
         explicit_path: Explicit path provided by caller
         workspace_root: Workspace root for default resolution
 
     Returns:
-        Resolved Path to workflow module
+        Resolved Path to workflow module (may not exist - caller checks)
     """
-    # 1. Explicit path
+    candidates = []
+
+    # 1. Explicit path (highest priority, always returned if provided)
     if explicit_path:
         return explicit_path.expanduser().resolve()
 
     # 2. Environment variable
     env_path = os.environ.get("DUET_WORKFLOW_PATH")
     if env_path:
-        return Path(env_path).expanduser().resolve()
+        candidates.append(Path(env_path).expanduser().resolve())
 
     # 3. Workspace root
     if workspace_root:
-        candidate = workspace_root / ".duet" / "ide.py"
-        return candidate.expanduser().resolve()
+        candidates.append((workspace_root / ".duet" / "ide.py").expanduser().resolve())
 
     # 4. Current directory fallback
-    return Path(".duet/ide.py").expanduser().resolve()
+    candidates.append(Path(".duet/ide.py").expanduser().resolve())
+
+    # Return first existing candidate, or last candidate if none exist
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+
+    # If no candidates exist, return the last one (caller will handle missing file)
+    return candidates[-1] if candidates else Path(".duet/ide.py").expanduser().resolve()
 
 
 def _import_module_from_path(module_path: Path) -> Any:
