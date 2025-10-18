@@ -28,40 +28,71 @@ Workflow orchestrator that automates the collaboration between Codex (planning/r
 ### Installation
 
 1. Install [uv](https://docs.astral.sh/uv/) and ensure Python 3.10+ is available
-2. Sync dependencies:
+2. Clone the repository:
+   ```bash
+   git clone https://github.com/femtomc/duet.git
+   cd duet
+   ```
+3. Sync dependencies:
    ```bash
    uv sync --group dev
    ```
 
-### Configuration
+### Initialize Your Project Workspace
 
-Create `duet.yaml` from the example:
+**Recommended: One-Command Setup**
+
+Navigate to your project and initialize Duet:
 ```bash
+cd /path/to/your/project
+uv run /path/to/duet/duet init
+```
+
+This automatically creates:
+- `.duet/` directory structure
+- `.duet/duet.yaml` with production-ready configuration
+- `.duet/prompts/` with editable templates (plan, implement, review)
+- `.duet/context/context.md` with Codex repository analysis
+
+**Customization**:
+```bash
+# Review generated config
+cat .duet/duet.yaml
+
+# Edit configuration (optional)
+vim .duet/duet.yaml
+
+# Customize prompts (optional)
+vim .duet/prompts/review.md
+
+# Review repository context
+cat .duet/context/context.md
+```
+
+**Init Options**:
+```bash
+uv run duet init --force                # Overwrite existing .duet/
+uv run duet init --skip-discovery       # Skip Codex analysis (offline mode)
+uv run duet init --model-codex gpt-4    # Customize Codex model
+uv run duet init --model-claude opus    # Customize Claude model
+```
+
+<details>
+<summary><strong>Alternative: Manual Configuration</strong></summary>
+
+If you prefer not to use `duet init`:
+
+```bash
+# Copy example config
 cp config/duet.example.yaml duet.yaml
+
+# Edit manually
+vim duet.yaml
 ```
 
-Edit `duet.yaml` to configure your adapters:
-```yaml
-# Development mode (using echo adapters)
-codex:
-  provider: "echo"
-  model: "gpt-4"
+Note: Manual setup does not create prompt templates or run context discovery.
 
-claude:
-  provider: "echo"
-  model: "claude-sonnet-4"
-
-# Production mode (using real CLIs)
-# codex:
-#   provider: "codex"
-#   model: "gpt-4"
-#   temperature: 0.2
-#
-# claude:
-#   provider: "claude-code"
-#   model: "claude-sonnet-4"
-#   temperature: 0.1
-```
+</details>
 
 ### Usage
 

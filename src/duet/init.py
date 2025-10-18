@@ -468,7 +468,7 @@ Be concise but comprehensive. This will help the orchestrator understand the cod
 
 ---
 
-**Rerun Discovery**: `uv run duet init --force --skip-discovery=false`
+**Rerun Discovery**: `uv run duet init --force` (omit --skip-discovery flag)
 
 <!-- This file can be manually edited to improve orchestrator context -->
 """
