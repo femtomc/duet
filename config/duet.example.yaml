@@ -1,18 +1,67 @@
+# ────────────────────────────────────────────────────────────────────────────
+# Duet Configuration Example
+# ────────────────────────────────────────────────────────────────────────────
+
+# ──── Codex Configuration (Planning & Review) ────
 codex:
-  provider: "echo"
-  model: "codex-mock"
+  # Options: "codex", "echo"
+  # - "codex": Use real Codex CLI (requires local authentication)
+  # - "echo": Fallback mode for testing without API calls
+  provider: "echo"  # Change to "codex" for production
+  model: "gpt-4"
   temperature: 0.2
+  # timeout: 300  # Optional: CLI timeout in seconds
 
+# ──── Claude Code Configuration (Implementation) ────
 claude:
-  provider: "echo"
-  model: "claude-mock"
+  # Options: "claude-code", "echo"
+  # - "claude-code": Use real Claude Code CLI (requires local authentication)
+  # - "echo": Fallback mode for testing without API calls
+  provider: "echo"  # Change to "claude-code" for production
+  model: "claude-sonnet-4"
   temperature: 0.1
+  # timeout: 600  # Optional: CLI timeout in seconds
 
+# ──── Workflow Settings ────
 workflow:
   max_iterations: 3
   require_human_approval: true
   auto_merge_on_approval: false
 
+# ──── Storage Settings ────
 storage:
   workspace_root: "./"
   run_artifact_dir: "./runs"
+
+# ──── Logging Settings ────
+logging:
+  enable_jsonl: false  # Set to true for structured logging
+  jsonl_dir: "./logs"
+
+# ────────────────────────────────────────────────────────────────────────────
+# Production Configuration Example
+# ────────────────────────────────────────────────────────────────────────────
+# codex:
+#   provider: "codex"
+#   model: "gpt-4"
+#   temperature: 0.2
+#   timeout: 300
+#
+# claude:
+#   provider: "claude-code"
+#   model: "claude-sonnet-4"
+#   temperature: 0.1
+#   timeout: 600
+#
+# workflow:
+#   max_iterations: 5
+#   require_human_approval: true
+#   auto_merge_on_approval: false
+#
+# storage:
+#   workspace_root: "/path/to/your/project"
+#   run_artifact_dir: "/path/to/artifacts"
+#
+# logging:
+#   enable_jsonl: true
+#   jsonl_dir: "/path/to/logs"

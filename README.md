@@ -1,36 +1,146 @@
 # Duet
 
-Prototype automation tool that coordinates Codex (for design/review) and Claude Code (for implementation).
+Workflow orchestrator that automates the collaboration between Codex (planning/review) and Claude Code (implementation).
 
-## Features (Planned)
-- Deterministic state machine that loops through plan → implement → review stages.
-- Pluggable adapters for Codex and Claude providers.
-- CLI to start new orchestration runs, resume from checkpoints, and inspect history.
-- Persistent storage of prompts, responses, and commits for auditability.
+## Features
 
-## Project Layout
-```
-docs/                    # Design notes and architecture references
-src/duet/                # Python package for the orchestrator
-pyproject.toml           # Project metadata and dependencies
-```
+✅ **Implemented**:
+- Deterministic state machine (PLAN → IMPLEMENT → REVIEW → DONE/BLOCKED)
+- Pluggable adapter system (Echo, Codex, Claude Code)
+- CLI commands: `run`, `status`, `summary`, `show-config`
+- Structured artifact persistence with iteration tracking
+- Checkpoint-based resumability
+- Comprehensive logging (rich console + optional JSONL)
+- Extensive test coverage (unit + integration tests)
+- Cross-platform compatibility (Windows, macOS, Linux)
 
-## Getting Started
-1. Install [uv](https://docs.astral.sh/uv/) and ensure Python 3.10+ is available (uv can manage interpreters automatically).
-2. Sync dependencies (include the `dev` dependency group for tests and tooling):
+🚧 **In Progress**:
+- Real Codex and Claude Code CLI integrations
+- Git operations and commit tracking
+- Advanced workflow policies and approval routing
+
+## Quick Start
+
+### Installation
+
+1. Install [uv](https://docs.astral.sh/uv/) and ensure Python 3.10+ is available
+2. Sync dependencies:
    ```bash
    uv sync --group dev
    ```
-3. Invoke the CLI via uv:
-   ```bash
-   uv run duet --help
-   ```
-4. Run the test suite:
-   ```bash
-   uv run pytest
-   ```
 
-## Development Status
-This repository currently contains scaffolding and high-level design notes. Integrations with Codex and Claude Code are not yet implemented. Refer to `docs/orchestration_overview.md` for the architectural blueprint and open questions.
+### Configuration
 
-> Authentication Note: The orchestrator assumes the Codex and Claude CLIs are already authenticated on the host machine; direct API keys are optional and can be supplied via `api_key_env` only if needed.
+Create `duet.yaml` from the example:
+```bash
+cp config/duet.example.yaml duet.yaml
+```
+
+Edit `duet.yaml` to configure your adapters:
+```yaml
+# Development mode (using echo adapters)
+codex:
+  provider: "echo"
+  model: "gpt-4"
+
+claude:
+  provider: "echo"
+  model: "claude-sonnet-4"
+
+# Production mode (using real CLIs)
+# codex:
+#   provider: "codex"
+#   model: "gpt-4"
+#   temperature: 0.2
+#
+# claude:
+#   provider: "claude-code"
+#   model: "claude-sonnet-4"
+#   temperature: 0.1
+```
+
+### Usage
+
+**Run orchestration**:
+```bash
+uv run duet run [--config duet.yaml] [--run-id my-run]
+```
+
+**Check run status**:
+```bash
+uv run duet status <run-id>
+```
+
+**View run summary**:
+```bash
+uv run duet summary <run-id> [--save]
+```
+
+**Show configuration**:
+```bash
+uv run duet show-config
+```
+
+### Testing
+
+Run the test suite:
+```bash
+uv run pytest
+```
+
+Run manual acceptance test:
+```bash
+uv run python tests/manual_test.py
+```
+
+## Architecture
+
+```
+src/duet/
+├── adapters/          # Pluggable assistant adapters
+│   ├── base.py        # Abstract adapter interface & registry
+│   ├── echo.py        # Echo adapter (testing/development)
+│   ├── codex.py       # Codex adapter (planning/review)
+│   └── claude_code.py # Claude Code adapter (implementation)
+├── artifacts.py       # Artifact storage & persistence
+├── cli.py             # CLI commands (Typer)
+├── config.py          # Configuration models (Pydantic)
+├── logging.py         # Structured logging (rich + JSONL)
+├── models.py          # Domain models (Phase, Request, Response, etc.)
+└── orchestrator.py    # Core orchestration loop & state machine
+```
+
+## Documentation
+
+- **[Adapter Guide](docs/adapter_guide.md)**: Configure and implement adapters
+- **[Orchestration Overview](docs/orchestration_overview.md)**: Architecture and design
+- **[Integration Plan](docs/integration_plan.md)**: Development roadmap
+
+## Adapters
+
+### Echo Adapter
+For testing and development without API calls. Mirrors prompts back.
+
+### Codex Adapter
+Invokes Codex CLI for planning and review tasks. Requires local authentication.
+
+### Claude Code Adapter
+Invokes Claude CLI for implementation tasks. Requires local authentication.
+
+See [Adapter Guide](docs/adapter_guide.md) for details.
+
+## Authentication
+
+The orchestrator uses **local CLI authentication**:
+- **Codex**: Authenticate via `codex auth login`
+- **Claude Code**: Authenticate via `claude auth login`
+- **Echo**: No authentication required (testing only)
+
+No API keys are stored in configuration files.
+
+## Project Status
+
+**Current Milestone**: Milestone 2 - Adapter API Integration
+**Next Milestone**: Milestone 3 - Workflow Policies & Approval Routing
+
+See [Integration Plan](docs/integration_plan.md) for the complete roadmap.
