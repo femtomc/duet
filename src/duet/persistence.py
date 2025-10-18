@@ -17,7 +17,7 @@ from .models import Phase, ReviewVerdict, RunSnapshot
 # ──────────────────────────────────────────────────────────────────────────────
 
 # Schema version for migrations
-SCHEMA_VERSION = 2  # Sprint 8: added run_states table and active_state_id
+SCHEMA_VERSION = 2  #added run_states table and active_state_id
 
 SCHEMA_DDL = """
 -- Schema version tracking
@@ -90,8 +90,7 @@ CREATE TABLE IF NOT EXISTS events (
     FOREIGN KEY (run_id) REFERENCES runs(run_id)
 );
 
--- Run states for stateful workflow (Sprint 8)
-CREATE TABLE IF NOT EXISTS run_states (
+-- Run states for stateful workflowCREATE TABLE IF NOT EXISTS run_states (
     state_id TEXT PRIMARY KEY,
     run_id TEXT NOT NULL,
     phase_status TEXT NOT NULL,  -- plan-ready, plan-complete, implement-ready, etc.
@@ -208,8 +207,7 @@ class DuetDatabase:
         """Apply schema migrations if needed."""
         current_version = self._get_schema_version(conn)
 
-        # Migration 1 -> 2: Add active_state_id to runs table (Sprint 8)
-        if current_version < 2:
+        # Migration 1 -> 2: Add active_state_id to runs table        if current_version < 2:
             try:
                 # Check if column already exists
                 cursor = conn.execute("PRAGMA table_info(runs)")
@@ -603,8 +601,7 @@ class DuetDatabase:
             return [dict(row) for row in cursor.fetchall()]
 
     # ──────────────────────────────────────────────────────────────────────────
-    # State Operations (Sprint 8)
-    # ──────────────────────────────────────────────────────────────────────────
+    # State Operations    # ──────────────────────────────────────────────────────────────────────────
 
     def insert_state(
         self,

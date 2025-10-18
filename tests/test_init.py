@@ -65,7 +65,7 @@ def test_init_creates_config_file(temp_workspace):
 
 
 def test_init_creates_workflow_definition(temp_workspace):
-    """Test that init creates workflow definition using DSL (Sprint 9)."""
+    """Test that init creates workflow definition using DSL."""
     initializer = DuetInitializer(
         workspace_root=temp_workspace,
         skip_discovery=True,
@@ -159,7 +159,7 @@ def test_init_overwrites_with_force(temp_workspace):
     # Should not raise
     initializer.init()
 
-    # Should have created new structure (Sprint 9: workflow.py instead of prompts/)
+    # Should have created new structure (workflow.py instead of prompts/)
     assert (duet_dir / "workflow.py").exists()
     assert (duet_dir / "duet.yaml").exists()
 
@@ -267,7 +267,7 @@ def test_init_custom_config_path(temp_workspace):
 
     initializer.init()
 
-    # Verify custom path used (Sprint 9: workflow.py instead of prompts/)
+    # Verify custom path used (workflow.py instead of prompts/)
     assert custom_path.exists()
     assert (custom_path / "duet.yaml").exists()
     assert (custom_path / "workflow.py").exists()

@@ -1,5 +1,5 @@
 """
-Workflow executor for graph-driven orchestration (Sprint 10).
+Workflow executor for graph-driven orchestration.
 
 Executes workflows defined in the DSL with channel-based message passing
 and guard-controlled transitions.

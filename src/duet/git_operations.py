@@ -199,7 +199,7 @@ class GitWorkspace:
         return commits
 
     # ──────────────────────────────────────────────────────────────────────────
-    # State Baseline Management (Sprint 8)
+    # State Baseline Management
     # ──────────────────────────────────────────────────────────────────────────
 
     def create_state_baseline(

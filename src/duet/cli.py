@@ -44,7 +44,7 @@ def init(
 
     Creates .duet/ directory with:
     - duet.yaml: Configuration (models, guardrails, logging)
-    - workflow.py: Workflow definition using Python DSL (Sprint 9)
+    - workflow.py: Workflow definition using Python DSL
     - context/: Repository discovery outputs
     - runs/, logs/: Artifact directories
     - duet.db: SQLite database for state management
@@ -72,10 +72,10 @@ def run(
     ),
     run_id: Optional[str] = typer.Option(None, help="Override generated run identifier."),
     quiet: bool = typer.Option(
-        False, "--quiet", "-q", help="Disable streaming console output (Sprint 6)."
+        False, "--quiet", "-q", help="Disable streaming console output."
     ),
     stream_mode: Optional[str] = typer.Option(
-        None, "--stream-mode", help="Streaming display mode: detailed | compact | off (Sprint 7)."
+        None, "--stream-mode", help="Streaming display mode: detailed | compact | off."
     ),
 ) -> None:
     """Execute the duet orchestration loop."""
@@ -123,7 +123,7 @@ def show_config(
 def status(
     run_id: str = typer.Argument(..., help="Run ID to check status for."),
     config: Optional[Path] = typer.Option(None, "--config", "-c", help="Config file path."),
-    show_states: bool = typer.Option(True, "--show-states/--no-states", help="Show state history (Sprint 8)"),
+    show_states: bool = typer.Option(True, "--show-states/--no-states", help="Show state history"),
 ) -> None:
     """Display the current status of a run (enhanced for Sprint 8 stateful workflow)."""
     from rich.table import Table
@@ -154,7 +154,7 @@ def status(
         table.add_row("Started", run["started_at"][:19] if run["started_at"] else "N/A")
         table.add_row("Completed", run["completed_at"][:19] if run["completed_at"] else "[dim]In Progress[/]")
 
-        # Show active state (Sprint 8)
+        # Show active state
         active_state = db.get_active_state(run_id)
         if active_state:
             table.add_row("Active State", active_state["state_id"])
@@ -167,7 +167,7 @@ def status(
 
         console.print(table)
 
-        # Show state history (Sprint 8)
+        # Show state history
         if show_states and db:
             states = db.list_states(run_id)
             if states:
@@ -343,7 +343,7 @@ def history(
 def inspect(
     run_id: str = typer.Argument(..., help="Run ID to inspect"),
     config: Optional[Path] = typer.Option(None, "--config", "-c", help="Config file path."),
-    show_events: bool = typer.Option(True, "--show-events/--no-events", help="Display streaming events (Sprint 6)."),
+    show_events: bool = typer.Option(True, "--show-events/--no-events", help="Display streaming events."),
     output: Optional[str] = typer.Option(None, "--output", help="Output format: json for structured export."),
 ) -> None:
     """Display detailed per-iteration information for a run."""
@@ -432,7 +432,7 @@ def inspect(
 
         console.print(table)
 
-    # Display streaming events (Sprint 6)
+    # Display streaming events
     if show_events and events:
         console.print(f"\n[bold]Streaming Events:[/] {len(events)}")
 
@@ -572,7 +572,7 @@ def next(
     stream_mode: Optional[str] = typer.Option(None, "--stream-mode", help="Streaming display mode: detailed | compact | off."),
 ) -> None:
     """
-    Execute the next phase for a stateful run (Sprint 8).
+    Execute the next phase for a stateful run.
 
     Examples:
         duet next                      # Auto-resume most recent run
@@ -657,7 +657,7 @@ def cont(
     quiet: bool = typer.Option(False, "--quiet", "-q", help="Disable streaming console output."),
     stream_mode: Optional[str] = typer.Option(None, "--stream-mode", help="Streaming display mode: detailed | compact | off."),
 ) -> None:
-    """Continue executing phases until done or blocked (Sprint 8)."""
+    """Continue executing phases until done or blocked."""
     duet_config = find_config(config)
 
     # Override quiet mode if CLI flag provided
@@ -727,7 +727,7 @@ def back(
     config: Optional[Path] = typer.Option(None, "--config", "-c", help="Config file path."),
     force: bool = typer.Option(False, "--force", help="Force restore even if working tree is dirty"),
 ) -> None:
-    """Restore git workspace and database to a previous state (Sprint 8)."""
+    """Restore git workspace and database to a previous state."""
     duet_config = find_config(config)
 
     # Database is required

@@ -231,7 +231,7 @@ def test_adapter_error_handling_in_orchestration(temp_workspace, temp_artifacts_
 
 
 def test_orchestrator_persists_streaming_events(temp_workspace, temp_artifacts_dir):
-    """Test that orchestrator persists streaming events to SQLite (Sprint 6)."""
+    """Test that orchestrator persists streaming events to SQLite."""
     config = DuetConfig(
         codex=AssistantConfig(provider="codex", model="gpt-4"),
         claude=AssistantConfig(provider="echo", model="echo-v1"),
@@ -275,7 +275,7 @@ def test_orchestrator_persists_streaming_events(temp_workspace, temp_artifacts_d
     assert "timestamp" in first_event
     assert first_event["run_id"] == "test-event-persistence"
 
-    # Verify specific event types were captured (Sprint 7: canonical types)
+    # Verify specific event types were captured (canonical types)
     event_types = [e["event_type"] for e in events]
     assert "thread_started" in event_types
     assert "assistant_message" in event_types
@@ -286,7 +286,7 @@ def test_orchestrator_persists_streaming_events(temp_workspace, temp_artifacts_d
 
 
 def test_orchestrator_quiet_mode_still_persists_events(temp_workspace, temp_artifacts_dir):
-    """Test that quiet mode disables display but still persists events (Sprint 6)."""
+    """Test that quiet mode disables display but still persists events."""
     config = DuetConfig(
         codex=AssistantConfig(provider="codex", model="gpt-4"),
         claude=AssistantConfig(provider="echo", model="echo-v1"),

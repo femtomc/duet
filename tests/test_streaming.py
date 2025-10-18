@@ -1,5 +1,5 @@
 """
-Unit tests for streaming utilities (Sprint 7).
+Unit tests for streaming utilities.
 
 Tests StreamAccumulator and event enrichment logic.
 """

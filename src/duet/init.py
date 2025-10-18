@@ -120,14 +120,12 @@ This directory contains Duet orchestration artifacts and configuration.
 ## Structure
 
 - **duet.yaml**: Configuration file (models, workflow, guardrails)
-- **workflow.py**: Workflow definition using Python DSL (Sprint 9)
-- **runs/**: Orchestration run artifacts (checkpoints, iterations, summaries)
+- **workflow.py**: Workflow definition using Python DSL- **runs/**: Orchestration run artifacts (checkpoints, iterations, summaries)
 - **logs/**: Structured JSONL event logs
 - **context/**: Repository context and discovery outputs
 - **duet.db**: SQLite database for run metadata and state checkpoints
 
-## Workflow Customization (Sprint 9)
-
+## Workflow Customization
 Edit `workflow.py` to customize your workflow:
 - Define agents (Codex, Claude Code, custom adapters)
 - Declare channels for message passing
@@ -204,14 +202,11 @@ storage:
 logging:
   enable_jsonl: true
   jsonl_dir: "{self.config_path / 'logs'}"
-  quiet: false  # Set to true to disable live streaming output (Sprint 6)
-  stream_mode: "detailed"  # Display mode: detailed | compact | off (Sprint 7)
-
+  quiet: false  # Set to true to disable live streaming output  stream_mode: "detailed"  # Display mode: detailed | compact | off
 # ────────────────────────────────────────────────────────────────────────────
 # Tips:
 # - To use echo adapters for testing, set provider: "echo"
-# - Customize workflow in .duet/workflow.py (Sprint 9 DSL)
-# - Review context discovery in .duet/context/context.md
+# - Customize workflow in .duet/workflow.py# - Review context discovery in .duet/context/context.md
 # - Monitor runs in .duet/runs/<run-id>/
 # - See docs/workflow_dsl.md for DSL reference
 # ────────────────────────────────────────────────────────────────────────────
@@ -329,8 +324,7 @@ workflow = Workflow(
             gitkeep.write_text("", encoding="utf-8")
             self.console.log(f"[green]Created:[/] {self._display_path(gitkeep)}")
 
-        # Placeholder SQLite database (for Sprint 5)
-        db_path = self.config_path / "duet.db"
+        # Placeholder SQLite database        db_path = self.config_path / "duet.db"
         if not db_path.exists():
             # Touch the file to reserve the path
             db_path.write_bytes(b"")
@@ -360,8 +354,7 @@ Be concise but comprehensive. This will help the orchestrator understand the cod
 """
 
         try:
-            # Use CodexAdapter for streaming discovery (Sprint 6)
-            from .adapters import CodexAdapter
+            # Use CodexAdapter for streaming discovery            from .adapters import CodexAdapter
             from .adapters.base import StreamEvent
             from .models import AssistantRequest
             from rich.live import Live
@@ -437,28 +430,24 @@ Be concise but comprehensive. This will help the orchestrator understand the cod
 
                 event_type = event["event_type"]
 
-                # Extract agent message from enriched field (Sprint 7)
-                if event_type == "assistant_message":
+                # Extract agent message from enriched field                if event_type == "assistant_message":
                     text = event.get("text_snippet", "")
                     if text:
                         agent_message_snippet = text
 
-                # Track reasoning steps and capture text (Sprint 7)
-                elif event_type == "reasoning":
+                # Track reasoning steps and capture text                elif event_type == "reasoning":
                     reasoning_count += 1
                     text = event.get("text_snippet", "")
                     if text:
                         reasoning_snippet = text
 
-                # Track tool use (Sprint 7)
-                elif event_type == "tool_use":
+                # Track tool use                elif event_type == "tool_use":
                     tool_info = event.get("tool_info", {})
                     if tool_info:
                         last_command = tool_info.get("tool_name", "unknown")
                         command_output = tool_info.get("output_preview", "")
 
-                # Extract token usage from enriched field (Sprint 7)
-                elif event_type == "turn_complete":
+                # Extract token usage from enriched field                elif event_type == "turn_complete":
                     usage = event.get("usage", {})
                     if usage:
                         token_count = usage.get("output_tokens", 0)

@@ -104,7 +104,7 @@ class Orchestrator:
         if self.db:
             self.console.log("[dim]Database persistence enabled[/]")
 
-        # Load workflow (Sprint 10: DSL-based execution)
+        # Load workflow (DSL-based execution)
         self.workflow_graph = None
         self.workflow_executor = None
         try:
@@ -292,7 +292,7 @@ class Orchestrator:
             adapter_name = adapter.__class__.__name__
             self.logger.log_adapter_call(snapshot.run_id, iteration, current_phase.value, adapter_name)
 
-            # ──── Streaming Display Setup (Sprint 7: EnhancedStreamingDisplay) ────
+            # ──── Streaming Display Setup  ────
             from .models import StreamMode
             stream_mode = self.config.logging.stream_mode
             # Handle legacy quiet flag (maps to stream_mode="off")
@@ -732,8 +732,7 @@ class Orchestrator:
         return dt.datetime.now(dt.timezone.utc).strftime("run-%Y%m%d-%H%M%S")
 
     # ──────────────────────────────────────────────────────────────────────────
-    # Single-Phase Execution (Sprint 8)
-    # ──────────────────────────────────────────────────────────────────────────
+    # Single-Phase Execution     # ──────────────────────────────────────────────────────────────────────────
 
     def run_next_phase(
         self,
@@ -784,8 +783,7 @@ class Orchestrator:
                         except GitError:
                             pass
 
-                    # Add initial channel snapshot (Sprint 10)
-                    if self.workflow_executor:
+                    # Add initial channel snapshot                     if self.workflow_executor:
                         initial_metadata["channel_snapshot"] = self.workflow_executor.get_current_channels()
 
                     self.db.insert_state(
@@ -799,8 +797,7 @@ class Orchestrator:
                     self.db.update_active_state(run_id, state_id)
                     active_state = self.db.get_state(state_id)
 
-            # Restore channel snapshot if available (Sprint 10)
-            if self.workflow_executor and active_state.get("metadata"):
+            # Restore channel snapshot if available             if self.workflow_executor and active_state.get("metadata"):
                 channel_snapshot = active_state["metadata"].get("channel_snapshot")
                 if channel_snapshot:
                     self.workflow_executor.restore_channels(channel_snapshot)
@@ -834,8 +831,7 @@ class Orchestrator:
             # Insert run
             self.db.insert_run(snapshot)
 
-            # Reset and seed channels for new run (Sprint 10)
-            if self.workflow_executor:
+            # Reset and seed channels for new run             if self.workflow_executor:
                 self.workflow_executor.channel_store.clear()
                 task_input = snapshot.metadata.get("task", "Implement the requested changes")
                 self.workflow_executor.seed_channel("task", task_input)
@@ -853,8 +849,7 @@ class Orchestrator:
                 except GitError:
                     pass
 
-            # Add initial channel snapshot (Sprint 10)
-            if self.workflow_executor:
+            # Add initial channel snapshot             if self.workflow_executor:
                 initial_metadata["channel_snapshot"] = self.workflow_executor.get_current_channels()
 
             self.db.insert_state(
@@ -1081,8 +1076,7 @@ class Orchestrator:
             except GitError as exc:
                 self.console.log(f"[yellow]Git baseline creation failed: {exc}[/]")
 
-        # Add channel snapshot to state metadata (Sprint 10)
-        if self.workflow_executor:
+        # Add channel snapshot to state metadata         if self.workflow_executor:
             channel_snapshot = self.workflow_executor.get_current_channels()
             state_metadata["channel_snapshot"] = channel_snapshot
             self.console.log(f"[dim]Saved channel snapshot:[/] {len(channel_snapshot)} channels")

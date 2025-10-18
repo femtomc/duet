@@ -15,7 +15,7 @@ class StreamEvent(TypedDict, total=False):
     Event emitted during streaming adapter execution.
 
     Required fields: event_type, payload, timestamp
-    Optional enriched fields (Sprint 7): text_snippet, reasoning_step, usage, tool_info
+    Optional enriched fields: text_snippet, reasoning_step, usage, tool_info
     """
 
     # Required fields
@@ -23,7 +23,7 @@ class StreamEvent(TypedDict, total=False):
     payload: Dict[str, Any]  # Original raw event data
     timestamp: datetime.datetime
 
-    # Optional enriched fields (Sprint 7)
+    # Optional enriched fields
     text_snippet: str  # Text content for messages/reasoning
     reasoning_step: int  # Step number for reasoning events
     usage: Dict[str, int]  # Token counts {input_tokens, output_tokens, cached_input_tokens}

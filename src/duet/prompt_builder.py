@@ -1,5 +1,5 @@
 """
-Prompt builder framework for workflow-driven prompt construction (Sprint 10).
+Prompt builder framework for workflow-driven prompt construction.
 
 Provides programmable prompt generation from channel payloads, replacing
 hardcoded _compose_*_request methods with extensible builder pattern.

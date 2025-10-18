@@ -78,11 +78,11 @@ class LoggingConfig(BaseModel):
         Path("./logs"), description="Directory for JSONL log files"
     )
     quiet: bool = Field(
-        False, description="Disable streaming console output during runs (Sprint 6)"
+        False, description="Disable streaming console output during runs"
     )
     stream_mode: StreamMode = Field(
         StreamMode.DETAILED,
-        description="Streaming display mode: detailed | compact | off (Sprint 7)",
+        description="Streaming display mode: detailed | compact | off",
     )
 
     @validator("jsonl_dir")

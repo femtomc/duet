@@ -154,7 +154,7 @@ class ClaudeCodeAdapter(AssistantAdapter):
                         event_data = json.loads(line)
                         metadata["stream_events"] += 1
 
-                        # Map to canonical event type and enrich (Sprint 7)
+                        # Map to canonical event type and enrich
                         canonical_type, enriched_fields = self._normalize_event(event_data)
 
                         # Emit enriched StreamEvent if callback provided
@@ -286,7 +286,7 @@ class ClaudeCodeAdapter(AssistantAdapter):
 
     def _normalize_event(self, event_data: Dict[str, Any]) -> tuple[str, Dict[str, Any]]:
         """
-        Normalize Claude Code event to canonical type with enriched fields (Sprint 7).
+        Normalize Claude Code event to canonical type with enriched fields.
 
         Args:
             event_data: Raw event from Claude Code JSON stream

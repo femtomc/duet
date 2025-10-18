@@ -1,5 +1,5 @@
 """
-Duet Workflow DSL (Sprint 9).
+Duet Workflow DSL.
 
 A Python DSL for defining orchestration workflows programmatically.
 Replaces the legacy .duet/prompts/*.md template system with a type-safe,

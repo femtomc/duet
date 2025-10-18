@@ -309,7 +309,7 @@ def test_search_runs_by_id_prefix(in_memory_db):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Sprint 8: State Management Tests
+# State Management Tests
 # ──────────────────────────────────────────────────────────────────────────────
 
 

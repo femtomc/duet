@@ -89,7 +89,7 @@ def test_require_git_changes_flag():
     with tempfile.TemporaryDirectory() as tmpdir_workspace:
         with tempfile.TemporaryDirectory() as tmpdir_artifacts:
             workspace = Path(tmpdir_workspace)
-            create_test_workflow(workspace)  # Sprint 10: required
+            create_test_workflow(workspace)  # required
 
             # Initialize git repo but don't make changes
             import subprocess
@@ -201,7 +201,7 @@ def test_feature_branch_creation():
     with tempfile.TemporaryDirectory() as tmpdir_workspace:
         with tempfile.TemporaryDirectory() as tmpdir_artifacts:
             workspace = Path(tmpdir_workspace)
-            create_test_workflow(workspace)  # Sprint 10: required
+            create_test_workflow(workspace)  # required
             artifacts = Path(tmpdir_artifacts)
 
             # Initialize git repo
@@ -260,7 +260,7 @@ def test_branch_restoration():
     with tempfile.TemporaryDirectory() as tmpdir_workspace:
         with tempfile.TemporaryDirectory() as tmpdir_artifacts:
             workspace = Path(tmpdir_workspace)
-            create_test_workflow(workspace)  # Sprint 10: required
+            create_test_workflow(workspace)  # required
             artifacts = Path(tmpdir_artifacts)
 
             # Initialize git repo
@@ -361,7 +361,7 @@ def test_no_git_changes_blocks_run():
     with tempfile.TemporaryDirectory() as tmpdir_workspace:
         with tempfile.TemporaryDirectory() as tmpdir_artifacts:
             workspace = Path(tmpdir_workspace)
-            create_test_workflow(workspace)  # Sprint 10: required
+            create_test_workflow(workspace)  # required
             artifacts = Path(tmpdir_artifacts)
 
             # Initialize git repo with no changes

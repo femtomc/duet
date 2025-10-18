@@ -28,7 +28,7 @@ class ReviewVerdict(str, Enum):
 
 class CanonicalEventType(str, Enum):
     """
-    Canonical streaming event types for consistent handling (Sprint 7).
+    Canonical streaming event types for consistent handling.
 
     All adapters map their raw events to these standardized types.
     """
@@ -45,7 +45,7 @@ class CanonicalEventType(str, Enum):
 
 class StreamMode(str, Enum):
     """
-    Streaming display modes (Sprint 7).
+    Streaming display modes.
 
     Controls verbosity of live console output during runs.
     """

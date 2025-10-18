@@ -120,7 +120,7 @@ def test_echo_adapter_streaming():
     response = adapter.stream(request, on_event=on_event)
 
     assert "ECHO ADAPTER" in response.content
-    # Echo adapter should emit at least one event (Sprint 7: system_notice)
+    # Echo adapter should emit at least one event (system_notice)
     assert len(events_received) >= 1
     assert events_received[0]["event_type"] == "system_notice"
     assert "text_snippet" in events_received[0]
@@ -195,7 +195,7 @@ def test_codex_adapter_streaming_with_callback():
 
     assert response.content == "Response"
     assert len(events_received) == 2
-    # Sprint 7: Events now use canonical types
+    # Events now use canonical types
     assert events_received[0]["event_type"] == "thread_started"
     assert events_received[1]["event_type"] == "assistant_message"
     # Verify enriched field
@@ -414,7 +414,7 @@ def test_claude_code_adapter_streaming_with_callback():
 
     assert response.content == "Done"
     assert len(events_received) >= 1
-    # Sprint 7: Claude events now use canonical types
+    # Claude events now use canonical types
     assert events_received[0]["event_type"] == "assistant_message"
     assert "text_snippet" in events_received[0]
 

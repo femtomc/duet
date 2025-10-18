@@ -42,7 +42,7 @@ class CodexAdapter(AssistantAdapter):
         self.model = kwargs.get("model", "gpt-4")
         self.timeout = kwargs.get("timeout", 300)
         self.cli_path = kwargs.get("cli_path", "codex")
-        self._reasoning_counter = 0  # Track reasoning step numbers (Sprint 7)
+        self._reasoning_counter = 0  # Track reasoning step numbers
 
     def stream(
         self,
@@ -152,7 +152,7 @@ class CodexAdapter(AssistantAdapter):
                         raw_event_type = event_data.get("type", "unknown")
                         metadata["event_types"].append(raw_event_type)
 
-                        # Map to canonical event type and enrich (Sprint 7)
+                        # Map to canonical event type and enrich
                         canonical_type, enriched_fields = self._normalize_event(event_data)
 
                         # Emit enriched StreamEvent if callback provided
@@ -255,7 +255,7 @@ class CodexAdapter(AssistantAdapter):
 
     def _normalize_event(self, event_data: Dict[str, Any]) -> tuple[str, Dict[str, Any]]:
         """
-        Normalize Codex raw event to canonical type with enriched fields (Sprint 7).
+        Normalize Codex raw event to canonical type with enriched fields.
 
         Args:
             event_data: Raw event from Codex JSONL stream

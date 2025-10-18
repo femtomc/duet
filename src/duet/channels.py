@@ -1,5 +1,5 @@
 """
-Channel store for workflow message passing (Sprint 10).
+Channel store for workflow message passing.
 
 Manages channel payloads during workflow execution, providing get/set/snapshot
 operations with optional schema validation.

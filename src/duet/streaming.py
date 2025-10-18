@@ -1,4 +1,4 @@
-"""Streaming utilities for incremental content tracking and display (Sprint 7)."""
+"""Streaming utilities for incremental content tracking and display."""
 
 from __future__ import annotations
 
@@ -112,7 +112,7 @@ class StreamAccumulator:
 
 class EnhancedStreamingDisplay:
     """
-    Unified streaming display with rich content sections (Sprint 7).
+    Unified streaming display with rich content sections.
 
     Supports multiple display modes:
     - detailed: Full panel with snippets, reasoning, tools, rolling log
