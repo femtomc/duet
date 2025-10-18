@@ -16,7 +16,7 @@ from .models import Phase, ReviewVerdict, RunSnapshot
 # DATABASE SCHEMA
 # ──────────────────────────────────────────────────────────────────────────────
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA_DDL = """
 -- Schema version tracking
@@ -76,12 +76,26 @@ CREATE TABLE IF NOT EXISTS iterations (
     UNIQUE(run_id, iteration, phase)
 );
 
+-- Streaming events (Sprint 6)
+CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL,
+    iteration INTEGER,
+    phase TEXT,
+    timestamp TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    payload TEXT NOT NULL,  -- JSON-encoded event payload
+    FOREIGN KEY (run_id) REFERENCES runs(run_id)
+);
+
 -- Indexes for common queries
 CREATE INDEX IF NOT EXISTS idx_runs_created_at ON runs(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_runs_phase ON runs(phase);
 CREATE INDEX IF NOT EXISTS idx_iterations_run_id ON iterations(run_id);
 CREATE INDEX IF NOT EXISTS idx_iterations_phase ON iterations(phase);
 CREATE INDEX IF NOT EXISTS idx_iterations_verdict ON iterations(verdict);
+CREATE INDEX IF NOT EXISTS idx_events_run_phase ON events(run_id, phase);
+CREATE INDEX IF NOT EXISTS idx_events_run_iteration ON events(run_id, iteration);
 """
 
 
@@ -177,9 +191,29 @@ class DuetDatabase:
 
     def _apply_migrations(self, conn: sqlite3.Connection, from_version: int, to_version: int) -> None:
         """Apply schema migrations from one version to another."""
-        # Placeholder for future migrations
-        # Example: if from_version < 2 and to_version >= 2: apply_migration_v2(conn)
-        pass
+        # Migration to v2: Add events table for streaming support (Sprint 6)
+        if from_version < 2 and to_version >= 2:
+            conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id TEXT NOT NULL,
+                    iteration INTEGER,
+                    phase TEXT,
+                    timestamp TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    FOREIGN KEY (run_id) REFERENCES runs(run_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_events_run_phase ON events(run_id, phase);
+                CREATE INDEX IF NOT EXISTS idx_events_run_iteration ON events(run_id, iteration);
+                """
+            )
+            conn.execute(
+                "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
+                (2, dt.datetime.now(dt.timezone.utc).isoformat()),
+            )
+            conn.commit()
 
     # ──────────────────────────────────────────────────────────────────────────
     # Run Operations
@@ -307,6 +341,114 @@ class DuetDatabase:
                     stream_meta.get("thread_id"),
                 ),
             )
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Event Operations (Sprint 6)
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def insert_event(
+        self,
+        run_id: str,
+        event_type: str,
+        payload: Dict[str, Any],
+        iteration: Optional[int] = None,
+        phase: Optional[str] = None,
+        timestamp: Optional[str] = None,
+    ) -> None:
+        """Insert a streaming event record."""
+        if timestamp is None:
+            timestamp = dt.datetime.now(dt.timezone.utc).isoformat()
+
+        with self._conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO events (run_id, iteration, phase, timestamp, event_type, payload)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    iteration,
+                    phase,
+                    timestamp,
+                    event_type,
+                    json.dumps(payload),
+                ),
+            )
+
+    def list_events(
+        self,
+        run_id: str,
+        iteration: Optional[int] = None,
+        phase: Optional[str] = None,
+        event_type: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        List events for a run with optional filtering.
+
+        Args:
+            run_id: Run identifier
+            iteration: Filter by iteration number
+            phase: Filter by phase
+            event_type: Filter by event type
+            limit: Maximum number of events to return
+
+        Returns:
+            List of event dictionaries with parsed JSON payloads
+        """
+        with self._conn() as conn:
+            query = "SELECT * FROM events WHERE run_id = ?"
+            params: List[Any] = [run_id]
+
+            if iteration is not None:
+                query += " AND iteration = ?"
+                params.append(iteration)
+
+            if phase:
+                query += " AND phase = ?"
+                params.append(phase)
+
+            if event_type:
+                query += " AND event_type = ?"
+                params.append(event_type)
+
+            query += " ORDER BY timestamp ASC, id ASC"
+
+            if limit:
+                query += " LIMIT ?"
+                params.append(limit)
+
+            cursor = conn.execute(query, params)
+            events = []
+            for row in cursor.fetchall():
+                event_dict = dict(row)
+                # Parse JSON payload back to dict
+                event_dict["payload"] = json.loads(event_dict["payload"])
+                events.append(event_dict)
+            return events
+
+    def count_events(
+        self,
+        run_id: str,
+        iteration: Optional[int] = None,
+        phase: Optional[str] = None,
+    ) -> int:
+        """Count events for a run with optional filtering."""
+        with self._conn() as conn:
+            query = "SELECT COUNT(*) as count FROM events WHERE run_id = ?"
+            params: List[Any] = [run_id]
+
+            if iteration is not None:
+                query += " AND iteration = ?"
+                params.append(iteration)
+
+            if phase:
+                query += " AND phase = ?"
+                params.append(phase)
+
+            cursor = conn.execute(query, params)
+            row = cursor.fetchone()
+            return row["count"] if row else 0
 
     # ──────────────────────────────────────────────────────────────────────────
     # Query Operations

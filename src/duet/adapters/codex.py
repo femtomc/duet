@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import datetime
 import json
 import subprocess
-from typing import Any, Dict
+from typing import Any, Callable, Dict, Optional
 
 from ..models import AssistantRequest, AssistantResponse
-from .base import AssistantAdapter, register_adapter
+from .base import AssistantAdapter, StreamEvent, register_adapter
 
 
 class CodexError(Exception):
@@ -39,24 +40,34 @@ class CodexAdapter(AssistantAdapter):
         self.timeout = kwargs.get("timeout", 300)
         self.cli_path = kwargs.get("cli_path", "codex")
 
-    def generate(self, request: AssistantRequest) -> AssistantResponse:
+    def stream(
+        self,
+        request: AssistantRequest,
+        on_event: Optional[Callable[[StreamEvent], None]] = None,
+    ) -> AssistantResponse:
         """
-        Generate a response by invoking the Codex CLI with JSON streaming.
+        Generate a response by invoking the Codex CLI with streaming JSONL output.
 
         Codex with --json outputs JSONL (one JSON object per line) representing
-        events during execution. We parse line-by-line and extract:
-        - Final assistant message (content)
-        - Metadata (tokens, tool usage, session info)
-        - Stream events for debugging
+        events during execution. We parse line-by-line and:
+        - Emit StreamEvent via on_event callback for each line
+        - Extract final assistant message (content)
+        - Collect metadata (tokens, tool usage, session info)
+
+        Args:
+            request: The assistant request to process
+            on_event: Optional callback invoked for each streaming event
+
+        Returns:
+            Final AssistantResponse after stream completes
 
         Raises:
             CodexError: If the CLI invocation fails or returns invalid data
         """
         try:
-            # Invoke Codex CLI with JSON output
+            # Invoke Codex CLI with Popen for streaming
             # Format: codex exec --json --model <model> <prompt>
-            # Note: exec mode doesn't support --ask-for-approval, --sandbox, etc.
-            result = subprocess.run(
+            process = subprocess.Popen(
                 [
                     self.cli_path,
                     "exec",  # Non-interactive mode
@@ -65,55 +76,101 @@ class CodexAdapter(AssistantAdapter):
                     self.model,
                     request.prompt,  # Positional argument
                 ],
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=self.timeout,
-                check=False,  # Don't raise on non-zero exit
             )
 
-            # Check for errors
-            if result.returncode != 0:
-                error_msg = result.stderr.strip() or "Unknown error"
-                raise CodexError(
-                    f"Codex CLI failed with exit code {result.returncode}: {error_msg}"
-                )
-
-            # Parse JSONL output (one JSON object per line)
-            events = self._parse_jsonl_stream(result.stdout)
-
-            if not events:
-                raise CodexError("Codex returned no events in JSON stream")
-
-            # Extract final assistant message and metadata
+            # Track metadata across stream
             assistant_message = None
-            metadata = {
-                "stream_events": len(events),
+            metadata: Dict[str, Any] = {
+                "stream_events": 0,
                 "event_types": [],
+                "parse_errors": 0,
             }
+            stderr_output = []
 
-            for event in events:
-                event_type = event.get("type")
-                metadata["event_types"].append(event_type)
+            # Read stdout line-by-line as it streams
+            if process.stdout:
+                for line in process.stdout:
+                    line = line.strip()
+                    if not line:
+                        continue
 
-                # Extract assistant message from item.completed events with type=agent_message
-                if event_type == "item.completed":
-                    item = event.get("item", {})
-                    if item.get("type") == "agent_message":
-                        text = item.get("text")
-                        if text:
-                            assistant_message = text
+                    # Try to parse JSON and emit event
+                    try:
+                        event_data = json.loads(line)
+                        metadata["stream_events"] += 1
 
-                # Extract usage/token metadata from turn.completed
-                if event_type == "turn.completed" and "usage" in event:
-                    usage = event["usage"]
-                    metadata["tokens"] = usage
-                    metadata["input_tokens"] = usage.get("input_tokens")
-                    metadata["output_tokens"] = usage.get("output_tokens")
-                    metadata["cached_input_tokens"] = usage.get("cached_input_tokens")
+                        event_type = event_data.get("type", "unknown")
+                        metadata["event_types"].append(event_type)
 
-                # Preserve thread/session info
-                if "thread_id" in event:
-                    metadata["thread_id"] = event["thread_id"]
+                        # Emit StreamEvent if callback provided
+                        if on_event:
+                            stream_event: StreamEvent = {
+                                "event_type": event_type,
+                                "payload": event_data,
+                                "timestamp": datetime.datetime.now(datetime.timezone.utc),
+                            }
+                            on_event(stream_event)
+
+                        # Extract assistant message from item.completed
+                        if event_type == "item.completed":
+                            item = event_data.get("item", {})
+                            if item.get("type") == "agent_message":
+                                text = item.get("text")
+                                if text:
+                                    assistant_message = text
+
+                        # Extract usage/token metadata from turn.completed
+                        if event_type == "turn.completed" and "usage" in event_data:
+                            usage = event_data["usage"]
+                            metadata["tokens"] = usage
+                            metadata["input_tokens"] = usage.get("input_tokens")
+                            metadata["output_tokens"] = usage.get("output_tokens")
+                            metadata["cached_input_tokens"] = usage.get("cached_input_tokens")
+
+                        # Preserve thread/session info
+                        if "thread_id" in event_data:
+                            metadata["thread_id"] = event_data["thread_id"]
+
+                    except json.JSONDecodeError as exc:
+                        # Emit parse_error event
+                        metadata["parse_errors"] += 1
+
+                        if on_event:
+                            error_event: StreamEvent = {
+                                "event_type": "parse_error",
+                                "payload": {
+                                    "error": str(exc),
+                                    "raw_line": line[:200],  # Truncate for safety
+                                },
+                                "timestamp": datetime.datetime.now(datetime.timezone.utc),
+                            }
+                            on_event(error_event)
+
+            # Read stderr for diagnostics
+            if process.stderr:
+                stderr_output = process.stderr.readlines()
+                if stderr_output:
+                    metadata["stderr"] = "".join(stderr_output).strip()
+
+            # Wait for process to complete with timeout
+            try:
+                returncode = process.wait(timeout=self.timeout)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+                raise CodexError(f"Codex CLI timeout after {self.timeout} seconds")
+
+            # Check for errors
+            if returncode != 0:
+                error_msg = metadata.get("stderr", "Unknown error")
+                raise CodexError(f"Codex CLI failed with exit code {returncode}: {error_msg}")
+
+            # Validate we got a response
+            if metadata["stream_events"] == 0:
+                raise CodexError("Codex returned no events in JSON stream")
 
             if not assistant_message:
                 raise CodexError(
@@ -130,8 +187,6 @@ class CodexAdapter(AssistantAdapter):
 
             return self._normalize_response(response_data)
 
-        except subprocess.TimeoutExpired as exc:
-            raise CodexError(f"Codex CLI timeout after {self.timeout} seconds") from exc
         except FileNotFoundError as exc:
             raise CodexError(
                 f"Codex CLI not found at '{self.cli_path}'. "
