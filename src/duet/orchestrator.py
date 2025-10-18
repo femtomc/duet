@@ -137,23 +137,24 @@ class Orchestrator:
         self.console.rule(f"Starting Duet run {snapshot.run_id}")
         self.artifacts.checkpoint(snapshot)
 
-        # ──── Git Branch Management ────
-        original_branch = None
+        # ──── Git Baseline Commit (for change detection) ────
         baseline_commit = None
+        if self.git.is_git_repo():
+            try:
+                baseline_commit = self.git.get_current_commit()
+                snapshot.metadata["baseline_commit"] = baseline_commit
+                self.console.log(f"[dim]Baseline commit: {baseline_commit[:8]}[/]")
+            except Exception:
+                # No commits yet (empty repo)
+                baseline_commit = None
+                self.console.log("[dim]No commits yet (empty repository)[/]")
+
+        # ──── Git Feature Branch Creation ────
+        original_branch = None
         if self.config.workflow.use_feature_branches and self.git.is_git_repo():
             try:
                 original_branch = self.git.get_current_branch()
                 snapshot.metadata["original_branch"] = original_branch
-
-                # Record baseline commit for change detection
-                try:
-                    baseline_commit = self.git.get_current_commit()
-                    snapshot.metadata["baseline_commit"] = baseline_commit
-                    self.console.log(f"[dim]Baseline commit: {baseline_commit[:8]}[/]")
-                except Exception:
-                    # No commits yet (empty repo)
-                    baseline_commit = None
-                    self.console.log("[dim]No commits yet (empty repository)[/]")
 
                 # Create and checkout feature branch
                 feature_branch = f"duet/{snapshot.run_id}"
