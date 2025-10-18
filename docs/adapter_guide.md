@@ -50,22 +50,35 @@ codex:
 
 **CLI Invocation**:
 ```bash
-codex --model <model> --prompt-file <file> --output json
+codex exec --json --model <model> --ask-for-approval never --sandbox read-only "<prompt>"
 ```
 
-**Expected Response Format**:
-```json
-{
-  "content": "The response text...",
-  "concluded": false,
-  "metadata": { ... }
-}
+**Response Format (JSONL Streaming)**:
+
+Codex with `--json` outputs JSONL (JSON Lines) - one JSON object per line:
+```jsonl
+{"type":"session_start","session_id":"abc123"}
+{"type":"message","role":"user","content":"Create a plan"}
+{"type":"message","role":"assistant","content":"Here is the plan..."}
+{"type":"usage","input_tokens":10,"output_tokens":20}
 ```
 
-**Fallback Content Fields**: If `content` is not present, the adapter will attempt to extract from: `text`, `response`, `output`, or `message`.
+The adapter:
+1. Parses each line as a JSON object
+2. Extracts the final `assistant` message for content
+3. Collects metadata from all events (tokens, tool usage, session ID)
+4. Handles partial/invalid JSON lines gracefully (recorded as parse_error events)
+
+**Captured Metadata**:
+- `stream_events`: Total number of events
+- `event_types`: List of event types encountered
+- `input_tokens`, `output_tokens`: Token usage
+- `tool_calls`: List of tools used (if any)
+- `session_id`: Codex session identifier
 
 **Error Handling**:
-- `CodexError`: Raised on CLI failures, timeouts, invalid JSON, or missing content
+- `CodexError`: Raised on CLI failures, timeouts, empty streams, or missing assistant messages
+- Partial JSON lines don't fail the request (captured as parse_error events)
 - Errors are caught by the orchestrator and mark the run as `BLOCKED`
 
 ---

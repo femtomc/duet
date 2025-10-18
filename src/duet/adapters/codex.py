@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 from typing import Any, Dict
 
@@ -40,24 +41,32 @@ class CodexAdapter(AssistantAdapter):
 
     def generate(self, request: AssistantRequest) -> AssistantResponse:
         """
-        Generate a response by invoking the Codex CLI.
+        Generate a response by invoking the Codex CLI with JSON streaming.
 
-        Uses a temporary file to pass the prompt to avoid shell escaping issues.
-        Parses JSON output from the CLI.
+        Codex with --json outputs JSONL (one JSON object per line) representing
+        events during execution. We parse line-by-line and extract:
+        - Final assistant message (content)
+        - Metadata (tokens, tool usage, session info)
+        - Stream events for debugging
 
         Raises:
             CodexError: If the CLI invocation fails or returns invalid data
         """
         try:
-            # Invoke Codex CLI
-            # Actual format: codex exec --model <model> <prompt>
-            # Prompt is passed as positional argument
+            # Invoke Codex CLI with JSON output
+            # Format: codex exec --json --model <model> --ask-for-approval never --sandbox read-only <prompt>
             result = subprocess.run(
                 [
                     self.cli_path,
                     "exec",  # Non-interactive mode
+                    "--json",  # JSONL streaming output
                     "--model",
                     self.model,
+                    "--ask-for-approval",
+                    "never",
+                    "--sandbox",
+                    "read-only",
+                    "--skip-git-repo-check",
                     request.prompt,  # Positional argument
                 ],
                 capture_output=True,
@@ -73,17 +82,58 @@ class CodexAdapter(AssistantAdapter):
                     f"Codex CLI failed with exit code {result.returncode}: {error_msg}"
                 )
 
-            # Codex exec returns plain text, wrap in expected format
-            # Since Codex doesn't output JSON, we create a normalized response
-            content = result.stdout.strip()
-            if not content:
-                raise CodexError("Codex returned empty response")
+            # Parse JSONL output (one JSON object per line)
+            events = self._parse_jsonl_stream(result.stdout)
 
-            # Create normalized response (Codex doesn't provide structured output)
+            if not events:
+                raise CodexError("Codex returned no events in JSON stream")
+
+            # Extract final assistant message and metadata
+            assistant_message = None
+            metadata = {
+                "stream_events": len(events),
+                "event_types": [],
+            }
+
+            for event in events:
+                event_type = event.get("type")
+                metadata["event_types"].append(event_type)
+
+                # Extract assistant message from message events
+                if event_type == "message":
+                    role = event.get("role")
+                    content = event.get("content")
+                    if role == "assistant" and content:
+                        assistant_message = content
+
+                # Extract usage/token metadata
+                if event_type == "usage" or "usage" in event:
+                    usage = event.get("usage", event)
+                    metadata["tokens"] = usage
+                    metadata["input_tokens"] = usage.get("input_tokens")
+                    metadata["output_tokens"] = usage.get("output_tokens")
+
+                # Extract tool usage
+                if event_type == "tool_use":
+                    if "tool_calls" not in metadata:
+                        metadata["tool_calls"] = []
+                    metadata["tool_calls"].append(event.get("tool_name"))
+
+                # Preserve session info
+                if "session_id" in event:
+                    metadata["session_id"] = event["session_id"]
+
+            if not assistant_message:
+                raise CodexError(
+                    f"No assistant message found in Codex stream. "
+                    f"Event types: {metadata['event_types']}"
+                )
+
+            # Create normalized response
             response_data = {
-                "content": content,
+                "content": assistant_message,
                 "concluded": False,  # Default
-                "metadata": {"raw_output": True},
+                "metadata": metadata,
             }
 
             return self._normalize_response(response_data)
@@ -100,6 +150,41 @@ class CodexAdapter(AssistantAdapter):
             if isinstance(exc, CodexError):
                 raise
             raise CodexError(f"Unexpected error invoking Codex: {exc}") from exc
+
+    def _parse_jsonl_stream(self, stdout: str) -> list[Dict[str, Any]]:
+        """
+        Parse JSONL stream from Codex --json output.
+
+        Each line is a JSON object representing an event.
+        Handles partial/invalid lines gracefully.
+
+        Returns:
+            List of parsed event dictionaries
+        """
+        events = []
+        lines = stdout.strip().split("\n")
+
+        for line_num, line in enumerate(lines, 1):
+            line = line.strip()
+            if not line:
+                continue  # Skip empty lines
+
+            try:
+                event = json.loads(line)
+                events.append(event)
+            except json.JSONDecodeError as exc:
+                # Log but don't fail on invalid lines (may be partial output)
+                # Store as error event for debugging
+                events.append(
+                    {
+                        "type": "parse_error",
+                        "line_num": line_num,
+                        "error": str(exc),
+                        "raw_line": line[:100],  # Truncate for safety
+                    }
+                )
+
+        return events
 
     def _normalize_response(self, data: Dict[str, Any]) -> AssistantResponse:
         """

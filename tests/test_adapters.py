@@ -82,19 +82,21 @@ def test_codex_adapter_initialization():
 
 
 def test_codex_adapter_success_response():
-    """Test Codex adapter with successful CLI response."""
+    """Test Codex adapter with successful JSONL stream response."""
     adapter = CodexAdapter(model="gpt-4")
     request = AssistantRequest(role="planner", prompt="Create a plan")
 
-    # Mock subprocess.run
+    # Mock subprocess.run with JSONL output (one JSON object per line)
     mock_result = Mock()
     mock_result.returncode = 0
-    mock_result.stdout = json.dumps(
-        {
-            "content": "Here is the plan...",
-            "concluded": False,
-            "metadata": {"tokens": 100},
-        }
+    # Simulate Codex JSONL stream with multiple events
+    mock_result.stdout = "\n".join(
+        [
+            json.dumps({"type": "session_start", "session_id": "abc123"}),
+            json.dumps({"type": "message", "role": "user", "content": "Create a plan"}),
+            json.dumps({"type": "message", "role": "assistant", "content": "Here is the plan..."}),
+            json.dumps({"type": "usage", "input_tokens": 10, "output_tokens": 20}),
+        ]
     )
     mock_result.stderr = ""
 
@@ -105,23 +107,34 @@ def test_codex_adapter_success_response():
     assert response.concluded is False
     assert response.metadata["adapter"] == "codex"
     assert response.metadata["model"] == "gpt-4"
+    assert response.metadata["stream_events"] == 4
+    assert response.metadata["input_tokens"] == 10
+    assert response.metadata["output_tokens"] == 20
 
 
-def test_codex_adapter_fallback_content_extraction():
-    """Test Codex adapter content extraction with non-standard response."""
+def test_codex_adapter_jsonl_partial_lines():
+    """Test Codex adapter handling of partial/invalid JSON lines."""
     adapter = CodexAdapter(model="gpt-4")
     request = AssistantRequest(role="planner", prompt="Test")
 
-    # Mock response with 'text' field instead of 'content'
+    # Mock JSONL with one invalid line
     mock_result = Mock()
     mock_result.returncode = 0
-    mock_result.stdout = json.dumps({"text": "Fallback content", "metadata": {}})
+    mock_result.stdout = "\n".join(
+        [
+            json.dumps({"type": "session_start", "session_id": "xyz"}),
+            "{invalid json line",  # Invalid JSON
+            json.dumps({"type": "message", "role": "assistant", "content": "Valid response"}),
+        ]
+    )
     mock_result.stderr = ""
 
     with patch("subprocess.run", return_value=mock_result):
         response = adapter.generate(request)
 
-    assert response.content == "Fallback content"
+    # Should successfully extract message despite invalid line
+    assert response.content == "Valid response"
+    assert "parse_error" in [e.get("type") for e in response.metadata.get("event_types", [])]
 
 
 def test_codex_adapter_cli_failure():
@@ -155,40 +168,71 @@ def test_codex_adapter_timeout():
     assert "timeout" in str(exc_info.value).lower()
 
 
-def test_codex_adapter_invalid_json():
-    """Test Codex adapter handling of invalid JSON response."""
+def test_codex_adapter_empty_stream():
+    """Test Codex adapter handling of empty JSONL stream."""
     adapter = CodexAdapter(model="gpt-4")
     request = AssistantRequest(role="planner", prompt="Test")
 
-    # Mock response with invalid JSON
+    # Mock response with empty output
     mock_result = Mock()
     mock_result.returncode = 0
-    mock_result.stdout = "Not valid JSON"
+    mock_result.stdout = ""
     mock_result.stderr = ""
 
     with patch("subprocess.run", return_value=mock_result):
         with pytest.raises(CodexError) as exc_info:
             adapter.generate(request)
 
-    assert "parse" in str(exc_info.value).lower()
+    assert "no events" in str(exc_info.value).lower()
 
 
-def test_codex_adapter_missing_content():
-    """Test Codex adapter handling of response without content."""
+def test_codex_adapter_no_assistant_message():
+    """Test Codex adapter when stream has no assistant message."""
     adapter = CodexAdapter(model="gpt-4")
     request = AssistantRequest(role="planner", prompt="Test")
 
-    # Mock response with no content field
+    # Mock JSONL with events but no assistant message
     mock_result = Mock()
     mock_result.returncode = 0
-    mock_result.stdout = json.dumps({"metadata": {}, "other_field": "value"})
+    mock_result.stdout = "\n".join(
+        [
+            json.dumps({"type": "session_start", "session_id": "abc"}),
+            json.dumps({"type": "message", "role": "user", "content": "Test"}),
+            # No assistant message
+        ]
+    )
     mock_result.stderr = ""
 
     with patch("subprocess.run", return_value=mock_result):
         with pytest.raises(CodexError) as exc_info:
             adapter.generate(request)
 
-    assert "No content field" in str(exc_info.value)
+    assert "no assistant message" in str(exc_info.value).lower()
+
+
+def test_codex_adapter_tool_usage_metadata():
+    """Test that Codex adapter captures tool usage metadata."""
+    adapter = CodexAdapter(model="gpt-4")
+    request = AssistantRequest(role="planner", prompt="Test")
+
+    # Mock JSONL with tool usage events
+    mock_result = Mock()
+    mock_result.returncode = 0
+    mock_result.stdout = "\n".join(
+        [
+            json.dumps({"type": "message", "role": "assistant", "content": "Using tools..."}),
+            json.dumps({"type": "tool_use", "tool_name": "bash"}),
+            json.dumps({"type": "tool_use", "tool_name": "read_file"}),
+        ]
+    )
+    mock_result.stderr = ""
+
+    with patch("subprocess.run", return_value=mock_result):
+        response = adapter.generate(request)
+
+    assert response.content == "Using tools..."
+    assert "tool_calls" in response.metadata
+    assert response.metadata["tool_calls"] == ["bash", "read_file"]
 
 
 def test_codex_adapter_cli_not_found():

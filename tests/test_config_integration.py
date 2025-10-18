@@ -146,7 +146,7 @@ def test_orchestrator_passes_workspace_to_claude_adapter():
             orchestrator = Orchestrator(config, artifact_store, console=console)
 
             # Verify Claude adapter received workspace_root
-            assert orchestrator.claude_adapter.workspace_root == str(workspace)
+            assert Path(orchestrator.claude_adapter.workspace_root).resolve() == workspace.resolve()
 
 
 def test_orchestrator_passes_all_config_params_to_adapters():
@@ -189,7 +189,7 @@ def test_orchestrator_passes_all_config_params_to_adapters():
             assert orchestrator.claude_adapter.model == "claude-custom"
             assert orchestrator.claude_adapter.timeout == 500
             assert orchestrator.claude_adapter.cli_path == "/custom/claude"
-            assert orchestrator.claude_adapter.workspace_root == str(workspace)
+            assert Path(orchestrator.claude_adapter.workspace_root).resolve() == workspace.resolve()
 
 
 def test_echo_adapter_ignores_extra_kwargs():

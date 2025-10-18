@@ -20,6 +20,9 @@ These tests validate:
 from __future__ import annotations
 
 import argparse
+import os
+import tomllib
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -86,10 +89,42 @@ class SmokeTestRunner:
 # ──────────────────────────────────────────────────────────────────────────────
 
 
+def _codex_model_candidates() -> list[str]:
+    """
+    Determine a prioritized list of Codex models to try.
+
+    Priority order:
+      1. CODEX_SMOKE_MODEL environment variable
+      2. Default model in ~/.codex/config.toml (if present)
+      3. Known fallback models
+    """
+    candidates: list[str] = []
+
+    env_model = os.getenv("CODEX_SMOKE_MODEL")
+    if env_model:
+        candidates.append(env_model.strip())
+
+    config_path = Path.home() / ".codex" / "config.toml"
+    if config_path.exists():
+        try:
+            with config_path.open("rb") as fh:
+                data = tomllib.load(fh)
+            config_model = data.get("model")
+            if isinstance(config_model, str) and config_model not in candidates:
+                candidates.append(config_model)
+        except Exception:
+            pass
+
+    for fallback in ("gpt-5-codex", "o3-mini"):
+        if fallback not in candidates:
+            candidates.append(fallback)
+
+    return candidates
+
+
 def test_codex_cli_exists():
     """Test that Codex CLI is installed and in PATH."""
     adapter = CodexAdapter(model="gpt-4")
-    import subprocess
 
     try:
         result = subprocess.run(
@@ -108,47 +143,40 @@ def test_codex_cli_exists():
         return False
 
 
+def _run_codex_prompt(prompt: str) -> bool:
+    """Try running Codex with fallback models until one succeeds or all fail."""
+    errors: list[str] = []
+    for model in _codex_model_candidates():
+        print(f"  Trying Codex model: {model}")
+        adapter = CodexAdapter(model=model, timeout=60)
+        request = AssistantRequest(role="planner", prompt=prompt, context={})
+        try:
+            response = adapter.generate(request)
+            print(f"    Success with model '{model}' (content length: {len(response.content)} chars)")
+            print(f"    Metadata: {response.metadata}")
+            return True
+        except CodexError as exc:
+            message = str(exc)
+            errors.append(message)
+            if "Unsupported model" in message or "unrecognized model" in message:
+                print(f"    Model '{model}' unsupported; trying next candidate...")
+                continue
+            print(f"    Codex error: {message}")
+            return False
+    print("  Failed to find a supported Codex model. Errors:")
+    for err in errors:
+        print(f"    - {err}")
+    return False
+
+
 def test_codex_simple_request():
     """Test Codex adapter with a simple request."""
-    # Note: Model availability depends on Codex configuration
-    # Check ~/.codex/config.toml for available models
-    adapter = CodexAdapter(model="o3-mini", timeout=60)
-    request = AssistantRequest(
-        role="planner",
-        prompt="Say hello and confirm you received this message.",
-        context={},
-    )
-
-    try:
-        response = adapter.generate(request)
-        print(f"  Response content length: {len(response.content)} chars")
-        print(f"  Response metadata: {response.metadata}")
-        return bool(response.content)
-    except CodexError as exc:
-        print(f"  Codex error: {exc}")
-        print(f"  NOTE: This may fail if model not available in your Codex config")
-        return False
+    return _run_codex_prompt("Say hello and confirm you received this message.")
 
 
 def test_codex_json_parsing():
     """Test that Codex response is parsed correctly."""
-    adapter = CodexAdapter(model="o3-mini", timeout=60)
-    request = AssistantRequest(
-        role="planner",
-        prompt="Create a brief implementation plan for adding a new feature.",
-        context={},
-    )
-
-    try:
-        response = adapter.generate(request)
-        print(f"  Content: {response.content[:50]}...")
-        print(f"  Concluded: {response.concluded}")
-        print(f"  Metadata keys: {list(response.metadata.keys())}")
-        return True
-    except CodexError as exc:
-        print(f"  Response parsing failed: {exc}")
-        print(f"  NOTE: This may fail if model not available in your Codex config")
-        return False
+    return _run_codex_prompt("Create a brief implementation plan for adding a new feature.")
 
 
 def test_codex_error_handling():

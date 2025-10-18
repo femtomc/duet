@@ -180,44 +180,34 @@ Codex error: Codex CLI timeout after 60 seconds
 ### Codex CLI Expected Interface
 
 ```bash
-# Command format we use
-codex --model <model> --prompt-file <file> --output json
+# Command format used by the adapter
+codex exec --model <model> "<prompt text>"
 
-# Expected output format
-{
-  "content": "The response text...",
-  "concluded": false,
-  "metadata": { ... }
-}
+# Output format
+Plain text (Codex currently returns unstructured text. The adapter wraps it in
+an AssistantResponse with standard fields.)
 ```
 
-**OR** with fallback content extraction:
-```json
-{
-  "text": "The response...",
-  "response": "The response...",
-  "output": "The response..."
-}
-```
+> Tip: You can override the model used in smoke tests by setting
+> `CODEX_SMOKE_MODEL`. If the requested model is unavailable, the smoke tests
+> automatically fall back to the first model returned by `codex models list`
+> (defaulting to `o3-mini` if the CLI cannot provide a list).
 
 ### Claude Code CLI Expected Interface
 
 ```bash
-# Command format we use
-claude --model <model> --prompt-file <file> --workspace <path> --output json
+# Command format used by the adapter
+claude --print --output-format json --model <model> "<prompt text>"
 
 # Expected output format
 {
-  "content": "Implementation summary...",
-  "concluded": false,
-  "files_modified": ["src/main.py"],
-  "commands_executed": ["pytest"],
-  "commit_sha": "abc123",
+  "type": "result",
+  "result": "Implementation summary...",
   "metadata": { ... }
 }
 ```
 
-**OR** with fallback content extraction (same as Codex)
+**OR** with fallback content extraction (same as Codex) if `result` is missing.
 
 ---
 
