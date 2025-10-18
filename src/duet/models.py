@@ -26,6 +26,23 @@ class ReviewVerdict(str, Enum):
     BLOCKED = "blocked"  # Critical issues, requires human intervention
 
 
+class CanonicalEventType(str, Enum):
+    """
+    Canonical streaming event types for consistent handling (Sprint 7).
+
+    All adapters map their raw events to these standardized types.
+    """
+
+    ASSISTANT_MESSAGE = "assistant_message"  # Main response content
+    REASONING = "reasoning"  # Thinking/planning steps
+    TOOL_USE = "tool_use"  # Tool invocation (file ops, commands, etc.)
+    TURN_COMPLETE = "turn_complete"  # Turn finished with usage metadata
+    PARSE_ERROR = "parse_error"  # JSON parsing failure
+    SYSTEM_NOTICE = "system_notice"  # System-level notifications
+    THREAD_STARTED = "thread_started"  # Execution thread initialized
+    UNKNOWN = "unknown"  # Unmapped event type
+
+
 class AssistantRequest(BaseModel):
     """Prompt details delivered to an assistant adapter."""
 

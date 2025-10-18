@@ -10,12 +10,24 @@ from typing import Any, Callable, Dict, Optional, Type, TypedDict
 from ..models import AssistantRequest, AssistantResponse
 
 
-class StreamEvent(TypedDict):
-    """Event emitted during streaming adapter execution."""
+class StreamEvent(TypedDict, total=False):
+    """
+    Event emitted during streaming adapter execution.
 
-    event_type: str
-    payload: Dict[str, Any]
+    Required fields: event_type, payload, timestamp
+    Optional enriched fields (Sprint 7): text_snippet, reasoning_step, usage, tool_info
+    """
+
+    # Required fields
+    event_type: str  # Canonical type (use CanonicalEventType enum values)
+    payload: Dict[str, Any]  # Original raw event data
     timestamp: datetime.datetime
+
+    # Optional enriched fields (Sprint 7)
+    text_snippet: str  # Text content for messages/reasoning
+    reasoning_step: int  # Step number for reasoning events
+    usage: Dict[str, int]  # Token counts {input_tokens, output_tokens, cached_input_tokens}
+    tool_info: Dict[str, Any]  # Tool invocation details {tool_name, status, output_preview}
 
 
 class AssistantAdapter(ABC):
