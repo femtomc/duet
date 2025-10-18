@@ -44,7 +44,7 @@ def init(
 
     Creates .duet/ directory with:
     - duet.yaml: Configuration (models, guardrails, logging)
-    - ide.py: Workflow definition using Python DSL (Sprint 9)
+    - workflow.py: Workflow definition using Python DSL (Sprint 9)
     - context/: Repository discovery outputs
     - runs/, logs/: Artifact directories
     - duet.db: SQLite database for state management

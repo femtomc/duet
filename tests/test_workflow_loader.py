@@ -223,7 +223,7 @@ def test_resolve_explicit_path(tmp_path, workflow_module_with_variable):
     # Create workspace with different workflow
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    workspace_workflow = workspace / ".duet" / "ide.py"
+    workspace_workflow = workspace / ".duet" / "workflow.py"
     workspace_workflow.parent.mkdir(parents=True)
     workspace_workflow.write_text("workflow = None  # Should not be loaded")
 
@@ -243,7 +243,7 @@ def test_resolve_workspace_root(tmp_path):
     # Create .duet/ide.py in workspace
     duet_dir = workspace / ".duet"
     duet_dir.mkdir()
-    workflow_file = duet_dir / "ide.py"
+    workflow_file = duet_dir / "workflow.py"
     workflow_file.write_text("""
 from duet.dsl import Agent, Phase, Transition, Workflow
 
@@ -281,7 +281,7 @@ def test_resolve_fallback_current_directory(tmp_path, monkeypatch):
     # Create .duet/ide.py in current directory
     duet_dir = tmp_path / ".duet"
     duet_dir.mkdir()
-    workflow_file = duet_dir / "ide.py"
+    workflow_file = duet_dir / "workflow.py"
     workflow_file.write_text("""
 from duet.dsl import Agent, Phase, Transition, Workflow
 
@@ -313,7 +313,7 @@ def test_resolve_workspace_missing_fallback(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     duet_dir = tmp_path / ".duet"
     duet_dir.mkdir()
-    fallback_workflow = duet_dir / "ide.py"
+    fallback_workflow = duet_dir / "workflow.py"
     fallback_workflow.write_text("""
 from duet.dsl import Agent, Phase, Transition, Workflow
 workflow = Workflow(
@@ -363,7 +363,7 @@ workflow = Workflow(
     workspace.mkdir()
     workspace_duet = workspace / ".duet"
     workspace_duet.mkdir()
-    workspace_workflow = workspace_duet / "ide.py"
+    workspace_workflow = workspace_duet / "workflow.py"
     workspace_workflow.write_text("""
 from duet.dsl import Agent, Phase, Transition, Workflow
 workflow = Workflow(

@@ -21,7 +21,7 @@ This roadmap tracks major milestones for Duet. Items marked as complete are alre
 
 ## Sprint 4 – Workspace Bootstrap (`duet init`) *(Complete)*
 - Scaffold `.duet/` with configuration, workflow definition (DSL), context notes, logs, and run directories.
-- Generate `.duet/ide.py` workflow definition using Python DSL (upgraded in Sprint 9).
+- Generate `.duet/workflow.py` workflow definition using Python DSL (upgraded in Sprint 9).
 - Generate repository context via Codex discovery.
 - Document the bootstrap workflow and add unit tests for initialization.
 

@@ -31,7 +31,7 @@ Duet orchestrates iterative software delivery by coordinating Codex for planning
 
 3. **Review generated files**
    - `.duet/duet.yaml`: adapter configuration and workflow guardrails
-   - `.duet/ide.py`: workflow definition using Python DSL (Sprint 9)
+   - `.duet/workflow.py`: workflow definition using Python DSL (Sprint 9)
    - `.duet/context/context.md`: repository overview generated during init
 
 4. **Run smoke tests (recommended before production)**
@@ -92,7 +92,7 @@ All commands accept `--config PATH` to point to an alternate `duet.yaml`. If omi
 ```
 .duet/
 ├── duet.yaml           # Adapter configuration and workflow guardrails
-├── ide.py              # Workflow definition using Python DSL (Sprint 9)
+├── workflow.py         # Workflow definition using Python DSL (Sprint 9)
 ├── context/            # Repository discovery notes
 ├── runs/               # Run artifacts (checkpoints, iterations, summaries)
 ├── logs/               # JSONL event stream (optional)
@@ -244,7 +244,7 @@ workflow = Workflow(
 
 ### Customization
 
-Edit `.duet/ide.py` to customize your workflow:
+Edit `.duet/workflow.py` to customize your workflow:
 - Add/remove agents for different models
 - Define custom channels for domain-specific data
 - Configure phase dependencies (consumes/publishes)

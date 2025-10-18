@@ -1,5 +1,5 @@
 """
-Workflow loader for .duet/ide.py DSL programs.
+Workflow loader for .duet/workflow.py DSL programs.
 
 Loads, validates, and compiles workflow definitions from Python modules.
 """
@@ -32,8 +32,8 @@ def load_workflow(
     Resolution order:
     1. Explicit workflow_path argument
     2. DUET_WORKFLOW_PATH environment variable
-    3. <workspace_root>/.duet/ide.py
-    4. ./.duet/ide.py (current directory)
+    3. <workspace_root>/.duet/workflow.py
+    4. ./.duet/workflow.py (current directory)
 
     The module must export either:
     - A 'workflow' variable (Workflow instance)
@@ -55,7 +55,7 @@ def load_workflow(
     if not resolved_path.exists():
         raise WorkflowLoadError(
             f"Workflow file not found: {resolved_path}\n"
-            f"Initialize with 'duet init' to create .duet/ide.py"
+            f"Initialize with 'duet init' to create .duet/workflow.py"
         )
 
     # Import the module
@@ -125,10 +125,10 @@ def _resolve_workflow_path(
 
     # 3. Workspace root
     if workspace_root:
-        candidates.append((workspace_root / ".duet" / "ide.py").expanduser().resolve())
+        candidates.append((workspace_root / ".duet" / "workflow.py").expanduser().resolve())
 
     # 4. Current directory fallback
-    candidates.append(Path(".duet/ide.py").expanduser().resolve())
+    candidates.append(Path(".duet/workflow.py").expanduser().resolve())
 
     # Return first existing candidate, or last candidate if none exist
     for candidate in candidates:
@@ -136,7 +136,7 @@ def _resolve_workflow_path(
             return candidate
 
     # If no candidates exist, return the last one (caller will handle missing file)
-    return candidates[-1] if candidates else Path(".duet/ide.py").expanduser().resolve()
+    return candidates[-1] if candidates else Path(".duet/workflow.py").expanduser().resolve()
 
 
 def _import_module_from_path(module_path: Path) -> Any:

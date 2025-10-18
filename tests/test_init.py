@@ -74,7 +74,7 @@ def test_init_creates_workflow_definition(temp_workspace):
 
     initializer.init()
 
-    workflow_file = temp_workspace / ".duet" / "ide.py"
+    workflow_file = temp_workspace / ".duet" / "workflow.py"
     assert workflow_file.exists()
 
     # Verify content
@@ -159,8 +159,8 @@ def test_init_overwrites_with_force(temp_workspace):
     # Should not raise
     initializer.init()
 
-    # Should have created new structure (Sprint 9: ide.py instead of prompts/)
-    assert (duet_dir / "ide.py").exists()
+    # Should have created new structure (Sprint 9: workflow.py instead of prompts/)
+    assert (duet_dir / "workflow.py").exists()
     assert (duet_dir / "duet.yaml").exists()
 
 
@@ -267,10 +267,10 @@ def test_init_custom_config_path(temp_workspace):
 
     initializer.init()
 
-    # Verify custom path used (Sprint 9: ide.py instead of prompts/)
+    # Verify custom path used (Sprint 9: workflow.py instead of prompts/)
     assert custom_path.exists()
     assert (custom_path / "duet.yaml").exists()
-    assert (custom_path / "ide.py").exists()
+    assert (custom_path / "workflow.py").exists()
 
 
 def test_init_creates_readme(temp_workspace):

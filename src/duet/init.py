@@ -94,7 +94,7 @@ class DuetInitializer:
         self.console.print()
         self.console.print("[bold]Next steps:[/]")
         self.console.print("  1. Review configuration: cat .duet/duet.yaml")
-        self.console.print("  2. Customize workflow: edit .duet/ide.py (Sprint 9 DSL)")
+        self.console.print("  2. Customize workflow: edit .duet/workflow.py (Sprint 9 DSL)")
         self.console.print("  3. Run orchestration: uv run duet run")
         self.console.print("  4. Or run phase-by-phase: uv run duet next")
         self.console.print()
@@ -120,7 +120,7 @@ This directory contains Duet orchestration artifacts and configuration.
 ## Structure
 
 - **duet.yaml**: Configuration file (models, workflow, guardrails)
-- **ide.py**: Workflow definition using Python DSL (Sprint 9)
+- **workflow.py**: Workflow definition using Python DSL (Sprint 9)
 - **runs/**: Orchestration run artifacts (checkpoints, iterations, summaries)
 - **logs/**: Structured JSONL event logs
 - **context/**: Repository context and discovery outputs
@@ -128,7 +128,7 @@ This directory contains Duet orchestration artifacts and configuration.
 
 ## Workflow Customization (Sprint 9)
 
-Edit `ide.py` to customize your workflow:
+Edit `workflow.py` to customize your workflow:
 - Define agents (Codex, Claude Code, custom adapters)
 - Declare channels for message passing
 - Configure phases with consumes/publishes patterns
@@ -210,7 +210,7 @@ logging:
 # ────────────────────────────────────────────────────────────────────────────
 # Tips:
 # - To use echo adapters for testing, set provider: "echo"
-# - Customize workflow in .duet/ide.py (Sprint 9 DSL)
+# - Customize workflow in .duet/workflow.py (Sprint 9 DSL)
 # - Review context discovery in .duet/context/context.md
 # - Monitor runs in .duet/runs/<run-id>/
 # - See docs/workflow_dsl.md for DSL reference
@@ -226,7 +226,7 @@ logging:
         try:
             # Try to read template from package resources
             import duet.templates
-            template_path = Path(duet.templates.__file__).parent / "ide.py.template"
+            template_path = Path(duet.templates.__file__).parent / "workflow.py.template"
 
             if template_path.exists():
                 template_content = template_path.read_text(encoding="utf-8")
@@ -237,8 +237,8 @@ logging:
             # Fallback: inline template
             template_content = self._get_inline_workflow_template()
 
-        # Write ide.py
-        workflow_file = self.config_path / "ide.py"
+        # Write workflow.py
+        workflow_file = self.config_path / "workflow.py"
         workflow_file.write_text(template_content, encoding="utf-8")
         self.console.log(f"[green]Created:[/] {self._display_path(workflow_file)}")
 

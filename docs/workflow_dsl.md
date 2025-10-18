@@ -1,6 +1,6 @@
 # Workflow DSL Reference (Sprint 9)
 
-The Duet Workflow DSL is a Python-based declarative language for defining orchestration workflows. It replaces legacy prompt templates with a type-safe, channel-based messaging system that enables the syndicated workspace model.
+The Duet Workflow DSL is a Python-based declarative language for defining orchestration workflows in `.duet/workflow.py`. It replaces legacy prompt templates with a type-safe, channel-based messaging system that enables the syndicated workspace model.
 
 ## Table of Contents
 
@@ -650,7 +650,7 @@ Phase(
 
 **After (Sprint 9):**
 ```python
-# .duet/ide.py
+# .duet/workflow.py
 from duet.dsl import Agent, Channel, Phase, Transition, When, Workflow
 
 workflow = Workflow(
@@ -707,8 +707,8 @@ Duet searches for workflow definitions in this order:
 
 1. **Explicit path**: `--workflow-path` CLI argument
 2. **Environment variable**: `DUET_WORKFLOW_PATH`
-3. **Workspace**: `<workspace_root>/.duet/ide.py`
-4. **Current directory**: `./.duet/ide.py`
+3. **Workspace**: `<workspace_root>/.duet/workflow.py`
+4. **Current directory**: `./.duet/workflow.py`
 
 ### Export Options
 
@@ -716,7 +716,7 @@ Workflows can be exported two ways:
 
 **Option 1: Variable export**
 ```python
-# .duet/ide.py
+# .duet/workflow.py
 from duet.dsl import Workflow, ...
 
 workflow = Workflow(...)
@@ -724,7 +724,7 @@ workflow = Workflow(...)
 
 **Option 2: Function export**
 ```python
-# .duet/ide.py
+# .duet/workflow.py
 from duet.dsl import Workflow, ...
 
 def get_workflow():
@@ -745,7 +745,7 @@ The loader performs these checks:
 7. Terminal phases marked correctly
 
 Errors include:
-- File path (e.g., `/path/to/.duet/ide.py`)
+- File path (e.g., `/path/to/.duet/workflow.py`)
 - Specific validation failures (e.g., "Phase 'plan' consumes unknown channel: 'task'")
 - Available exports in module
 
@@ -756,15 +756,15 @@ Errors include:
 ### Workflow not found
 
 ```
-Error: Workflow file not found: /path/.duet/ide.py
+Error: Workflow file not found: /path/.duet/workflow.py
 ```
 
-**Solution**: Run `duet init` to generate `.duet/ide.py`
+**Solution**: Run `duet init` to generate `.duet/workflow.py`
 
 ### Compilation failed
 
 ```
-Workflow validation failed: /path/.duet/ide.py
+Workflow validation failed: /path/.duet/workflow.py
   - Phase 'plan' references unknown agent: 'planner'
 ```
 
@@ -773,7 +773,7 @@ Workflow validation failed: /path/.duet/ide.py
 ### Module import error
 
 ```
-Failed to import workflow module: /path/.duet/ide.py
+Failed to import workflow module: /path/.duet/workflow.py
 Error: No module named 'custom_module'
 ```
 
