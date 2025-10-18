@@ -28,9 +28,9 @@ class ClaudeCodeAdapter(AssistantAdapter):
 
     Configuration:
         model: str - Model identifier (e.g., "claude-sonnet-4")
-        temperature: float - Sampling temperature (default: 0.0)
         timeout: int - CLI invocation timeout in seconds (default: 600)
         workspace_root: str - Path to workspace for code operations
+        cli_path: str - Path to CLI executable (default: "claude")
     """
 
     name = "claude-code"
@@ -39,10 +39,9 @@ class ClaudeCodeAdapter(AssistantAdapter):
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self.model = kwargs.get("model", "claude-sonnet-4")
-        self.temperature = kwargs.get("temperature", 0.0)
         self.timeout = kwargs.get("timeout", 600)  # Longer default for code operations
         self.workspace_root = kwargs.get("workspace_root", ".")
-        self.cli_path = kwargs.get("cli_path", "claude")  # Allow override for testing
+        self.cli_path = kwargs.get("cli_path", "claude")
 
     def generate(self, request: AssistantRequest) -> AssistantResponse:
         """
@@ -62,13 +61,12 @@ class ClaudeCodeAdapter(AssistantAdapter):
 
             try:
                 # Invoke Claude CLI
-                # Expected format: claude --model <model> --temperature <temp> --prompt-file <file>
+                # Note: Claude Code CLI does not accept --temperature flag
+                # Expected format: claude --model <model> --prompt-file <file> --output json
                 cmd = [
                     self.cli_path,
                     "--model",
                     self.model,
-                    "--temperature",
-                    str(self.temperature),
                     "--prompt-file",
                     str(prompt_file),
                     "--output",

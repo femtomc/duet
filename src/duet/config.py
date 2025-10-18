@@ -20,7 +20,6 @@ class AssistantConfig(BaseModel):
             "Optional environment variable that provides credentials when CLI-based auth is absent"
         ),
     )
-    temperature: float = Field(0.0, ge=0.0, le=2.0, description="Default sampling temperature")
     timeout: Optional[int] = Field(
         None,
         ge=1,

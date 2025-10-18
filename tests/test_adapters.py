@@ -76,9 +76,8 @@ def test_echo_adapter_basic():
 
 def test_codex_adapter_initialization():
     """Test Codex adapter initialization with various configs."""
-    adapter = CodexAdapter(model="gpt-4", temperature=0.5, timeout=120)
+    adapter = CodexAdapter(model="gpt-4", timeout=120)
     assert adapter.model == "gpt-4"
-    assert adapter.temperature == 0.5
     assert adapter.timeout == 120
 
 
@@ -212,10 +211,9 @@ def test_codex_adapter_cli_not_found():
 def test_claude_code_adapter_initialization():
     """Test Claude Code adapter initialization with various configs."""
     adapter = ClaudeCodeAdapter(
-        model="claude-sonnet-4", temperature=0.3, timeout=300, workspace_root="/tmp"
+        model="claude-sonnet-4", timeout=300, workspace_root="/tmp"
     )
     assert adapter.model == "claude-sonnet-4"
-    assert adapter.temperature == 0.3
     assert adapter.timeout == 300
     assert adapter.workspace_root == "/tmp"
 

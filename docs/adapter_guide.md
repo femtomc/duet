@@ -45,13 +45,12 @@ The Codex adapter invokes the Codex CLI for planning and review tasks.
 codex:
   provider: "codex"
   model: "gpt-4"
-  temperature: 0.2
   timeout: 300  # Optional: CLI timeout in seconds (default: 300)
 ```
 
 **CLI Invocation**:
 ```bash
-codex --model <model> --temperature <temp> --prompt-file <file> --output json
+codex --model <model> --prompt-file <file> --output json
 ```
 
 **Expected Response Format**:
@@ -88,13 +87,12 @@ The Claude Code adapter invokes the Claude CLI for implementation tasks.
 claude:
   provider: "claude-code"
   model: "claude-sonnet-4"
-  temperature: 0.1
   timeout: 600  # Optional: CLI timeout in seconds (default: 600)
 ```
 
 **CLI Invocation**:
 ```bash
-claude --model <model> --temperature <temp> --prompt-file <file> \
+claude --model <model> --prompt-file <file> \
        --workspace <path> --output json
 ```
 
@@ -143,13 +141,11 @@ workflow:
 codex:
   provider: "codex"
   model: "gpt-4"
-  temperature: 0.2
   timeout: 300
 
 claude:
   provider: "claude-code"
   model: "claude-sonnet-4"
-  temperature: 0.1
   timeout: 600
 
 workflow:
@@ -166,7 +162,6 @@ storage:
 codex:
   provider: "codex"
   model: "gpt-4"
-  temperature: 0.2
 
 claude:
   provider: "echo"  # Use echo for testing implementation phase
@@ -201,7 +196,7 @@ class MyAdapter(AssistantAdapter):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.model = kwargs.get("model", "default-model")
-        self.temperature = kwargs.get("temperature", 0.0)
+        self.timeout = kwargs.get("timeout", 300)
 
     def generate(self, request: AssistantRequest) -> AssistantResponse:
         # Your implementation here
@@ -291,7 +286,7 @@ print(REGISTRY.adapters.keys())  # ['echo', 'codex', 'claude-code']
 
 **Resolve an adapter**:
 ```python
-adapter = REGISTRY.resolve("codex", model="gpt-4", temperature=0.2)
+adapter = REGISTRY.resolve("codex", model="gpt-4", timeout=300)
 ```
 
 ---

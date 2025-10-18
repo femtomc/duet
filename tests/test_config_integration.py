@@ -24,14 +24,12 @@ def test_assistant_config_accepts_timeout_and_cli_path():
     config = AssistantConfig(
         provider="codex",
         model="gpt-4",
-        temperature=0.5,
         timeout=120,
         cli_path="/custom/path/to/codex",
     )
 
     assert config.provider == "codex"
     assert config.model == "gpt-4"
-    assert config.temperature == 0.5
     assert config.timeout == 120
     assert config.cli_path == "/custom/path/to/codex"
 
@@ -45,7 +43,6 @@ def test_assistant_config_optional_fields():
 
     assert config.timeout is None
     assert config.cli_path is None
-    assert config.temperature == 0.0  # Default value
 
 
 def test_adapter_receives_timeout_from_config():
@@ -142,14 +139,12 @@ def test_orchestrator_passes_all_config_params_to_adapters():
                 codex=AssistantConfig(
                     provider="codex",
                     model="gpt-4-custom",
-                    temperature=0.7,
                     timeout=250,
                     cli_path="/custom/codex",
                 ),
                 claude=AssistantConfig(
                     provider="claude-code",
                     model="claude-custom",
-                    temperature=0.3,
                     timeout=500,
                     cli_path="/custom/claude",
                 ),
@@ -166,13 +161,11 @@ def test_orchestrator_passes_all_config_params_to_adapters():
 
             # Verify Codex adapter
             assert orchestrator.codex_adapter.model == "gpt-4-custom"
-            assert orchestrator.codex_adapter.temperature == 0.7
             assert orchestrator.codex_adapter.timeout == 250
             assert orchestrator.codex_adapter.cli_path == "/custom/codex"
 
             # Verify Claude adapter
             assert orchestrator.claude_adapter.model == "claude-custom"
-            assert orchestrator.claude_adapter.temperature == 0.3
             assert orchestrator.claude_adapter.timeout == 500
             assert orchestrator.claude_adapter.cli_path == "/custom/claude"
             assert orchestrator.claude_adapter.workspace_root == str(workspace)

@@ -9,7 +9,6 @@ codex:
   # - "echo": Fallback mode for testing without API calls
   provider: "echo"  # Change to "codex" for production
   model: "gpt-4"
-  temperature: 0.2
   # timeout: 300  # Optional: CLI timeout in seconds
 
 # ──── Claude Code Configuration (Implementation) ────
@@ -19,7 +18,6 @@ claude:
   # - "echo": Fallback mode for testing without API calls
   provider: "echo"  # Change to "claude-code" for production
   model: "claude-sonnet-4"
-  temperature: 0.1
   # timeout: 600  # Optional: CLI timeout in seconds
 
 # ──── Workflow Settings ────
@@ -44,14 +42,12 @@ logging:
 # codex:
 #   provider: "codex"
 #   model: "gpt-4"
-#   temperature: 0.2
 #   timeout: 300  # Optional: CLI timeout in seconds
 #   # cli_path: "/custom/path/to/codex"  # Optional: custom CLI path
 #
 # claude:
 #   provider: "claude-code"
 #   model: "claude-sonnet-4"
-#   temperature: 0.1
 #   timeout: 600  # Optional: CLI timeout in seconds
 #   # cli_path: "/custom/path/to/claude"  # Optional: custom CLI path
 #

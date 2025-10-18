@@ -28,8 +28,8 @@ class CodexAdapter(AssistantAdapter):
 
     Configuration:
         model: str - Model identifier (e.g., "gpt-4")
-        temperature: float - Sampling temperature (default: 0.0)
         timeout: int - CLI invocation timeout in seconds (default: 300)
+        cli_path: str - Path to CLI executable (default: "codex")
     """
 
     name = "codex"
@@ -38,9 +38,8 @@ class CodexAdapter(AssistantAdapter):
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self.model = kwargs.get("model", "gpt-4")
-        self.temperature = kwargs.get("temperature", 0.0)
         self.timeout = kwargs.get("timeout", 300)
-        self.cli_path = kwargs.get("cli_path", "codex")  # Allow override for testing
+        self.cli_path = kwargs.get("cli_path", "codex")
 
     def generate(self, request: AssistantRequest) -> AssistantResponse:
         """
@@ -60,14 +59,13 @@ class CodexAdapter(AssistantAdapter):
 
             try:
                 # Invoke Codex CLI
-                # Expected format: codex --model <model> --temperature <temp> --prompt-file <file>
+                # Note: Codex CLI does not accept --temperature flag
+                # Expected format: codex --model <model> --prompt-file <file> --output json
                 result = subprocess.run(
                     [
                         self.cli_path,
                         "--model",
                         self.model,
-                        "--temperature",
-                        str(self.temperature),
                         "--prompt-file",
                         str(prompt_file),
                         "--output",
