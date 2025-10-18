@@ -8,7 +8,10 @@ import signal
 from typing import Optional
 
 from rich.console import Console
+from rich.live import Live
+from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
 
 from .adapters import REGISTRY, AssistantAdapter
 from .adapters.base import StreamEvent
@@ -25,6 +28,77 @@ from .models import (
     RunSnapshot,
     TransitionDecision,
 )
+
+# ──────────────────────────────────────────────────────────────────────────────
+# STREAMING DISPLAY (Sprint 6)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class StreamingDisplay:
+    """
+    Rich Live display for streaming adapter events.
+
+    Shows a rolling log of recent events, phase information, and event counts.
+    """
+
+    def __init__(self, console: Console, phase: Phase, iteration: int, max_events: int = 10):
+        self.console = console
+        self.phase = phase
+        self.iteration = iteration
+        self.max_events = max_events
+        self.events: list[StreamEvent] = []
+        self.event_counts: dict[str, int] = {}
+
+    def add_event(self, event: StreamEvent) -> None:
+        """Add an event to the display."""
+        # Track event type counts
+        event_type = event["event_type"]
+        self.event_counts[event_type] = self.event_counts.get(event_type, 0) + 1
+
+        # Keep only recent events
+        self.events.append(event)
+        if len(self.events) > self.max_events:
+            self.events.pop(0)
+
+    def render(self) -> Panel:
+        """Render the current state as a Rich Panel."""
+        # Build event log
+        log_lines = []
+        for event in self.events[-5:]:  # Show last 5 events
+            event_type = event["event_type"]
+            timestamp = event["timestamp"].strftime("%H:%M:%S")
+
+            # Format event based on type
+            if event_type == "item.completed":
+                item = event["payload"].get("item", {})
+                item_type = item.get("type", "unknown")
+                if item_type == "agent_message":
+                    log_lines.append(f"[cyan]{timestamp}[/] [green]✓[/] Assistant message received")
+                elif item_type == "reasoning":
+                    log_lines.append(f"[cyan]{timestamp}[/] [yellow]…[/] Reasoning...")
+                else:
+                    log_lines.append(f"[cyan]{timestamp}[/] [dim]{item_type}[/]")
+            elif event_type == "turn.completed":
+                usage = event["payload"].get("usage", {})
+                tokens = usage.get("output_tokens", 0)
+                log_lines.append(f"[cyan]{timestamp}[/] [green]✓[/] Turn complete ({tokens} tokens)")
+            elif event_type == "parse_error":
+                log_lines.append(f"[cyan]{timestamp}[/] [red]✗[/] Parse error")
+            elif event_type == "output":
+                log_lines.append(f"[cyan]{timestamp}[/] [dim]Output event[/]")
+            else:
+                log_lines.append(f"[cyan]{timestamp}[/] [dim]{event_type}[/]")
+
+        # Build summary
+        total_events = sum(self.event_counts.values())
+        summary = f"Phase: [bold]{self.phase.value.upper()}[/] | Iteration: {self.iteration} | Events: {total_events}"
+
+        if not log_lines:
+            log_lines.append("[dim]Waiting for events...[/]")
+
+        content = "\n".join([summary, "", *log_lines])
+        return Panel(content, title="[bold cyan]Streaming Output[/]", border_style="cyan")
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # STATE MACHINE TRANSITION RULES
@@ -130,7 +204,7 @@ class Orchestrator:
         signal.signal(signal.SIGTERM, _handle_stop)
 
     def _create_event_handler(
-        self, run_id: str, iteration: int, phase: Phase
+        self, run_id: str, iteration: int, phase: Phase, display: Optional[StreamingDisplay] = None
     ):
         """
         Create an event handler for streaming adapter events.
@@ -142,6 +216,7 @@ class Orchestrator:
             run_id: Current run identifier
             iteration: Current iteration number
             phase: Current phase
+            display: Optional StreamingDisplay for console output
 
         Returns:
             Callable event handler for adapter streaming
@@ -163,8 +238,9 @@ class Orchestrator:
                     # Don't fail the run if event persistence fails
                     self.console.log(f"[yellow]Warning: Failed to persist event: {e}[/]")
 
-            # TODO (Sprint 6): Add Rich Live display for streaming console output
-            # For now, we'll silently collect events; console display comes next
+            # Update live display if enabled (not in quiet mode)
+            if display:
+                display.add_event(event)
 
         return handle_event
 
@@ -262,12 +338,35 @@ class Orchestrator:
             adapter_name = adapter.__class__.__name__
             self.logger.log_adapter_call(snapshot.run_id, iteration, current_phase.value, adapter_name)
 
+            # ──── Streaming Display Setup ────
+            quiet_mode = self.config.logging.quiet
+            streaming_display = None if quiet_mode else StreamingDisplay(
+                self.console, current_phase, iteration
+            )
+
             # ──── Create Event Handler for Streaming ────
-            event_handler = self._create_event_handler(snapshot.run_id, iteration, current_phase)
+            event_handler = self._create_event_handler(
+                snapshot.run_id, iteration, current_phase, display=streaming_display
+            )
 
             # ──── Edge Case: Adapter Failure ────
             try:
-                response = adapter.stream(request, on_event=event_handler)
+                # Use Rich Live display if not in quiet mode
+                if streaming_display:
+                    with Live(
+                        streaming_display.render(),
+                        console=self.console,
+                        refresh_per_second=4,
+                        transient=True,  # Remove display after completion
+                    ) as live:
+                        # Create wrapper that updates live display
+                        def live_event_handler(event: StreamEvent) -> None:
+                            event_handler(event)  # Persist + add to display
+                            live.update(streaming_display.render())  # Refresh display
+
+                        response = adapter.stream(request, on_event=live_event_handler)
+                else:
+                    response = adapter.stream(request, on_event=event_handler)
             except Exception as exc:
                 snapshot.phase = Phase.BLOCKED
                 snapshot.notes = f"Adapter failure during {current_phase.value}: {exc}"

@@ -75,6 +75,9 @@ class LoggingConfig(BaseModel):
     jsonl_dir: Path = Field(
         Path("./logs"), description="Directory for JSONL log files"
     )
+    quiet: bool = Field(
+        False, description="Disable streaming console output during runs (Sprint 6)"
+    )
 
     @validator("jsonl_dir")
     def _expand_path(cls, value: Path) -> Path:

@@ -61,9 +61,17 @@ def run(
         None, "--config", "-c", help="Path to duet configuration YAML."
     ),
     run_id: Optional[str] = typer.Option(None, help="Override generated run identifier."),
+    quiet: bool = typer.Option(
+        False, "--quiet", "-q", help="Disable streaming console output (Sprint 6)."
+    ),
 ) -> None:
     """Execute the duet orchestration loop."""
     duet_config = find_config(config)
+
+    # Override quiet mode if CLI flag provided
+    if quiet:
+        duet_config.logging.quiet = True
+
     artifact_store = ArtifactStore(duet_config.storage.run_artifact_dir, console=console)
 
     # Initialize database if duet.db exists
