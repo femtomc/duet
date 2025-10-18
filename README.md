@@ -96,11 +96,11 @@ uv run python tests/manual_test.py
 **Smoke tests** (requires real CLIs - run before production):
 ```bash
 # Test both Codex and Claude Code adapters
-python tests/smoke_tests.py --both
+uv run python tests/smoke_tests.py --both
 
 # Test individual adapters
-python tests/smoke_tests.py --codex
-python tests/smoke_tests.py --claude
+uv run python tests/smoke_tests.py --codex
+uv run python tests/smoke_tests.py --claude
 ```
 
 See [Smoke Testing Guide](docs/smoke_testing.md) for details.

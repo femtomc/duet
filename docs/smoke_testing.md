@@ -54,19 +54,19 @@ This guide covers end-to-end validation of Duet adapters against real Codex and 
 ### Test Both Adapters (Recommended)
 
 ```bash
-python tests/smoke_tests.py --both
+uv run python tests/smoke_tests.py --both
 ```
 
 ### Test Codex Only
 
 ```bash
-python tests/smoke_tests.py --codex
+uv run python tests/smoke_tests.py --codex
 ```
 
 ### Test Claude Code Only
 
 ```bash
-python tests/smoke_tests.py --claude
+uv run python tests/smoke_tests.py --claude
 ```
 
 ---
@@ -279,10 +279,10 @@ If smoke tests pass but orchestration fails:
 **Command**:
 ```bash
 # Quick check before production use
-python tests/smoke_tests.py --both
+uv run python tests/smoke_tests.py --both
 
 # Add to deployment scripts
-./deploy.sh && python tests/smoke_tests.py --both || echo "Smoke tests failed!"
+./deploy.sh && uv run python tests/smoke_tests.py --both || echo "Smoke tests failed!"
 ```
 
 ---
