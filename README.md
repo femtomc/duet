@@ -1,6 +1,6 @@
 # Duet
 
-Prototype automation tool that coordinates the existing Codex (design/review) and Claude Code (implementation) workflow.
+Prototype automation tool that coordinates Codex (for design/review) and Claude Code (for implementation).
 
 ## Features (Planned)
 - Deterministic state machine that loops through plan → implement → review stages.
