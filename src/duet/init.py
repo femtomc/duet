@@ -210,9 +210,10 @@ logging:
 # ────────────────────────────────────────────────────────────────────────────
 # Tips:
 # - To use echo adapters for testing, set provider: "echo"
-# - Customize prompts in .duet/prompts/ directory
+# - Customize workflow in .duet/ide.py (Sprint 9 DSL)
 # - Review context discovery in .duet/context/context.md
 # - Monitor runs in .duet/runs/<run-id>/
+# - See docs/workflow_dsl.md for DSL reference
 # ────────────────────────────────────────────────────────────────────────────
 """
         config_file = self.config_path / "duet.yaml"

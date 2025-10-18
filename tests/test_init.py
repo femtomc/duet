@@ -37,7 +37,6 @@ def test_init_creates_directory_structure(temp_workspace):
     # Verify directories created
     duet_dir = temp_workspace / ".duet"
     assert duet_dir.exists()
-    assert (duet_dir / "prompts").exists()
     assert (duet_dir / "runs").exists()
     assert (duet_dir / "logs").exists()
     assert (duet_dir / "context").exists()
@@ -65,8 +64,8 @@ def test_init_creates_config_file(temp_workspace):
     assert "workflow" in content
 
 
-def test_init_creates_prompt_templates(temp_workspace):
-    """Test that init creates all prompt templates."""
+def test_init_creates_workflow_definition(temp_workspace):
+    """Test that init creates workflow definition using DSL (Sprint 9)."""
     initializer = DuetInitializer(
         workspace_root=temp_workspace,
         skip_discovery=True,
@@ -75,15 +74,24 @@ def test_init_creates_prompt_templates(temp_workspace):
 
     initializer.init()
 
-    prompts_dir = temp_workspace / ".duet" / "prompts"
-    assert (prompts_dir / "plan.md").exists()
-    assert (prompts_dir / "implement.md").exists()
-    assert (prompts_dir / "review.md").exists()
+    workflow_file = temp_workspace / ".duet" / "ide.py"
+    assert workflow_file.exists()
 
     # Verify content
-    plan_content = (prompts_dir / "plan.md").read_text()
-    assert "Plan Phase" in plan_content
-    assert "Instructions" in plan_content
+    content = workflow_file.read_text()
+    assert "from duet.dsl import" in content
+    assert "workflow = Workflow(" in content
+    assert "agents=" in content
+    assert "channels=" in content
+    assert "phases=" in content
+    assert "transitions=" in content
+
+    # Verify it's valid Python and loads successfully
+    from duet.workflow_loader import load_workflow
+    graph = load_workflow(workflow_path=workflow_file)
+    assert graph is not None
+    assert len(graph.agents) > 0
+    assert len(graph.phases) > 0
 
 
 def test_init_creates_gitkeep_files(temp_workspace):
@@ -151,8 +159,8 @@ def test_init_overwrites_with_force(temp_workspace):
     # Should not raise
     initializer.init()
 
-    # Should have created new structure
-    assert (duet_dir / "prompts").exists()
+    # Should have created new structure (Sprint 9: ide.py instead of prompts/)
+    assert (duet_dir / "ide.py").exists()
     assert (duet_dir / "duet.yaml").exists()
 
 
@@ -259,10 +267,10 @@ def test_init_custom_config_path(temp_workspace):
 
     initializer.init()
 
-    # Verify custom path used
+    # Verify custom path used (Sprint 9: ide.py instead of prompts/)
     assert custom_path.exists()
     assert (custom_path / "duet.yaml").exists()
-    assert (custom_path / "prompts").exists()
+    assert (custom_path / "ide.py").exists()
 
 
 def test_init_creates_readme(temp_workspace):
