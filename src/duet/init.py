@@ -493,6 +493,11 @@ Be concise but comprehensive. This will help the orchestrator understand the cod
 
                 response = adapter.stream(request, on_event=live_event_handler)
 
+                # If no streaming snippet was captured, fall back to final response content
+                if not agent_message_snippet and response.content:
+                    agent_message_snippet = response.content
+                    live.update(render_progress())
+
             # Extract context from response
             context_text = response.content
 
