@@ -36,7 +36,7 @@ def show_config(
 ) -> None:
     """Pretty-print the resolved configuration."""
     duet_config = find_config(config)
-    console.print_json(data=duet_config.dict())
+    console.print_json(data=duet_config.model_dump(mode="json"))
 
 
 @app.command()

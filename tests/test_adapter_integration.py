@@ -49,16 +49,17 @@ def test_orchestration_with_codex_adapter(temp_workspace, temp_artifacts_dir):
     artifact_store = ArtifactStore(temp_artifacts_dir, console=console)
     orchestrator = Orchestrator(config, artifact_store, console=console)
 
-    # Mock Codex CLI response
+    # Mock Codex CLI response (JSONL format)
     mock_result = Mock()
     mock_result.returncode = 0
-    mock_result.stdout = json.dumps(
-        {
-            "content": "Plan: Implement the feature step by step...",
-            "concluded": False,
-            "metadata": {"planning_notes": "Detailed plan"},
-        }
-    )
+    mock_result.stdout = "\n".join([
+        json.dumps({"type": "thread.started", "thread_id": "test"}),
+        json.dumps({"type": "item.completed", "item": {
+            "type": "agent_message",
+            "text": "Plan: Implement the feature step by step..."
+        }}),
+        json.dumps({"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 20}})
+    ])
     mock_result.stderr = ""
 
     with patch("subprocess.run", return_value=mock_result):
@@ -142,22 +143,22 @@ def test_orchestration_with_both_real_adapters(temp_workspace, temp_artifacts_di
 
         # Check which CLI is being called
         if "codex" in str(cmd[0]):
-            # Codex response (planning/review)
-            mock_result.stdout = json.dumps(
-                {
-                    "content": "This is a Codex response for planning/review",
-                    "concluded": False,
-                    "metadata": {"source": "codex"},
-                }
-            )
+            # Codex response (planning/review) - JSONL format
+            mock_result.stdout = "\n".join([
+                json.dumps({"type": "thread.started", "thread_id": "test"}),
+                json.dumps({"type": "item.completed", "item": {
+                    "type": "agent_message",
+                    "text": "This is a Codex response for planning/review"
+                }}),
+                json.dumps({"type": "turn.completed", "usage": {}})
+            ])
         elif "claude" in str(cmd[0]):
-            # Claude Code response (implementation)
+            # Claude Code response (implementation) - JSON with "result" field
             mock_result.stdout = json.dumps(
                 {
-                    "content": "This is a Claude Code response for implementation",
-                    "concluded": False,
-                    "files_modified": ["file.py"],
-                    "metadata": {"source": "claude-code"},
+                    "result": "This is a Claude Code response for implementation",
+                    "type": "result",
+                    "subtype": "success"
                 }
             )
         else:

@@ -38,7 +38,7 @@ class ArtifactStore:
         self.console.log(f"[green]Saved JSON[/] {target}")
 
     def checkpoint(self, snapshot: RunSnapshot) -> None:
-        self.write_json(snapshot.run_id, "checkpoint.json", snapshot.dict())
+        self.write_json(snapshot.run_id, "checkpoint.json", snapshot.model_dump(mode="json"))
 
     def persist_iteration(
         self,
@@ -71,12 +71,12 @@ class ArtifactStore:
             "timestamp": timestamp_iso,
             "iteration": iteration,
             "phase": phase.value,
-            "request": request.dict(),
-            "response": response.dict(),
+            "request": request.model_dump(),
+            "response": response.model_dump(),
         }
 
         if decision:
-            record["decision"] = decision.dict()
+            record["decision"] = decision.model_dump()
 
         if summary:
             record["summary"] = summary
@@ -104,7 +104,7 @@ class ArtifactStore:
 
         with checkpoint_path.open("r", encoding="utf-8") as f:
             data = json.load(f)
-            return RunSnapshot.parse_obj(data)
+            return RunSnapshot.model_validate(data)
 
     def generate_run_summary(self, run_id: str) -> Dict[str, Any]:
         """
@@ -142,7 +142,7 @@ class ArtifactStore:
 
         summary = {
             "run_id": run_id,
-            "checkpoint": checkpoint.dict() if checkpoint else None,
+            "checkpoint": checkpoint.model_dump(mode="json") if checkpoint else None,
             "iterations": iteration_summaries,
             "statistics": {
                 "total_iterations": len(iterations),

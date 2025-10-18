@@ -154,7 +154,7 @@ def test_review_verdict_fallback_to_concluded():
             decision = orchestrator._decide_next_phase(Phase.REVIEW, response, 1, 0)
 
             assert decision.next_phase == Phase.DONE
-            assert "concluded=True" in decision.rationale.lower()
+            assert "concluded" in decision.rationale.lower()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -251,9 +251,10 @@ def test_human_approval_creates_pending_file(temp_workspace, temp_artifacts_dir)
         codex=AssistantConfig(provider="echo", model="test"),
         claude=AssistantConfig(provider="echo", model="test"),
         workflow=WorkflowConfig(
-            max_iterations=1,
+            max_iterations=10,  # Enough to reach replan limit
             require_human_approval=True,  # Enable approval
-            max_consecutive_replans=0,  # Force approval immediately
+            max_consecutive_replans=1,  # Force approval on first replan
+            require_git_changes=False,  # Disable to avoid git errors in temp dir
         ),
         storage=StorageConfig(
             workspace_root=temp_workspace, run_artifact_dir=temp_artifacts_dir

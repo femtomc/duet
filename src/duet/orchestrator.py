@@ -103,7 +103,7 @@ class Orchestrator:
         """
         adapter_name = assistant_cfg.provider
         # Exclude None values so adapter defaults apply (e.g., timeout=300 if not specified)
-        adapter_kwargs = assistant_cfg.dict(exclude_none=True)
+        adapter_kwargs = assistant_cfg.model_dump(exclude_none=True)
 
         # Add workspace_root for adapters that need workspace context
         adapter_kwargs["workspace_root"] = str(self.config.storage.workspace_root)
@@ -334,7 +334,9 @@ class Orchestrator:
                         self.console.log("[yellow]Workspace is not a git repository, skipping change detection[/]")
                 except Exception as exc:
                     # Git detection failure shouldn't block the run, just warn
-                    self.console.log(f"[yellow]Git change detection failed: {exc}[/]")
+                    # Escape square brackets to avoid Rich markup errors
+                    error_msg = str(exc).replace("[", "\\[").replace("]", "\\]")
+                    self.console.log(f"[yellow]Git change detection failed: {error_msg}[/]")
                     response.metadata["git_changes"] = {"error": str(exc)}
 
             # ──── Decide Next Phase ────
@@ -707,8 +709,8 @@ class Orchestrator:
         payload = {
             "phase": phase.value,
             "timestamp": timestamp_iso,
-            "request": request.dict(),
-            "response": response.dict(),
+            "request": request.model_dump(),
+            "response": response.model_dump(),
         }
         filename = f"{timestamp_safe}-{phase.value}.json"
         self.artifacts.write_json(run_id, f"interactions/{filename}", payload)

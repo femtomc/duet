@@ -143,7 +143,7 @@ def test_codex_adapter_jsonl_partial_lines():
 
     # Should successfully extract message despite invalid line
     assert response.content == "Valid response"
-    assert "parse_error" in metadata["event_types"] for metadata in [response.metadata]
+    assert "parse_error" in response.metadata["event_types"]
 
 
 def test_codex_adapter_cli_failure():
@@ -387,21 +387,20 @@ def test_claude_code_adapter_invalid_json():
 
 
 def test_claude_code_adapter_workspace_context():
-    """Test that Claude Code adapter passes workspace to CLI."""
+    """Test that Claude Code adapter passes workspace via cwd."""
     adapter = ClaudeCodeAdapter(model="claude-sonnet-4", workspace_root="/my/workspace")
     request = AssistantRequest(role="implementer", prompt="Test")
 
     mock_result = Mock()
     mock_result.returncode = 0
-    mock_result.stdout = json.dumps({"content": "Done"})
+    mock_result.stdout = json.dumps({"result": "Done"})  # Claude uses "result" field
     mock_result.stderr = ""
 
     with patch("subprocess.run", return_value=mock_result) as mock_run:
         adapter.generate(request)
 
-        # Verify workspace was passed in command and cwd
+        # Verify workspace was passed via cwd (not --workspace flag)
         call_args = mock_run.call_args
-        assert "--workspace" in call_args[0][0]
         assert call_args[1]["cwd"] == "/my/workspace"
 
 
