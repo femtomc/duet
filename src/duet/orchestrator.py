@@ -83,14 +83,17 @@ class Orchestrator:
 
         Unpacks assistant config as kwargs and adds workspace_root for adapters
         that need it (e.g., Claude Code).
+
+        Note: exclude_none=True ensures None values don't override adapter defaults.
         """
         adapter_name = assistant_cfg.provider
-        adapter_kwargs = assistant_cfg.dict()
+        # Exclude None values so adapter defaults apply (e.g., timeout=300 if not specified)
+        adapter_kwargs = assistant_cfg.dict(exclude_none=True)
 
         # Add workspace_root for adapters that need workspace context
         adapter_kwargs["workspace_root"] = str(self.config.storage.workspace_root)
 
-        # Unpack kwargs to pass individual parameters (model, temperature, etc.)
+        # Unpack kwargs to pass individual parameters (model, timeout, cli_path, etc.)
         adapter = REGISTRY.resolve(adapter_name, **adapter_kwargs)
         return adapter
 

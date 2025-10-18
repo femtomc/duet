@@ -53,8 +53,8 @@ def test_adapter_receives_timeout_from_config():
         timeout=999,
     )
 
-    # Build adapter with unpacked config
-    adapter = REGISTRY.resolve(config.provider, **config.dict(), workspace_root=".")
+    # Build adapter with unpacked config (exclude_none=True)
+    adapter = REGISTRY.resolve(config.provider, **config.dict(exclude_none=True), workspace_root=".")
 
     assert adapter.timeout == 999
 
@@ -67,8 +67,8 @@ def test_adapter_receives_cli_path_from_config():
         cli_path="/my/custom/claude",
     )
 
-    # Build adapter with unpacked config
-    adapter = REGISTRY.resolve(config.provider, **config.dict(), workspace_root="/workspace")
+    # Build adapter with unpacked config (exclude_none=True)
+    adapter = REGISTRY.resolve(config.provider, **config.dict(exclude_none=True), workspace_root="/workspace")
 
     assert adapter.cli_path == "/my/custom/claude"
 
@@ -80,12 +80,33 @@ def test_adapter_uses_defaults_when_fields_omitted():
         model="gpt-4",
     )
 
-    # Build adapter with unpacked config
-    adapter = REGISTRY.resolve(config.provider, **config.dict(), workspace_root=".")
+    # Build adapter with unpacked config (exclude_none=True to avoid overriding defaults)
+    adapter = REGISTRY.resolve(
+        config.provider, **config.dict(exclude_none=True), workspace_root="."
+    )
 
-    # Should use default timeout
+    # Should use default timeout and cli_path
     assert adapter.timeout == 300  # Codex default
     assert adapter.cli_path == "codex"  # Default CLI name
+
+
+def test_none_values_dont_override_defaults():
+    """Test that None values in config don't override adapter defaults."""
+    config = AssistantConfig(
+        provider="codex",
+        model="gpt-4",
+        timeout=None,  # Explicitly None
+        cli_path=None,  # Explicitly None
+    )
+
+    # When we exclude_none=True, None values are filtered out
+    adapter = REGISTRY.resolve(
+        config.provider, **config.dict(exclude_none=True), workspace_root="."
+    )
+
+    # Should use defaults, not None
+    assert adapter.timeout == 300
+    assert adapter.cli_path == "codex"
 
 
 def test_claude_adapter_receives_workspace_root():
