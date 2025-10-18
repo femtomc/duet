@@ -10,7 +10,7 @@ import threading
 import time
 from typing import Any, Callable, Dict, Optional
 
-from ..models import AssistantRequest, AssistantResponse
+from ..models import AssistantRequest, AssistantResponse, CanonicalEventType
 from .base import AssistantAdapter, StreamEvent, register_adapter
 
 
@@ -42,6 +42,7 @@ class CodexAdapter(AssistantAdapter):
         self.model = kwargs.get("model", "gpt-4")
         self.timeout = kwargs.get("timeout", 300)
         self.cli_path = kwargs.get("cli_path", "codex")
+        self._reasoning_counter = 0  # Track reasoning step numbers (Sprint 7)
 
     def stream(
         self,
@@ -148,20 +149,25 @@ class CodexAdapter(AssistantAdapter):
                         event_data = json.loads(line)
                         metadata["stream_events"] += 1
 
-                        event_type = event_data.get("type", "unknown")
-                        metadata["event_types"].append(event_type)
+                        raw_event_type = event_data.get("type", "unknown")
+                        metadata["event_types"].append(raw_event_type)
 
-                        # Emit StreamEvent if callback provided
+                        # Map to canonical event type and enrich (Sprint 7)
+                        canonical_type, enriched_fields = self._normalize_event(event_data)
+
+                        # Emit enriched StreamEvent if callback provided
                         if on_event:
                             stream_event: StreamEvent = {
-                                "event_type": event_type,
+                                "event_type": canonical_type,
                                 "payload": event_data,
                                 "timestamp": datetime.datetime.now(datetime.timezone.utc),
                             }
+                            # Add enriched fields
+                            stream_event.update(enriched_fields)
                             on_event(stream_event)
 
                         # Extract assistant message from item.completed
-                        if event_type == "item.completed":
+                        if raw_event_type == "item.completed":
                             item = event_data.get("item", {})
                             if item.get("type") == "agent_message":
                                 text = item.get("text")
@@ -169,7 +175,7 @@ class CodexAdapter(AssistantAdapter):
                                     assistant_message = text
 
                         # Extract usage/token metadata from turn.completed
-                        if event_type == "turn.completed" and "usage" in event_data:
+                        if raw_event_type == "turn.completed" and "usage" in event_data:
                             usage = event_data["usage"]
                             metadata["tokens"] = usage
                             metadata["input_tokens"] = usage.get("input_tokens")
@@ -186,7 +192,7 @@ class CodexAdapter(AssistantAdapter):
 
                         if on_event:
                             error_event: StreamEvent = {
-                                "event_type": "parse_error",
+                                "event_type": CanonicalEventType.PARSE_ERROR.value,
                                 "payload": {
                                     "error": str(exc),
                                     "raw_line": line[:200],  # Truncate for safety
@@ -246,6 +252,62 @@ class CodexAdapter(AssistantAdapter):
             if isinstance(exc, CodexError):
                 raise
             raise CodexError(f"Unexpected error invoking Codex: {exc}") from exc
+
+    def _normalize_event(self, event_data: Dict[str, Any]) -> tuple[str, Dict[str, Any]]:
+        """
+        Normalize Codex raw event to canonical type with enriched fields (Sprint 7).
+
+        Args:
+            event_data: Raw event from Codex JSONL stream
+
+        Returns:
+            Tuple of (canonical_event_type, enriched_fields_dict)
+        """
+        raw_type = event_data.get("type", "unknown")
+        enriched = {}
+
+        # Map item.completed to canonical types based on item.type
+        if raw_type == "item.completed":
+            item = event_data.get("item", {})
+            item_type = item.get("type")
+            text = item.get("text", "")
+
+            if item_type == "agent_message":
+                enriched["text_snippet"] = text
+                return CanonicalEventType.ASSISTANT_MESSAGE.value, enriched
+
+            elif item_type == "reasoning":
+                enriched["text_snippet"] = text
+                enriched["reasoning_step"] = self._reasoning_counter
+                self._reasoning_counter += 1
+                return CanonicalEventType.REASONING.value, enriched
+
+            elif item_type == "tool_use":
+                enriched["tool_info"] = {
+                    "tool_name": item.get("name", "unknown"),
+                    "status": item.get("status", "unknown"),
+                    "output_preview": text[:100] if text else "",
+                }
+                return CanonicalEventType.TOOL_USE.value, enriched
+
+            else:
+                # Unknown item type
+                return CanonicalEventType.UNKNOWN.value, enriched
+
+        # Map thread.started
+        elif raw_type == "thread.started":
+            return CanonicalEventType.THREAD_STARTED.value, enriched
+
+        # Map turn.completed
+        elif raw_type == "turn.completed":
+            usage = event_data.get("usage", {})
+            if usage:
+                enriched["usage"] = usage
+            return CanonicalEventType.TURN_COMPLETE.value, enriched
+
+        # Unknown raw type
+        else:
+            return CanonicalEventType.UNKNOWN.value, enriched
 
     def _normalize_response(self, data: Dict[str, Any]) -> AssistantResponse:
         """

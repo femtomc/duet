@@ -275,11 +275,11 @@ def test_orchestrator_persists_streaming_events(temp_workspace, temp_artifacts_d
     assert "timestamp" in first_event
     assert first_event["run_id"] == "test-event-persistence"
 
-    # Verify specific event types were captured
+    # Verify specific event types were captured (Sprint 7: canonical types)
     event_types = [e["event_type"] for e in events]
-    assert "thread.started" in event_types
-    assert "item.completed" in event_types
-    assert "turn.completed" in event_types
+    assert "thread_started" in event_types
+    assert "assistant_message" in event_types
+    assert "turn_complete" in event_types
 
     # Verify event count matches stream
     assert db.count_events("test-event-persistence") == len(events)

@@ -10,7 +10,7 @@ import threading
 import time
 from typing import Any, Callable, Dict, Optional
 
-from ..models import AssistantRequest, AssistantResponse
+from ..models import AssistantRequest, AssistantResponse, CanonicalEventType
 from .base import AssistantAdapter, StreamEvent, register_adapter
 
 
@@ -154,13 +154,17 @@ class ClaudeCodeAdapter(AssistantAdapter):
                         event_data = json.loads(line)
                         metadata["stream_events"] += 1
 
-                        # Emit StreamEvent if callback provided
+                        # Map to canonical event type and enrich (Sprint 7)
+                        canonical_type, enriched_fields = self._normalize_event(event_data)
+
+                        # Emit enriched StreamEvent if callback provided
                         if on_event:
                             stream_event: StreamEvent = {
-                                "event_type": event_data.get("type", "output"),
+                                "event_type": canonical_type,
                                 "payload": event_data,
                                 "timestamp": datetime.datetime.now(datetime.timezone.utc),
                             }
+                            stream_event.update(enriched_fields)
                             on_event(stream_event)
 
                         # Store this as potential final response
@@ -175,12 +179,16 @@ class ClaudeCodeAdapter(AssistantAdapter):
                             event_data = json.loads(combined)
                             metadata["stream_events"] += 1
 
+                            # Map to canonical type (multiline accumulation)
+                            canonical_type, enriched_fields = self._normalize_event(event_data)
+
                             if on_event:
                                 stream_event: StreamEvent = {
-                                    "event_type": event_data.get("type", "output"),
+                                    "event_type": canonical_type,
                                     "payload": event_data,
                                     "timestamp": datetime.datetime.now(datetime.timezone.utc),
                                 }
+                                stream_event.update(enriched_fields)
                                 on_event(stream_event)
 
                             final_response_data = event_data
@@ -194,7 +202,7 @@ class ClaudeCodeAdapter(AssistantAdapter):
 
                                 if on_event:
                                     error_event: StreamEvent = {
-                                        "event_type": "parse_error",
+                                        "event_type": CanonicalEventType.PARSE_ERROR.value,
                                         "payload": {
                                             "error": str(exc),
                                             "accumulated_lines": len(accumulated_lines),
@@ -216,7 +224,7 @@ class ClaudeCodeAdapter(AssistantAdapter):
                     metadata["parse_errors"] += 1
                     if on_event:
                         error_event: StreamEvent = {
-                            "event_type": "parse_error",
+                            "event_type": CanonicalEventType.PARSE_ERROR.value,
                             "payload": {
                                 "error": str(exc),
                                 "raw_output": combined[:500],
@@ -275,6 +283,38 @@ class ClaudeCodeAdapter(AssistantAdapter):
             if isinstance(exc, ClaudeCodeError):
                 raise
             raise ClaudeCodeError(f"Unexpected error invoking Claude Code: {exc}") from exc
+
+    def _normalize_event(self, event_data: Dict[str, Any]) -> tuple[str, Dict[str, Any]]:
+        """
+        Normalize Claude Code event to canonical type with enriched fields (Sprint 7).
+
+        Args:
+            event_data: Raw event from Claude Code JSON stream
+
+        Returns:
+            Tuple of (canonical_event_type, enriched_fields_dict)
+        """
+        enriched = {}
+        raw_type = event_data.get("type", "output")
+
+        # Claude Code typically sends a "result" type with the final response
+        if raw_type == "result" or "result" in event_data:
+            result_text = event_data.get("result", "")
+            if result_text:
+                enriched["text_snippet"] = result_text
+            return CanonicalEventType.ASSISTANT_MESSAGE.value, enriched
+
+        # Generic output event
+        elif raw_type == "output":
+            # Try to extract any text content
+            content = event_data.get("content") or event_data.get("text", "")
+            if content:
+                enriched["text_snippet"] = content
+            return CanonicalEventType.SYSTEM_NOTICE.value, enriched
+
+        # Unknown type
+        else:
+            return CanonicalEventType.UNKNOWN.value, enriched
 
     def _normalize_response(self, data: Dict[str, Any]) -> AssistantResponse:
         """

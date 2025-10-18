@@ -120,8 +120,10 @@ def test_echo_adapter_streaming():
     response = adapter.stream(request, on_event=on_event)
 
     assert "ECHO ADAPTER" in response.content
-    # Echo adapter should emit at least one event
+    # Echo adapter should emit at least one event (Sprint 7: system_notice)
     assert len(events_received) >= 1
+    assert events_received[0]["event_type"] == "system_notice"
+    assert "text_snippet" in events_received[0]
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -193,8 +195,12 @@ def test_codex_adapter_streaming_with_callback():
 
     assert response.content == "Response"
     assert len(events_received) == 2
-    assert events_received[0]["event_type"] == "thread.started"
-    assert events_received[1]["event_type"] == "item.completed"
+    # Sprint 7: Events now use canonical types
+    assert events_received[0]["event_type"] == "thread_started"
+    assert events_received[1]["event_type"] == "assistant_message"
+    # Verify enriched field
+    assert "text_snippet" in events_received[1]
+    assert events_received[1]["text_snippet"] == "Response"
 
 
 def test_codex_adapter_jsonl_partial_lines():
@@ -408,7 +414,9 @@ def test_claude_code_adapter_streaming_with_callback():
 
     assert response.content == "Done"
     assert len(events_received) >= 1
-    assert events_received[0]["event_type"] in ["output", "result"]
+    # Sprint 7: Claude events now use canonical types
+    assert events_received[0]["event_type"] == "assistant_message"
+    assert "text_snippet" in events_received[0]
 
 
 def test_claude_code_adapter_multiline_json():

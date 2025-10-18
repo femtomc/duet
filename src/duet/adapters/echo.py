@@ -5,7 +5,7 @@ from __future__ import annotations
 import datetime
 from typing import Callable, Optional
 
-from ..models import AssistantRequest, AssistantResponse
+from ..models import AssistantRequest, AssistantResponse, CanonicalEventType
 from .base import AssistantAdapter, StreamEvent, register_adapter
 
 
@@ -29,16 +29,18 @@ class EchoAdapter(AssistantAdapter):
             f"Context keys: {', '.join(request.context.keys()) or 'none'}"
         )
 
-        # Emit a single echo event if callback provided
+        # Emit a single echo event if callback provided (Sprint 7: canonical type)
         if on_event:
             event: StreamEvent = {
-                "event_type": "echo",
+                "event_type": CanonicalEventType.SYSTEM_NOTICE.value,
                 "payload": {
                     "role": request.role,
                     "prompt_length": len(request.prompt),
                     "context_keys": list(request.context.keys()),
+                    "adapter": "echo",
                 },
                 "timestamp": datetime.datetime.now(datetime.timezone.utc),
+                "text_snippet": content,  # Enriched field
             }
             on_event(event)
 
