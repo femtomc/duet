@@ -27,11 +27,11 @@ Duet orchestrates iterative software delivery by coordinating Codex for planning
    ```bash
    uv run duet init
    ```
-   This creates `.duet/` with configuration, prompt templates, context notes, and run/log directories. Use `--help` for additional options (custom models, skip discovery, alternate location).
+   This creates `.duet/` with configuration, workflow definition (DSL), context notes, and run/log directories. Use `--help` for additional options (custom models, skip discovery, alternate location).
 
 3. **Review generated files**
    - `.duet/duet.yaml`: adapter configuration and workflow guardrails
-   - `.duet/prompts/*.md`: editable prompt templates for each phase
+   - `.duet/ide.py`: workflow definition using Python DSL (Sprint 9)
    - `.duet/context/context.md`: repository overview generated during init
 
 4. **Run smoke tests (recommended before production)**
@@ -50,7 +50,7 @@ Duet orchestrates iterative software delivery by coordinating Codex for planning
 
 | Command | Description |
 |---------|-------------|
-| `duet init` | Scaffold `.duet/` (config, prompts, context, logs, runs, SQLite DB) |
+| `duet init` | Scaffold `.duet/` (config, workflow DSL, context, logs, runs, SQLite DB) |
 | `duet run [--config PATH] [--run-id ID] [--quiet]` | Execute the full orchestration loop with live streaming output |
 | `duet status RUN_ID [--show-states]` | Inspect run status and state history (Sprint 8) |
 | `duet summary RUN_ID [--save]` | Display or persist a run summary (filesystem) |

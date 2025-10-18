@@ -20,8 +20,9 @@ This roadmap tracks major milestones for Duet. Items marked as complete are alre
 - Add human approval workflow and JSONL logging.
 
 ## Sprint 4 – Workspace Bootstrap (`duet init`) *(Complete)*
-- Scaffold `.duet/` with configuration, prompt templates, context notes, logs, and run directories.
-- Generate editable prompt templates and repository context via Codex discovery.
+- Scaffold `.duet/` with configuration, workflow definition (DSL), context notes, logs, and run directories.
+- Generate `.duet/ide.py` workflow definition using Python DSL (upgraded in Sprint 9).
+- Generate repository context via Codex discovery.
 - Document the bootstrap workflow and add unit tests for initialization.
 
 ## Sprint 5 – Persistent History *(Complete)*

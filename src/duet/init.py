@@ -50,9 +50,9 @@ class DuetInitializer:
         Creates:
         - .duet/ directory structure
         - duet.yaml configuration
-        - Prompt templates
+        - ide.py workflow definition (Python DSL, Sprint 9)
         - Context discovery (optional)
-        - Scaffold files (.gitkeep, placeholder DB)
+        - Scaffold files (.gitkeep, SQLite DB)
         """
         self.console.print(
             Panel(
@@ -223,8 +223,6 @@ logging:
     def _create_workflow_definition(self) -> None:
         """Create workflow definition using Python DSL (Sprint 9)."""
         # Read template from package
-        from importlib import resources
-
         try:
             # Try to read template from package resources
             import duet.templates
