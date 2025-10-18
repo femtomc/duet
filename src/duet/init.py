@@ -418,25 +418,72 @@ Be concise but comprehensive. This will help the orchestrator understand the cod
             )
 
             # Track streaming progress
+            import time
+            start_time = time.time()
             event_count = 0
-            last_event_type = None
+            reasoning_count = 0
+            agent_message_snippet = None
+            token_count = 0
 
             def render_progress():
-                """Render progress panel."""
-                status = "Analyzing repository..."
-                if last_event_type == "item.completed":
-                    status = "Generating context..."
-                elif last_event_type == "turn.completed":
-                    status = "Complete"
+                """Render enriched progress panel."""
+                elapsed = int(time.time() - start_time)
 
-                content = f"[bold]Context Discovery[/]\n\n{status}\n\n[dim]Events received: {event_count}[/]"
+                # Build status lines
+                lines = []
+                lines.append(f"[bold cyan]Context Discovery[/] [dim]({elapsed}s elapsed)[/]")
+                lines.append("")
+
+                # Show progress metrics
+                lines.append(f"[bold]Progress:[/]")
+                lines.append(f"  • Events: {event_count}")
+                if reasoning_count > 0:
+                    lines.append(f"  • Reasoning steps: {reasoning_count}")
+                if token_count > 0:
+                    lines.append(f"  • Tokens generated: {token_count}")
+
+                # Show latest agent message snippet
+                if agent_message_snippet:
+                    lines.append("")
+                    lines.append(f"[bold]Latest Analysis:[/]")
+                    # Truncate to 200 chars and show first line or two
+                    snippet = agent_message_snippet[:200]
+                    if "\n" in snippet:
+                        first_line = snippet.split("\n")[0]
+                        lines.append(f"  [dim]{first_line}...[/]")
+                    else:
+                        lines.append(f"  [dim]{snippet}...[/]")
+                else:
+                    lines.append("")
+                    lines.append("[dim]Waiting for Codex response...[/]")
+
+                content = "\n".join(lines)
                 return Panel(content, border_style="cyan", expand=False)
 
             def on_event(event: StreamEvent) -> None:
                 """Handle streaming events during discovery."""
-                nonlocal event_count, last_event_type
+                nonlocal event_count, reasoning_count, agent_message_snippet, token_count
                 event_count += 1
-                last_event_type = event["event_type"]
+
+                event_type = event["event_type"]
+                payload = event["payload"]
+
+                # Extract agent message for display
+                if event_type == "item.completed":
+                    item = payload.get("item", {})
+                    item_type = item.get("type")
+
+                    if item_type == "agent_message":
+                        text = item.get("text", "")
+                        if text:
+                            agent_message_snippet = text
+                    elif item_type == "reasoning":
+                        reasoning_count += 1
+
+                # Extract token usage
+                elif event_type == "turn.completed":
+                    usage = payload.get("usage", {})
+                    token_count = usage.get("output_tokens", 0)
 
             # Run discovery with live display
             with Live(render_progress(), console=self.console, refresh_per_second=4, transient=True) as live:
