@@ -139,10 +139,21 @@ class Orchestrator:
 
         # ──── Git Branch Management ────
         original_branch = None
+        baseline_commit = None
         if self.config.workflow.use_feature_branches and self.git.is_git_repo():
             try:
                 original_branch = self.git.get_current_branch()
                 snapshot.metadata["original_branch"] = original_branch
+
+                # Record baseline commit for change detection
+                try:
+                    baseline_commit = self.git.get_current_commit()
+                    snapshot.metadata["baseline_commit"] = baseline_commit
+                    self.console.log(f"[dim]Baseline commit: {baseline_commit[:8]}[/]")
+                except Exception:
+                    # No commits yet (empty repo)
+                    baseline_commit = None
+                    self.console.log("[dim]No commits yet (empty repository)[/]")
 
                 # Create and checkout feature branch
                 feature_branch = f"duet/{snapshot.run_id}"
@@ -214,6 +225,23 @@ class Orchestrator:
                 )
                 break
 
+            # ──── Extract Verdict from Metadata (REVIEW phase) ────
+            if current_phase == Phase.REVIEW and "verdict" in response.metadata:
+                verdict_str = response.metadata["verdict"]
+                if isinstance(verdict_str, str):
+                    # Normalize verdict string (handle case variations)
+                    verdict_lower = verdict_str.lower().strip()
+                    if verdict_lower in ("approve", "approved"):
+                        response.verdict = ReviewVerdict.APPROVE
+                    elif verdict_lower in ("changes_requested", "changes requested", "revise"):
+                        response.verdict = ReviewVerdict.CHANGES_REQUESTED
+                    elif verdict_lower in ("blocked", "block"):
+                        response.verdict = ReviewVerdict.BLOCKED
+                    else:
+                        self.console.log(
+                            f"[yellow]Unknown verdict in metadata: {verdict_str}[/]"
+                        )
+
             # ──── Edge Case: Empty Response ────
             if not response.content or not response.content.strip():
                 snapshot.phase = Phase.BLOCKED
@@ -241,7 +269,23 @@ class Orchestrator:
             if current_phase == Phase.IMPLEMENT and self.config.workflow.require_git_changes:
                 try:
                     if self.git.is_git_repo():
-                        changes = self.git.detect_changes()
+                        # Compare against baseline commit to detect new commits
+                        # (not just working tree changes, which become empty after commit)
+                        changes = self.git.detect_changes(baseline_commit=baseline_commit)
+
+                        # Get current commit to check if new commit was created
+                        current_commit = None
+                        try:
+                            current_commit = self.git.get_current_commit()
+                        except GitError:
+                            pass
+
+                        # Check if new commits were created
+                        new_commits_created = (
+                            baseline_commit
+                            and current_commit
+                            and baseline_commit != current_commit
+                        )
 
                         # Store change summary in response metadata
                         response.metadata["git_changes"] = {
@@ -252,7 +296,14 @@ class Orchestrator:
                             "staged_files": changes.staged_files,
                             "commit_sha": changes.commit_sha,
                             "diff_stat": changes.diff_stat,
+                            "baseline_commit": baseline_commit,
+                            "new_commits_created": new_commits_created,
                         }
+
+                        # Update baseline if new commits were created
+                        if new_commits_created:
+                            baseline_commit = current_commit
+                            snapshot.metadata["latest_commit"] = current_commit
 
                         # Fail iteration if no changes detected (guardrail enforcement)
                         if not changes.has_changes:
@@ -268,10 +319,16 @@ class Orchestrator:
                             break
 
                         # Log detected changes
-                        self.console.log(
-                            f"[green]Detected changes:[/] {changes.files_changed} files, "
-                            f"+{changes.insertions}/-{changes.deletions}"
-                        )
+                        if new_commits_created:
+                            self.console.log(
+                                f"[green]New commit created:[/] {current_commit[:8]} "
+                                f"({changes.files_changed} files, +{changes.insertions}/-{changes.deletions})"
+                            )
+                        else:
+                            self.console.log(
+                                f"[green]Detected changes:[/] {changes.files_changed} files, "
+                                f"+{changes.insertions}/-{changes.deletions}"
+                            )
                     else:
                         self.console.log("[yellow]Workspace is not a git repository, skipping change detection[/]")
                 except Exception as exc:

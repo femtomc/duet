@@ -70,15 +70,21 @@ class GitWorkspace:
         result = self._run_git("rev-parse", "HEAD")
         return result.stdout.strip()
 
-    def detect_changes(self) -> GitChangesSummary:
+    def detect_changes(self, baseline_commit: Optional[str] = None) -> GitChangesSummary:
         """
         Detect changes in the workspace.
+
+        Args:
+            baseline_commit: Compare against this commit instead of HEAD.
+                           If provided, detects new commits and changes since baseline.
+                           If None, only detects working tree changes (staged/unstaged).
 
         Returns a summary of:
         - Staged files
         - Unstaged files
         - Latest commit SHA
-        - Diff statistics
+        - Diff statistics (against baseline if provided, otherwise HEAD)
+        - New commits since baseline
         """
         # Get staged files
         staged_result = self._run_git("diff", "--cached", "--name-only")
@@ -101,8 +107,16 @@ class GitWorkspace:
         except GitError:
             commit_sha = None  # No commits yet
 
-        # Get diff statistics
-        diff_stat_result = self._run_git("diff", "--stat", "HEAD", check=False)
+        # Get diff statistics against baseline (or HEAD if no baseline)
+        if baseline_commit and commit_sha:
+            # Compare current commit against baseline to detect new commits
+            diff_stat_result = self._run_git("diff", "--stat", baseline_commit, check=False)
+            new_commits = self.get_commits_since(baseline_commit) if baseline_commit != commit_sha else []
+        else:
+            # No baseline: compare working tree against HEAD
+            diff_stat_result = self._run_git("diff", "--stat", "HEAD", check=False)
+            new_commits = []
+
         diff_stat = diff_stat_result.stdout.strip()
 
         # Parse diff statistics
@@ -119,13 +133,29 @@ class GitWorkspace:
                     parts = summary_line.split(",")
                     for part in parts:
                         if "file" in part and "changed" in part:
-                            files_changed = int(part.split()[0])
+                            try:
+                                files_changed = int(part.split()[0])
+                            except (ValueError, IndexError):
+                                pass
                         elif "insertion" in part:
-                            insertions = int(part.split()[0])
+                            try:
+                                insertions = int(part.split()[0])
+                            except (ValueError, IndexError):
+                                pass
                         elif "deletion" in part:
-                            deletions = int(part.split()[0])
+                            try:
+                                deletions = int(part.split()[0])
+                            except (ValueError, IndexError):
+                                pass
 
-        has_changes = bool(staged_files or all_unstaged or files_changed > 0)
+        # Has changes if: working tree changes OR new commits since baseline
+        has_changes = bool(
+            staged_files
+            or all_unstaged
+            or files_changed > 0
+            or new_commits
+            or (baseline_commit and commit_sha and baseline_commit != commit_sha)
+        )
 
         return GitChangesSummary(
             has_changes=has_changes,
