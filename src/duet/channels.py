@@ -7,10 +7,92 @@ operations with optional schema validation.
 
 from __future__ import annotations
 
+import datetime as dt
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from .dsl.workflow import Channel
+
+
+def serialize_channel_message(
+    channel_name: str,
+    value: Any,
+    schema: Optional[str] = None,
+    source_phase: Optional[str] = None,
+    truncate_at: int = 5000,
+) -> Dict[str, Any]:
+    """
+    Serialize a channel message for database storage.
+
+    Converts channel payload to JSON-safe format with metadata.
+
+    Args:
+        channel_name: Name of the channel
+        value: Channel payload (any type)
+        schema: Channel schema hint
+        source_phase: Phase that published this message
+        truncate_at: Maximum payload length before truncation
+
+    Returns:
+        Dictionary with payload and metadata ready for JSON encoding
+    """
+    # Convert value to string representation
+    if isinstance(value, str):
+        payload_str = value
+    elif isinstance(value, (dict, list)):
+        import json
+        payload_str = json.dumps(value, indent=2)
+    else:
+        payload_str = str(value)
+
+    # Truncate large payloads
+    truncated = False
+    if len(payload_str) > truncate_at:
+        payload_str = payload_str[:truncate_at]
+        truncated = True
+
+    # Build metadata
+    metadata = {
+        "schema": schema,
+        "source_phase": source_phase,
+        "truncated": truncated,
+        "original_length": len(str(value)),
+        "serialized_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+    }
+
+    return {
+        "channel": channel_name,
+        "payload": payload_str,
+        "metadata": metadata,
+    }
+
+
+def deserialize_channel_message(message: Dict[str, Any]) -> Any:
+    """
+    Deserialize a channel message from database.
+
+    Reconstructs original payload from stored JSON.
+
+    Args:
+        message: Message dictionary from database
+
+    Returns:
+        Reconstructed payload value
+    """
+    payload = message.get("payload")
+    metadata = message.get("metadata", {})
+    schema = metadata.get("schema")
+
+    # Try to reconstruct based on schema
+    if schema == "json":
+        import json
+        try:
+            return json.loads(payload)
+        except (json.JSONDecodeError, TypeError):
+            return payload
+
+    # Default: return as-is (string)
+    return payload
 
 
 @dataclass

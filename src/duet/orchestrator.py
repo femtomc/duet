@@ -204,7 +204,7 @@ class Orchestrator:
         self.console.rule(f"Starting Duet run {snapshot.run_id}")
         self.artifacts.checkpoint(snapshot)
 
-        # ──── Reset and Seed Channels (Sprint 10) ────
+        # ──── Reset and Seed Channels ────
         if self.workflow_executor:
             # Clear any previous run's channel state
             self.workflow_executor.channel_store.clear()
@@ -360,8 +360,16 @@ class Orchestrator:
                             f"[yellow]Unknown verdict in metadata: {verdict_str}[/]"
                         )
 
-            # ──── Update Channels (Sprint 10) ────
+            # ──── Update Channels ────
             self._update_channels_from_response(current_phase, response)
+
+            # ──── Persist Channel Messages ────
+            if self.db and self.workflow_executor:
+                self._persist_channel_messages(
+                    run_id=snapshot.run_id,
+                    phase=current_phase,
+                    iteration=iteration,
+                )
 
             # ──── Edge Case: Empty Response ────
             if not response.content or not response.content.strip():
@@ -706,6 +714,61 @@ class Orchestrator:
             if response.content and not response.concluded:
                 self.workflow_executor.channel_store.set("feedback", response.content)
 
+    def _persist_channel_messages(
+        self,
+        run_id: str,
+        phase: Phase,
+        iteration: int,
+        state_id: Optional[str] = None,
+    ) -> None:
+        """
+        Persist channel updates as messages in database.
+
+        Saves current channel payloads with metadata for replay and audit.
+
+        Args:
+            run_id: Current run ID
+            phase: Phase that published messages
+            iteration: Iteration number
+            state_id: Optional state ID for checkpoint association
+        """
+        if not self.workflow_executor or not self.db:
+            return
+
+        from .channels import serialize_channel_message
+
+        # Get all current channels
+        channels = self.workflow_executor.get_current_channels()
+
+        for channel_name, value in channels.items():
+            if value is None:
+                continue  # Skip empty channels
+
+            # Get schema from workflow
+            schema = self.workflow_executor.channel_store.get_schema(channel_name)
+
+            # Serialize message
+            serialized = serialize_channel_message(
+                channel_name=channel_name,
+                value=value,
+                schema=schema,
+                source_phase=phase.value,
+            )
+
+            # Insert into database
+            try:
+                self.db.insert_message(
+                    run_id=run_id,
+                    channel=channel_name,
+                    payload=serialized["payload"],
+                    state_id=state_id,
+                    iteration=iteration,
+                    phase=phase.value,
+                    metadata=serialized["metadata"],
+                )
+            except Exception as exc:
+                self.console.log(f"[yellow]Failed to persist message for channel '{channel_name}': {exc}[/]")
+
     def _select_adapter(self, phase: Phase) -> AssistantAdapter:
         if phase in (Phase.PLAN, Phase.REVIEW):
             return self.codex_adapter
@@ -972,7 +1035,7 @@ class Orchestrator:
                 elif verdict_lower in ("blocked", "block"):
                     response.verdict = ReviewVerdict.BLOCKED
 
-        # ──── Update Channels (Sprint 10) ────
+        # ──── Update Channels ────
         self._update_channels_from_response(current_phase, response)
 
         # Check for empty response
@@ -1063,6 +1126,16 @@ class Orchestrator:
         # ──── Create New State ────
         new_phase_status = self._derive_phase_status(current_phase, decision.next_phase)
         new_state_id = f"{run_id}-{new_phase_status}"
+
+        # Persist channel messages before creating state
+        if self.db and self.workflow_executor:
+            self._persist_channel_messages(
+                run_id=run_id,
+                phase=current_phase,
+                iteration=snapshot.iteration,
+                state_id=new_state_id,
+            )
+            self.console.log(f"[dim]Persisted channel messages for state[/]")
 
         # Create git baseline if needed
         baseline = active_state.get("baseline_commit")
