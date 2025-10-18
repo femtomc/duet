@@ -1149,7 +1149,8 @@ class Orchestrator:
             except GitError as exc:
                 self.console.log(f"[yellow]Git baseline creation failed: {exc}[/]")
 
-        # Add channel snapshot to state metadata         if self.workflow_executor:
+        # Add channel snapshot to state metadata
+        if self.workflow_executor:
             channel_snapshot = self.workflow_executor.get_current_channels()
             state_metadata["channel_snapshot"] = channel_snapshot
             self.console.log(f"[dim]Saved channel snapshot:[/] {len(channel_snapshot)} channels")

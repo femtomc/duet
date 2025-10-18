@@ -496,5 +496,152 @@ def test_get_latest_state(in_memory_db):
     assert latest["state_id"] == "test-run-006-state-2"
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Message Persistence Tests
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_insert_message(in_memory_db):
+    """Test inserting a channel message."""
+    db = in_memory_db
+
+    # Insert run first
+    snapshot = RunSnapshot(run_id="test-run-001", iteration=0, phase=Phase.PLAN)
+    db.insert_run(snapshot)
+
+    # Insert message
+    db.insert_message(
+        run_id="test-run-001",
+        channel="plan",
+        payload="Step 1: Create endpoint\nStep 2: Add tests",
+        iteration=1,
+        phase="plan",
+        metadata={"schema": "text", "source_phase": "plan"},
+    )
+
+    # List messages
+    messages = db.list_messages("test-run-001")
+    assert len(messages) == 1
+    assert messages[0]["channel"] == "plan"
+    assert "Step 1" in messages[0]["payload"]
+
+
+def test_list_messages_filter_by_channel(in_memory_db):
+    """Test filtering messages by channel."""
+    db = in_memory_db
+
+    snapshot = RunSnapshot(run_id="test-run-002", iteration=0, phase=Phase.PLAN)
+    db.insert_run(snapshot)
+
+    # Insert messages for different channels
+    db.insert_message(run_id="test-run-002", channel="plan", payload="Plan content")
+    db.insert_message(run_id="test-run-002", channel="code", payload="Code content")
+    db.insert_message(run_id="test-run-002", channel="plan", payload="Updated plan")
+
+    # Filter by channel
+    plan_messages = db.list_messages("test-run-002", channel="plan")
+    assert len(plan_messages) == 2
+    assert all(m["channel"] == "plan" for m in plan_messages)
+
+    code_messages = db.list_messages("test-run-002", channel="code")
+    assert len(code_messages) == 1
+    assert code_messages[0]["channel"] == "code"
+
+
+def test_list_messages_filter_by_phase(in_memory_db):
+    """Test filtering messages by phase."""
+    db = in_memory_db
+
+    snapshot = RunSnapshot(run_id="test-run-003", iteration=0, phase=Phase.PLAN)
+    db.insert_run(snapshot)
+
+    # Insert messages from different phases
+    db.insert_message(run_id="test-run-003", channel="plan", payload="Plan", phase="plan")
+    db.insert_message(run_id="test-run-003", channel="code", payload="Code", phase="implement")
+
+    # Filter by phase
+    plan_phase_messages = db.list_messages("test-run-003", phase="plan")
+    assert len(plan_phase_messages) == 1
+    assert plan_phase_messages[0]["phase"] == "plan"
+
+
+def test_get_latest_channel_message(in_memory_db):
+    """Test getting the latest message for a channel."""
+    db = in_memory_db
+
+    snapshot = RunSnapshot(run_id="test-run-004", iteration=0, phase=Phase.PLAN)
+    db.insert_run(snapshot)
+
+    # Insert multiple messages for same channel
+    import time
+
+    db.insert_message(run_id="test-run-004", channel="plan", payload="First plan")
+    time.sleep(0.01)
+    db.insert_message(run_id="test-run-004", channel="plan", payload="Updated plan")
+
+    # Get latest
+    latest = db.get_latest_channel_message("test-run-004", "plan")
+    assert latest is not None
+    assert latest["payload"] == "Updated plan"
+
+
+def test_get_state_messages(in_memory_db):
+    """Test getting messages for a specific state."""
+    db = in_memory_db
+
+    snapshot = RunSnapshot(run_id="test-run-005", iteration=0, phase=Phase.PLAN)
+    db.insert_run(snapshot)
+
+    # Insert state
+    db.insert_state(
+        state_id="test-run-005-plan-complete",
+        run_id="test-run-005",
+        phase_status="plan-complete",
+    )
+
+    # Insert messages associated with state
+    db.insert_message(
+        run_id="test-run-005",
+        channel="plan",
+        payload="Plan for state",
+        state_id="test-run-005-plan-complete",
+    )
+    db.insert_message(
+        run_id="test-run-005",
+        channel="task",
+        payload="Task input",
+        state_id="test-run-005-plan-complete",
+    )
+
+    # Get state messages
+    state_messages = db.get_state_messages("test-run-005-plan-complete")
+    assert len(state_messages) == 2
+    channels = {m["channel"] for m in state_messages}
+    assert channels == {"plan", "task"}
+
+
+def test_message_json_payload(in_memory_db):
+    """Test storing and retrieving JSON payloads."""
+    db = in_memory_db
+
+    snapshot = RunSnapshot(run_id="test-run-006", iteration=0, phase=Phase.PLAN)
+    db.insert_run(snapshot)
+
+    # Insert message with dict payload
+    payload_dict = {"steps": ["Create endpoint", "Add tests"], "risks": ["API changes"]}
+    db.insert_message(
+        run_id="test-run-006",
+        channel="plan",
+        payload=payload_dict,  # Will be JSON-encoded
+        metadata={"schema": "json"},
+    )
+
+    # Retrieve and verify
+    messages = db.list_messages("test-run-006")
+    assert len(messages) == 1
+    retrieved = messages[0]["payload"]
+    assert retrieved["steps"] == ["Create endpoint", "Add tests"]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

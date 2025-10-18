@@ -90,7 +90,8 @@ CREATE TABLE IF NOT EXISTS events (
     FOREIGN KEY (run_id) REFERENCES runs(run_id)
 );
 
--- Run states for stateful workflowCREATE TABLE IF NOT EXISTS run_states (
+-- Run states for stateful workflow
+CREATE TABLE IF NOT EXISTS run_states (
     state_id TEXT PRIMARY KEY,
     run_id TEXT NOT NULL,
     phase_status TEXT NOT NULL,  -- plan-ready, plan-complete, implement-ready, etc.
