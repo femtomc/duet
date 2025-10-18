@@ -17,7 +17,7 @@ from .models import Phase, ReviewVerdict, RunSnapshot
 # ──────────────────────────────────────────────────────────────────────────────
 
 # Schema version for migrations
-SCHEMA_VERSION = 2  #added run_states table and active_state_id
+SCHEMA_VERSION = 3  # Added messages table for channel payload history
 
 SCHEMA_DDL = """
 -- Schema version tracking
@@ -106,6 +106,22 @@ CREATE TABLE IF NOT EXISTS events (
     FOREIGN KEY (parent_state_id) REFERENCES run_states(state_id)
 );
 
+-- Channel messages for workflow message passing
+CREATE TABLE IF NOT EXISTS messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL,
+    state_id TEXT,  -- State when message was created
+    iteration INTEGER,
+    phase TEXT,  -- Phase that published this message
+    channel TEXT NOT NULL,  -- Channel name
+    payload TEXT NOT NULL,  -- JSON-encoded channel value
+    metadata TEXT,  -- JSON-encoded metadata (schema, timestamp, source)
+    created_at TEXT NOT NULL,
+
+    FOREIGN KEY (run_id) REFERENCES runs(run_id),
+    FOREIGN KEY (state_id) REFERENCES run_states(state_id)
+);
+
 -- Indexes for common queries
 CREATE INDEX IF NOT EXISTS idx_runs_created_at ON runs(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_runs_phase ON runs(phase);
@@ -118,6 +134,11 @@ CREATE INDEX IF NOT EXISTS idx_events_run_iteration ON events(run_id, iteration)
 CREATE INDEX IF NOT EXISTS idx_run_states_run_id ON run_states(run_id);
 CREATE INDEX IF NOT EXISTS idx_run_states_phase_status ON run_states(phase_status);
 CREATE INDEX IF NOT EXISTS idx_run_states_created_at ON run_states(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_messages_run_id ON messages(run_id);
+CREATE INDEX IF NOT EXISTS idx_messages_state_id ON messages(state_id);
+CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages(channel);
+CREATE INDEX IF NOT EXISTS idx_messages_run_channel ON messages(run_id, channel);
+CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at DESC);
 """
 
 
@@ -207,7 +228,8 @@ class DuetDatabase:
         """Apply schema migrations if needed."""
         current_version = self._get_schema_version(conn)
 
-        # Migration 1 -> 2: Add active_state_id to runs table        if current_version < 2:
+        # Migration 1 -> 2: Add active_state_id to runs table
+        if current_version < 2:
             try:
                 # Check if column already exists
                 cursor = conn.execute("PRAGMA table_info(runs)")
@@ -222,6 +244,24 @@ class DuetDatabase:
                 self._set_schema_version(conn, 2)
             except sqlite3.OperationalError as e:
                 # Column might already exist, ignore error
+                pass
+
+        # Migration 2 -> 3: Add messages table
+        if current_version < 3:
+            try:
+                # Check if table already exists
+                cursor = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='messages'"
+                )
+                if not cursor.fetchone():
+                    # Table doesn't exist, it will be created by SCHEMA_DDL
+                    # Just mark version as applied
+                    self._set_schema_version(conn, 3)
+                else:
+                    # Table exists, just update version
+                    self._set_schema_version(conn, 3)
+            except sqlite3.OperationalError as e:
+                # Ignore errors, schema will be created
                 pass
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -707,4 +747,152 @@ class DuetDatabase:
                 if state_dict.get("metadata"):
                     state_dict["metadata"] = json.loads(state_dict["metadata"])
                 return state_dict
+            return None
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Message Operations
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def insert_message(
+        self,
+        run_id: str,
+        channel: str,
+        payload: Any,
+        state_id: Optional[str] = None,
+        iteration: Optional[int] = None,
+        phase: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Insert a channel message record."""
+        with self._conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO messages (
+                    run_id, state_id, iteration, phase, channel,
+                    payload, metadata, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    state_id,
+                    iteration,
+                    phase,
+                    channel,
+                    json.dumps(payload) if not isinstance(payload, str) else payload,
+                    json.dumps(metadata) if metadata else None,
+                    dt.datetime.now(dt.timezone.utc).isoformat(),
+                ),
+            )
+
+    def list_messages(
+        self,
+        run_id: str,
+        channel: Optional[str] = None,
+        phase: Optional[str] = None,
+        state_id: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        List messages for a run with optional filtering.
+
+        Args:
+            run_id: Run identifier
+            channel: Filter by channel name
+            phase: Filter by phase
+            state_id: Filter by state
+            limit: Maximum messages to return
+
+        Returns:
+            List of message dictionaries with parsed payloads
+        """
+        with self._conn() as conn:
+            query = "SELECT * FROM messages WHERE run_id = ?"
+            params: List[Any] = [run_id]
+
+            if channel:
+                query += " AND channel = ?"
+                params.append(channel)
+
+            if phase:
+                query += " AND phase = ?"
+                params.append(phase)
+
+            if state_id:
+                query += " AND state_id = ?"
+                params.append(state_id)
+
+            query += " ORDER BY created_at ASC, id ASC"
+
+            if limit:
+                query += " LIMIT ?"
+                params.append(limit)
+
+            cursor = conn.execute(query, params)
+            messages = []
+            for row in cursor.fetchall():
+                msg_dict = dict(row)
+                # Parse JSON payload back to original type
+                try:
+                    msg_dict["payload"] = json.loads(msg_dict["payload"])
+                except (json.JSONDecodeError, TypeError):
+                    # Payload was plain string, keep as-is
+                    pass
+                # Parse metadata
+                if msg_dict.get("metadata"):
+                    try:
+                        msg_dict["metadata"] = json.loads(msg_dict["metadata"])
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                messages.append(msg_dict)
+            return messages
+
+    def get_state_messages(self, state_id: str) -> List[Dict[str, Any]]:
+        """Get all messages for a specific state."""
+        with self._conn() as conn:
+            cursor = conn.execute(
+                "SELECT * FROM messages WHERE state_id = ? ORDER BY created_at ASC",
+                (state_id,),
+            )
+            messages = []
+            for row in cursor.fetchall():
+                msg_dict = dict(row)
+                try:
+                    msg_dict["payload"] = json.loads(msg_dict["payload"])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+                if msg_dict.get("metadata"):
+                    try:
+                        msg_dict["metadata"] = json.loads(msg_dict["metadata"])
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                messages.append(msg_dict)
+            return messages
+
+    def get_latest_channel_message(
+        self, run_id: str, channel: str
+    ) -> Optional[Dict[str, Any]]:
+        """Get the most recent message for a channel in a run."""
+        with self._conn() as conn:
+            cursor = conn.execute(
+                """
+                SELECT * FROM messages
+                WHERE run_id = ? AND channel = ?
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (run_id, channel),
+            )
+            row = cursor.fetchone()
+            if row:
+                msg_dict = dict(row)
+                try:
+                    msg_dict["payload"] = json.loads(msg_dict["payload"])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+                if msg_dict.get("metadata"):
+                    try:
+                        msg_dict["metadata"] = json.loads(msg_dict["metadata"])
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                return msg_dict
             return None
