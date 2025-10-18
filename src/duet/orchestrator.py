@@ -460,40 +460,39 @@ class Orchestrator:
                     response.metadata["git_changes"] = {"error": str(exc)}
 
             # ──── Decide Next Phase ────
-            # Sprint 10: Use WorkflowExecutor guard evaluation if available
-            if self.workflow_executor:
-                # Build guard context
-                guard_context = self.workflow_executor.guard_evaluator.build_guard_context(
-                    self.workflow_executor.channel_store,
-                    response=response,
-                    git_changes=response.metadata.get("git_changes"),
-                )
+            # Sprint 10: Use WorkflowExecutor guard evaluation (required)
+            if not self.workflow_executor:
+                raise RuntimeError("Workflow executor required (ensure .duet/workflow.py exists)")
 
-                # Evaluate transitions
-                guard_result = self.workflow_executor.guard_evaluator.evaluate_transitions(
-                    current_phase=current_phase.value,
-                    workflow_graph=self.workflow_graph,
-                    guard_context=guard_context,
-                )
+            # Build guard context
+            guard_context = self.workflow_executor.guard_evaluator.build_guard_context(
+                self.workflow_executor.channel_store,
+                response=response,
+                git_changes=response.metadata.get("git_changes"),
+            )
 
-                # Convert to TransitionDecision format
-                if guard_result.next_phase:
-                    next_phase_enum = Phase(guard_result.next_phase)
-                    decision = TransitionDecision(
-                        next_phase=next_phase_enum,
-                        rationale=guard_result.rationale,
-                        requires_human=False,  # Guards determine this
-                    )
-                else:
-                    # No guards passed - blocked
-                    decision = TransitionDecision(
-                        next_phase=Phase.BLOCKED,
-                        rationale=guard_result.rationale,
-                        requires_human=True,
-                    )
+            # Evaluate transitions
+            guard_result = self.workflow_executor.guard_evaluator.evaluate_transitions(
+                current_phase=current_phase.value,
+                workflow_graph=self.workflow_graph,
+                guard_context=guard_context,
+            )
+
+            # Convert to TransitionDecision format
+            if guard_result.next_phase:
+                next_phase_enum = Phase(guard_result.next_phase)
+                decision = TransitionDecision(
+                    next_phase=next_phase_enum,
+                    rationale=guard_result.rationale,
+                    requires_human=False,  # Guards determine this
+                )
             else:
-                # Legacy mode
-                decision = self._decide_next_phase(current_phase, response, iteration, consecutive_replans)
+                # No guards passed - blocked
+                decision = TransitionDecision(
+                    next_phase=Phase.BLOCKED,
+                    rationale=guard_result.rationale,
+                    requires_human=True,
+                )
 
             self.console.log(f"[blue]Decision:[/] {decision.rationale}")
 
@@ -629,65 +628,38 @@ class Orchestrator:
         """
         Create the request payload based on the active phase.
 
-        Sprint 10: Uses WorkflowExecutor + PromptBuilder if workflow loaded,
-        falls back to legacy _compose_*_request methods otherwise.
+        Sprint 10: Uses WorkflowExecutor + PromptBuilder for DSL-driven execution.
+        Workflow must be loaded (required from Sprint 10 forward).
 
-        Each phase receives actionable inputs:
-        - PLAN: Prior review feedback (if looping), iteration context, objectives
-        - IMPLEMENT: Current plan, workspace path, repository context
-        - REVIEW: Plan + implementation response, iteration history summary
+        Each phase receives inputs from channels:
+        - PLAN: task, feedback channels
+        - IMPLEMENT: plan channel
+        - REVIEW: plan, code channels
         """
-        # Sprint 10: Use PromptBuilder if workflow executor available
-        if self.workflow_executor:
-            from .prompt_builder import PromptContext, get_builder
-
-            # Build prompt context from snapshot and channels
-            prompt_context = PromptContext(
-                run_id=snapshot.run_id,
-                iteration=snapshot.iteration,
-                phase=phase.value,
-                agent=self._get_agent_for_phase(phase),
-                max_iterations=self.max_iterations,
-                channel_payloads=self.workflow_executor.get_current_channels(),
-                consecutive_replans=snapshot.metadata.get("consecutive_replans", 0),
-                workspace_root=str(self.config.storage.workspace_root),
-                metadata=snapshot.metadata,
+        if not self.workflow_executor:
+            raise RuntimeError(
+                "Workflow executor required. Ensure .duet/workflow.py exists.\n"
+                "Run 'duet init' to generate default workflow."
             )
 
-            # Build request using phase-specific builder
-            builder = get_builder(phase.value)
-            return builder.build(prompt_context)
+        from .prompt_builder import PromptContext, get_builder
 
-        # Legacy mode: hardcoded prompts
-        role_map = {
-            Phase.PLAN: "planner",
-            Phase.IMPLEMENT: "implementer",
-            Phase.REVIEW: "reviewer",
-        }
+        # Build prompt context from snapshot and channels
+        prompt_context = PromptContext(
+            run_id=snapshot.run_id,
+            iteration=snapshot.iteration,
+            phase=phase.value,
+            agent=self._get_agent_for_phase(phase),
+            max_iterations=self.max_iterations,
+            channel_payloads=self.workflow_executor.get_current_channels(),
+            consecutive_replans=snapshot.metadata.get("consecutive_replans", 0),
+            workspace_root=str(self.config.storage.workspace_root),
+            metadata=snapshot.metadata,
+        )
 
-        # ──── Base Context (common to all phases) ────
-        context = {
-            "iteration": snapshot.iteration,
-            "run_id": snapshot.run_id,
-            "phase": phase.value,
-            "max_iterations": self.max_iterations,
-            "workspace_root": str(self.config.storage.workspace_root),
-            "run_metadata": snapshot.metadata,
-        }
-
-        # ──── Phase-Specific Context and Prompts ────
-        if phase == Phase.PLAN:
-            prompt, phase_context = self._compose_plan_request(snapshot)
-        elif phase == Phase.IMPLEMENT:
-            prompt, phase_context = self._compose_implement_request(snapshot)
-        elif phase == Phase.REVIEW:
-            prompt, phase_context = self._compose_review_request(snapshot)
-        else:
-            prompt = "No prompt defined for this phase."
-            phase_context = {}
-
-        context.update(phase_context)
-        return AssistantRequest(role=role_map.get(phase, "system"), prompt=prompt, context=context)
+        # Build request using phase-specific builder
+        builder = get_builder(phase.value)
+        return builder.build(prompt_context)
 
     def _get_agent_for_phase(self, phase: Phase) -> str:
         """Get agent name for a phase (for workflow mode)."""
@@ -734,242 +706,12 @@ class Orchestrator:
             if response.content and not response.concluded:
                 self.workflow_executor.channel_store.set("feedback", response.content)
 
-    def _compose_plan_request(self, snapshot: RunSnapshot) -> tuple[str, dict]:
-        """Compose request for PLAN phase with prior feedback if available."""
-        prompt_parts = [
-            "Draft the implementation plan for the next increment.",
-            "",
-            f"Iteration: {snapshot.iteration}/{self.max_iterations}",
-        ]
-
-        phase_context = {}
-
-        # If this is not the first iteration, include prior review feedback
-        if snapshot.iteration > 1:
-            prior_review = self._load_prior_response(snapshot.run_id, Phase.REVIEW)
-            if prior_review:
-                prompt_parts.extend(
-                    [
-                        "",
-                        "──── Prior Review Feedback ────",
-                        prior_review.get("content", "No feedback available."),
-                        "",
-                        "Please revise the plan to address the review feedback above.",
-                    ]
-                )
-                phase_context["prior_review_feedback"] = prior_review
-
-        prompt = "\n".join(prompt_parts)
-        return prompt, phase_context
-
-    def _compose_implement_request(self, snapshot: RunSnapshot) -> tuple[str, dict]:
-        """Compose request for IMPLEMENT phase with the current plan."""
-        prompt_parts = [
-            "Apply the plan to the repository and provide a commit summary.",
-            "",
-            f"Iteration: {snapshot.iteration}/{self.max_iterations}",
-            f"Workspace: {self.config.storage.workspace_root}",
-        ]
-
-        phase_context = {}
-
-        # Load the current plan from this iteration
-        plan_response = self._load_prior_response(snapshot.run_id, Phase.PLAN)
-        if plan_response:
-            prompt_parts.extend(
-                [
-                    "",
-                    "──── Implementation Plan ────",
-                    plan_response.get("content", "No plan available."),
-                    "",
-                    "Follow the plan above to implement the changes.",
-                ]
-            )
-            phase_context["current_plan"] = plan_response
-
-        prompt = "\n".join(prompt_parts)
-        return prompt, phase_context
-
-    def _compose_review_request(self, snapshot: RunSnapshot) -> tuple[str, dict]:
-        """Compose request for REVIEW phase with plan + implementation response."""
-        prompt_parts = [
-            "Review the latest changes and provide a structured verdict.",
-            "",
-            f"Iteration: {snapshot.iteration}/{self.max_iterations}",
-        ]
-
-        phase_context = {}
-
-        # Load plan and implementation from current iteration
-        plan_response = self._load_prior_response(snapshot.run_id, Phase.PLAN)
-        impl_response = self._load_prior_response(snapshot.run_id, Phase.IMPLEMENT)
-
-        if plan_response:
-            prompt_parts.extend(
-                ["", "──── Plan ────", plan_response.get("content", "No plan available.")]
-            )
-            phase_context["plan"] = plan_response
-
-        if impl_response:
-            prompt_parts.extend(
-                [
-                    "",
-                    "──── Implementation ────",
-                    impl_response.get("content", "No implementation available."),
-                ]
-            )
-            phase_context["implementation"] = impl_response
-
-        prompt_parts.extend(
-            [
-                "",
-                "Assess whether the implementation meets the plan's requirements.",
-                "",
-                "Provide your verdict as one of:",
-                "- APPROVE: Changes are acceptable, ready to proceed",
-                "- CHANGES_REQUESTED: Revisions needed, will loop back to planning",
-                "- BLOCKED: Critical issues requiring human intervention",
-                "",
-                "Include your verdict in the response metadata as 'verdict'.",
-                "Set 'concluded' to True only if verdict is APPROVE.",
-            ]
-        )
-
-        prompt = "\n".join(prompt_parts)
-        return prompt, phase_context
-
-    def _load_prior_response(self, run_id: str, phase: Phase) -> dict | None:
-        """Load the most recent response for a given phase from artifacts."""
-        try:
-            interactions_dir = self.artifacts.run_dir(run_id) / "interactions"
-            if not interactions_dir.exists():
-                return None
-
-            # Find most recent interaction file for this phase
-            phase_files = sorted(interactions_dir.glob(f"*-{phase.value}.json"), reverse=True)
-            if not phase_files:
-                return None
-
-            with phase_files[0].open("r", encoding="utf-8") as f:
-                data = json.load(f)
-                return data.get("response")
-        except Exception as exc:
-            self.console.log(f"[yellow]Warning: Could not load prior {phase.value} response: {exc}[/]")
-            return None
-
     def _select_adapter(self, phase: Phase) -> AssistantAdapter:
         if phase in (Phase.PLAN, Phase.REVIEW):
             return self.codex_adapter
         if phase == Phase.IMPLEMENT:
             return self.claude_adapter
         return self.codex_adapter
-
-    def _decide_next_phase(
-        self,
-        phase: Phase,
-        response: AssistantResponse,
-        iteration: int,
-        consecutive_replans: int = 0,
-    ) -> TransitionDecision:
-        """
-        Determine next phase based on current phase and response.
-
-        Transition Rules:
-        - PLAN → IMPLEMENT (always, if valid response)
-        - IMPLEMENT → REVIEW (always, if valid response)
-        - REVIEW → DONE (if response.verdict == APPROVE or concluded == True)
-        - REVIEW → PLAN (if response.verdict == CHANGES_REQUESTED)
-        - REVIEW → BLOCKED (if response.verdict == BLOCKED)
-
-        Guardrails:
-        - Approaching max iterations: set requires_human = True
-        - Max consecutive replans exceeded: set requires_human = True
-        - Invalid/ambiguous response: could set requires_human = True
-        """
-        # ──── PLAN Phase ────
-        if phase == Phase.PLAN:
-            rationale = "Plan drafted, proceeding to implementation."
-            return TransitionDecision(next_phase=Phase.IMPLEMENT, rationale=rationale)
-
-        # ──── IMPLEMENT Phase ────
-        if phase == Phase.IMPLEMENT:
-            rationale = "Implementation response recorded, proceeding to review."
-            return TransitionDecision(next_phase=Phase.REVIEW, rationale=rationale)
-
-        # ──── REVIEW Phase ────
-        if phase == Phase.REVIEW:
-            # Honor structured verdict if provided
-            if response.verdict:
-                if response.verdict == ReviewVerdict.APPROVE:
-                    rationale = "Review verdict: APPROVE - marking run as DONE."
-                    return TransitionDecision(next_phase=Phase.DONE, rationale=rationale)
-
-                elif response.verdict == ReviewVerdict.BLOCKED:
-                    rationale = "Review verdict: BLOCKED - critical issues require human intervention."
-                    return TransitionDecision(
-                        next_phase=Phase.BLOCKED,
-                        rationale=rationale,
-                        requires_human=True,
-                    )
-
-                elif response.verdict == ReviewVerdict.CHANGES_REQUESTED:
-                    # ──── Guardrail: Check Consecutive Replans ────
-                    approaching_iteration_limit = iteration >= self.max_iterations - 1
-                    exceeds_replan_limit = (
-                        consecutive_replans >= self.config.workflow.max_consecutive_replans - 1
-                    )
-                    requires_human = approaching_iteration_limit or exceeds_replan_limit
-
-                    if exceeds_replan_limit:
-                        rationale = (
-                            f"Review verdict: CHANGES_REQUESTED - consecutive replans "
-                            f"{consecutive_replans + 1}/{self.config.workflow.max_consecutive_replans} "
-                            "(replan limit reached, human approval needed)."
-                        )
-                    elif approaching_iteration_limit:
-                        rationale = (
-                            f"Review verdict: CHANGES_REQUESTED - iteration {iteration}/{self.max_iterations} "
-                            "(approaching limit, human approval may be needed)."
-                        )
-                    else:
-                        rationale = "Review verdict: CHANGES_REQUESTED - looping back to planning."
-
-                    return TransitionDecision(
-                        next_phase=Phase.PLAN, rationale=rationale, requires_human=requires_human
-                    )
-
-            # Fallback to legacy 'concluded' field if no verdict
-            if response.concluded:
-                rationale = "Review approved (legacy concluded=True); marking run as DONE."
-                return TransitionDecision(next_phase=Phase.DONE, rationale=rationale)
-
-            # Default: request changes and loop back (legacy path)
-            approaching_iteration_limit = iteration >= self.max_iterations - 1
-            exceeds_replan_limit = (
-                consecutive_replans >= self.config.workflow.max_consecutive_replans - 1
-            )
-            requires_human = approaching_iteration_limit or exceeds_replan_limit
-
-            if exceeds_replan_limit:
-                rationale = (
-                    f"Review requested changes - consecutive replans "
-                    f"{consecutive_replans + 1}/{self.config.workflow.max_consecutive_replans} "
-                    "(replan limit reached, human approval needed)."
-                )
-            elif approaching_iteration_limit:
-                rationale = (
-                    f"Review requested changes; iteration {iteration}/{self.max_iterations} "
-                    "(approaching limit, human approval may be needed)."
-                )
-            else:
-                rationale = "Review requested changes; looping back to planning for revisions."
-
-            return TransitionDecision(
-                next_phase=Phase.PLAN, rationale=rationale, requires_human=requires_human
-            )
-
-        # ──── Fallback ────
-        return TransitionDecision(next_phase=Phase.DONE, rationale="Reached unexpected phase.")
 
     def _persist_interaction(
         self, run_id: str, phase: Phase, request: AssistantRequest, response: AssistantResponse
@@ -1261,44 +1003,38 @@ class Orchestrator:
             }
 
         # ──── Decide Next Phase ────
-        # Sprint 10: Use WorkflowExecutor guard evaluation if available
-        if self.workflow_executor:
-            # Build guard context
-            guard_context = self.workflow_executor.guard_evaluator.build_guard_context(
-                self.workflow_executor.channel_store,
-                response=response,
-                git_changes=response.metadata.get("git_changes"),
-            )
+        # Sprint 10: Use WorkflowExecutor guard evaluation (required)
+        if not self.workflow_executor:
+            raise RuntimeError("Workflow executor required (ensure .duet/workflow.py exists)")
 
-            # Evaluate transitions
-            guard_result = self.workflow_executor.guard_evaluator.evaluate_transitions(
-                current_phase=current_phase.value,
-                workflow_graph=self.workflow_graph,
-                guard_context=guard_context,
-            )
+        # Build guard context
+        guard_context = self.workflow_executor.guard_evaluator.build_guard_context(
+            self.workflow_executor.channel_store,
+            response=response,
+            git_changes=response.metadata.get("git_changes"),
+        )
 
-            # Convert to TransitionDecision format
-            if guard_result.next_phase:
-                next_phase_enum = Phase(guard_result.next_phase)
-                decision = TransitionDecision(
-                    next_phase=next_phase_enum,
-                    rationale=guard_result.rationale,
-                    requires_human=False,
-                )
-            else:
-                # No guards passed - blocked
-                decision = TransitionDecision(
-                    next_phase=Phase.BLOCKED,
-                    rationale=guard_result.rationale,
-                    requires_human=True,
-                )
+        # Evaluate transitions
+        guard_result = self.workflow_executor.guard_evaluator.evaluate_transitions(
+            current_phase=current_phase.value,
+            workflow_graph=self.workflow_graph,
+            guard_context=guard_context,
+        )
+
+        # Convert to TransitionDecision format
+        if guard_result.next_phase:
+            next_phase_enum = Phase(guard_result.next_phase)
+            decision = TransitionDecision(
+                next_phase=next_phase_enum,
+                rationale=guard_result.rationale,
+                requires_human=False,
+            )
         else:
-            # Legacy mode
-            decision = self._decide_next_phase(
-                current_phase,
-                response,
-                snapshot.iteration,
-                snapshot.metadata.get("consecutive_replans", 0)
+            # No guards passed - blocked
+            decision = TransitionDecision(
+                next_phase=Phase.BLOCKED,
+                rationale=guard_result.rationale,
+                requires_human=True,
             )
 
         # ──── Persist Iteration ────

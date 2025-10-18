@@ -19,11 +19,52 @@ from duet.models import Phase
 from duet.orchestrator import Orchestrator
 
 
+def create_test_workflow(workspace: Path) -> None:
+    """Create default workflow.py for Sprint 10 tests."""
+    duet_dir = workspace / ".duet"
+    duet_dir.mkdir(parents=True, exist_ok=True)
+    workflow_file = duet_dir / "workflow.py"
+    workflow_file.write_text("""
+from duet.dsl import Agent, Channel, Phase, Transition, When, Workflow
+
+workflow = Workflow(
+    agents=[
+        Agent(name="planner", provider="echo", model="echo-v1"),
+        Agent(name="implementer", provider="echo", model="echo-v1"),
+        Agent(name="reviewer", provider="echo", model="echo-v1"),
+    ],
+    channels=[
+        Channel(name="task"),
+        Channel(name="plan"),
+        Channel(name="code"),
+        Channel(name="verdict"),
+        Channel(name="feedback"),
+    ],
+    phases=[
+        Phase(name="plan", agent="planner", consumes=["task"], publishes=["plan"]),
+        Phase(name="implement", agent="implementer", consumes=["plan"], publishes=["code"]),
+        Phase(name="review", agent="reviewer", consumes=["plan", "code"], publishes=["verdict", "feedback"]),
+        Phase(name="done", agent="reviewer", is_terminal=True),
+        Phase(name="blocked", agent="reviewer", is_terminal=True),
+    ],
+    transitions=[
+        Transition(from_phase="plan", to_phase="implement"),
+        Transition(from_phase="implement", to_phase="review"),
+        Transition(from_phase="review", to_phase="done", when=When.channel_has("verdict", "approve")),
+        Transition(from_phase="review", to_phase="plan", when=When.channel_has("verdict", "changes_requested")),
+        Transition(from_phase="review", to_phase="blocked", when=When.channel_has("verdict", "blocked")),
+    ],
+)
+""")
+
+
 @pytest.fixture
 def temp_workspace():
     """Create a temporary workspace for testing."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        yield Path(tmpdir)
+        workspace = Path(tmpdir)
+        create_test_workflow(workspace)
+        yield workspace
 
 
 @pytest.fixture

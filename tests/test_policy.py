@@ -23,11 +23,52 @@ from duet.models import AssistantRequest, AssistantResponse, Phase, ReviewVerdic
 from duet.orchestrator import Orchestrator
 
 
+def create_test_workflow(workspace: Path) -> None:
+    """Create default workflow.py for Sprint 10 tests."""
+    duet_dir = workspace / ".duet"
+    duet_dir.mkdir(parents=True, exist_ok=True)
+    workflow_file = duet_dir / "workflow.py"
+    workflow_file.write_text("""
+from duet.dsl import Agent, Channel, Phase, Transition, When, Workflow
+
+workflow = Workflow(
+    agents=[
+        Agent(name="planner", provider="echo", model="echo-v1"),
+        Agent(name="implementer", provider="echo", model="echo-v1"),
+        Agent(name="reviewer", provider="echo", model="echo-v1"),
+    ],
+    channels=[
+        Channel(name="task"),
+        Channel(name="plan"),
+        Channel(name="code"),
+        Channel(name="verdict"),
+        Channel(name="feedback"),
+    ],
+    phases=[
+        Phase(name="plan", agent="planner", consumes=["task"], publishes=["plan"]),
+        Phase(name="implement", agent="implementer", consumes=["plan"], publishes=["code"]),
+        Phase(name="review", agent="reviewer", consumes=["plan", "code"], publishes=["verdict", "feedback"]),
+        Phase(name="done", agent="reviewer", is_terminal=True),
+        Phase(name="blocked", agent="reviewer", is_terminal=True),
+    ],
+    transitions=[
+        Transition(from_phase="plan", to_phase="implement"),
+        Transition(from_phase="implement", to_phase="review"),
+        Transition(from_phase="review", to_phase="done", when=When.channel_has("verdict", "approve")),
+        Transition(from_phase="review", to_phase="plan", when=When.channel_has("verdict", "changes_requested")),
+        Transition(from_phase="review", to_phase="blocked", when=When.channel_has("verdict", "blocked")),
+    ],
+)
+""")
+
+
 @pytest.fixture
 def temp_workspace():
     """Create a temporary workspace for testing."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        yield Path(tmpdir)
+        workspace = Path(tmpdir)
+        create_test_workflow(workspace)
+        yield workspace
 
 
 @pytest.fixture
@@ -38,163 +79,9 @@ def temp_artifacts_dir():
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Review Verdict Tests
+# Verdict and Guard Tests (now tested via guard evaluation in test_executor.py)
+# Legacy _decide_next_phase tests removed - behavior covered by WorkflowExecutor
 # ──────────────────────────────────────────────────────────────────────────────
-
-
-def test_review_verdict_approve():
-    """Test that APPROVE verdict transitions to DONE."""
-    from duet.orchestrator import Orchestrator
-
-    with tempfile.TemporaryDirectory() as tmpdir_workspace:
-        with tempfile.TemporaryDirectory() as tmpdir_artifacts:
-            config = DuetConfig(
-                codex=AssistantConfig(provider="echo", model="test"),
-                claude=AssistantConfig(provider="echo", model="test"),
-                workflow=WorkflowConfig(max_iterations=1, require_human_approval=False),
-                storage=StorageConfig(
-                    workspace_root=Path(tmpdir_workspace),
-                    run_artifact_dir=Path(tmpdir_artifacts),
-                ),
-            )
-
-            orchestrator = Orchestrator(
-                config, ArtifactStore(Path(tmpdir_artifacts)), Console()
-            )
-
-            # Test decision logic for APPROVE verdict
-            response = AssistantResponse(
-                content="All good!", verdict=ReviewVerdict.APPROVE, concluded=True
-            )
-            decision = orchestrator._decide_next_phase(Phase.REVIEW, response, 1, 0)
-
-            assert decision.next_phase == Phase.DONE
-            assert "APPROVE" in decision.rationale
-            assert not decision.requires_human
-
-
-def test_review_verdict_changes_requested():
-    """Test that CHANGES_REQUESTED verdict loops back to PLAN."""
-    with tempfile.TemporaryDirectory() as tmpdir_workspace:
-        with tempfile.TemporaryDirectory() as tmpdir_artifacts:
-            config = DuetConfig(
-                codex=AssistantConfig(provider="echo", model="test"),
-                claude=AssistantConfig(provider="echo", model="test"),
-                workflow=WorkflowConfig(max_iterations=5, require_human_approval=False),
-                storage=StorageConfig(
-                    workspace_root=Path(tmpdir_workspace),
-                    run_artifact_dir=Path(tmpdir_artifacts),
-                ),
-            )
-
-            orchestrator = Orchestrator(
-                config, ArtifactStore(Path(tmpdir_artifacts)), Console()
-            )
-
-            # Test decision logic for CHANGES_REQUESTED verdict
-            response = AssistantResponse(
-                content="Needs revisions", verdict=ReviewVerdict.CHANGES_REQUESTED
-            )
-            decision = orchestrator._decide_next_phase(Phase.REVIEW, response, 1, 0)
-
-            assert decision.next_phase == Phase.PLAN
-            assert "CHANGES_REQUESTED" in decision.rationale
-            assert not decision.requires_human
-
-
-def test_review_verdict_blocked():
-    """Test that BLOCKED verdict requires human intervention."""
-    with tempfile.TemporaryDirectory() as tmpdir_workspace:
-        with tempfile.TemporaryDirectory() as tmpdir_artifacts:
-            config = DuetConfig(
-                codex=AssistantConfig(provider="echo", model="test"),
-                claude=AssistantConfig(provider="echo", model="test"),
-                workflow=WorkflowConfig(max_iterations=1, require_human_approval=False),
-                storage=StorageConfig(
-                    workspace_root=Path(tmpdir_workspace),
-                    run_artifact_dir=Path(tmpdir_artifacts),
-                ),
-            )
-
-            orchestrator = Orchestrator(
-                config, ArtifactStore(Path(tmpdir_artifacts)), Console()
-            )
-
-            # Test decision logic for BLOCKED verdict
-            response = AssistantResponse(
-                content="Critical issues!", verdict=ReviewVerdict.BLOCKED
-            )
-            decision = orchestrator._decide_next_phase(Phase.REVIEW, response, 1, 0)
-
-            assert decision.next_phase == Phase.BLOCKED
-            assert "BLOCKED" in decision.rationale
-            assert decision.requires_human
-
-
-def test_review_verdict_fallback_to_concluded():
-    """Test that concluded field still works when verdict is not provided."""
-    with tempfile.TemporaryDirectory() as tmpdir_workspace:
-        with tempfile.TemporaryDirectory() as tmpdir_artifacts:
-            config = DuetConfig(
-                codex=AssistantConfig(provider="echo", model="test"),
-                claude=AssistantConfig(provider="echo", model="test"),
-                workflow=WorkflowConfig(max_iterations=1, require_human_approval=False),
-                storage=StorageConfig(
-                    workspace_root=Path(tmpdir_workspace),
-                    run_artifact_dir=Path(tmpdir_artifacts),
-                ),
-            )
-
-            orchestrator = Orchestrator(
-                config, ArtifactStore(Path(tmpdir_artifacts)), Console()
-            )
-
-            # Test with concluded=True, no verdict
-            response = AssistantResponse(content="Done", concluded=True)
-            decision = orchestrator._decide_next_phase(Phase.REVIEW, response, 1, 0)
-
-            assert decision.next_phase == Phase.DONE
-            assert "concluded" in decision.rationale.lower()
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Guardrail Tests
-# ──────────────────────────────────────────────────────────────────────────────
-
-
-def test_max_consecutive_replans_guardrail():
-    """Test that max_consecutive_replans triggers human approval."""
-    with tempfile.TemporaryDirectory() as tmpdir_workspace:
-        with tempfile.TemporaryDirectory() as tmpdir_artifacts:
-            config = DuetConfig(
-                codex=AssistantConfig(provider="echo", model="test"),
-                claude=AssistantConfig(provider="echo", model="test"),
-                workflow=WorkflowConfig(
-                    max_iterations=10,
-                    max_consecutive_replans=2,  # Limit to 2 replans
-                    require_human_approval=False,
-                ),
-                storage=StorageConfig(
-                    workspace_root=Path(tmpdir_workspace),
-                    run_artifact_dir=Path(tmpdir_artifacts),
-                ),
-            )
-
-            orchestrator = Orchestrator(
-                config, ArtifactStore(Path(tmpdir_artifacts)), Console()
-            )
-
-            # Test decision when approaching replan limit
-            response = AssistantResponse(
-                content="Changes needed", verdict=ReviewVerdict.CHANGES_REQUESTED
-            )
-            decision = orchestrator._decide_next_phase(
-                Phase.REVIEW, response, iteration=2, consecutive_replans=1
-            )
-
-            assert decision.next_phase == Phase.PLAN
-            assert decision.requires_human  # Should trigger human approval
-            assert "replan limit" in decision.rationale.lower()
 
 
 def test_require_git_changes_flag():
@@ -202,6 +89,7 @@ def test_require_git_changes_flag():
     with tempfile.TemporaryDirectory() as tmpdir_workspace:
         with tempfile.TemporaryDirectory() as tmpdir_artifacts:
             workspace = Path(tmpdir_workspace)
+            create_test_workflow(workspace)  # Sprint 10: required
 
             # Initialize git repo but don't make changes
             import subprocess
@@ -313,6 +201,7 @@ def test_feature_branch_creation():
     with tempfile.TemporaryDirectory() as tmpdir_workspace:
         with tempfile.TemporaryDirectory() as tmpdir_artifacts:
             workspace = Path(tmpdir_workspace)
+            create_test_workflow(workspace)  # Sprint 10: required
             artifacts = Path(tmpdir_artifacts)
 
             # Initialize git repo
@@ -371,6 +260,7 @@ def test_branch_restoration():
     with tempfile.TemporaryDirectory() as tmpdir_workspace:
         with tempfile.TemporaryDirectory() as tmpdir_artifacts:
             workspace = Path(tmpdir_workspace)
+            create_test_workflow(workspace)  # Sprint 10: required
             artifacts = Path(tmpdir_artifacts)
 
             # Initialize git repo
@@ -471,6 +361,7 @@ def test_no_git_changes_blocks_run():
     with tempfile.TemporaryDirectory() as tmpdir_workspace:
         with tempfile.TemporaryDirectory() as tmpdir_artifacts:
             workspace = Path(tmpdir_workspace)
+            create_test_workflow(workspace)  # Sprint 10: required
             artifacts = Path(tmpdir_artifacts)
 
             # Initialize git repo with no changes
