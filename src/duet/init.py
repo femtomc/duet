@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 from typing import Optional
 
@@ -404,51 +403,53 @@ Be concise but comprehensive. This will help the orchestrator understand the cod
 """
 
         try:
-            result = subprocess.run(
-                [
-                    "codex",
-                    "exec",
-                    "--json",
-                    "--model",
-                    self.model_codex,
-                    discovery_prompt,
-                ],
-                capture_output=True,
-                text=True,
-                timeout=120,  # 2 minute timeout for discovery
-                check=False,
-                cwd=self.workspace_root,
+            # Use CodexAdapter for streaming discovery (Sprint 6)
+            from .adapters import CodexAdapter
+            from .adapters.base import StreamEvent
+            from .models import AssistantRequest
+            from rich.live import Live
+            from rich.panel import Panel
+
+            adapter = CodexAdapter(model=self.model_codex, timeout=120)
+            request = AssistantRequest(
+                role="discovery",
+                prompt=discovery_prompt,
+                context={},
             )
 
-            if result.returncode != 0:
-                self.console.log(
-                    f"[yellow]Context discovery failed (exit code {result.returncode})[/]"
-                )
-                self.console.log(
-                    f"[dim]Error: {result.stderr.strip()[:200]}[/]"
-                )
-                self._create_placeholder_context()
-                return
+            # Track streaming progress
+            event_count = 0
+            last_event_type = None
 
-            # Parse JSONL output to extract agent message
-            import json
+            def render_progress():
+                """Render progress panel."""
+                status = "Analyzing repository..."
+                if last_event_type == "item.completed":
+                    status = "Generating context..."
+                elif last_event_type == "turn.completed":
+                    status = "Complete"
 
-            lines = result.stdout.strip().split("\n")
-            context_text = None
+                content = f"[bold]Context Discovery[/]\n\n{status}\n\n[dim]Events received: {event_count}[/]"
+                return Panel(content, border_style="cyan", expand=False)
 
-            for line in lines:
-                if not line.strip():
-                    continue
-                try:
-                    event = json.loads(line)
-                    if event.get("type") == "item.completed":
-                        item = event.get("item", {})
-                        if item.get("type") == "agent_message":
-                            context_text = item.get("text")
-                except json.JSONDecodeError:
-                    continue
+            def on_event(event: StreamEvent) -> None:
+                """Handle streaming events during discovery."""
+                nonlocal event_count, last_event_type
+                event_count += 1
+                last_event_type = event["event_type"]
 
-            if not context_text:
+            # Run discovery with live display
+            with Live(render_progress(), console=self.console, refresh_per_second=4, transient=True) as live:
+                def live_event_handler(event: StreamEvent) -> None:
+                    on_event(event)
+                    live.update(render_progress())
+
+                response = adapter.stream(request, on_event=live_event_handler)
+
+            # Extract context from response
+            context_text = response.content
+
+            if not context_text or not context_text.strip():
                 self.console.log("[yellow]No context extracted from Codex response[/]")
                 self._create_placeholder_context()
                 return
@@ -479,20 +480,15 @@ Be concise but comprehensive. This will help the orchestrator understand the cod
             self.console.log(f"[green]Created:[/] {self._display_path(context_file)}")
             self.console.print("[green]✓ Context discovery complete[/]")
 
-        except FileNotFoundError:
-            self.console.log(
-                "[yellow]Codex CLI not found - skipping context discovery[/]"
-            )
-            self._create_placeholder_context()
-        except subprocess.TimeoutExpired:
-            self.console.log(
-                "[yellow]Context discovery timeout - skipping[/]"
-            )
-            self._create_placeholder_context()
         except Exception as exc:
-            self.console.log(
-                f"[yellow]Context discovery error: {exc}[/]"
-            )
+            # Handle CodexError, timeout, or any other discovery failure
+            error_msg = str(exc)
+            if "not found" in error_msg.lower():
+                self.console.log("[yellow]Codex CLI not found - skipping context discovery[/]")
+            elif "timeout" in error_msg.lower():
+                self.console.log("[yellow]Context discovery timeout - skipping[/]")
+            else:
+                self.console.log(f"[yellow]Context discovery error: {exc}[/]")
             self._create_placeholder_context()
 
     def _create_placeholder_context(self) -> None:

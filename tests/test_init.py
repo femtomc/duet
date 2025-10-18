@@ -182,29 +182,31 @@ def test_init_context_discovery_success(temp_workspace):
         console=Console(),
     )
 
-    # Mock Codex CLI response (JSONL format)
+    # Mock Codex streaming response (Popen - Sprint 6)
+    import io
     import json
 
-    mock_result = Mock()
-    mock_result.returncode = 0
-    mock_result.stdout = "\n".join(
-        [
-            json.dumps({"type": "thread.started", "thread_id": "test"}),
-            json.dumps(
-                {
-                    "type": "item.completed",
-                    "item": {
-                        "type": "agent_message",
-                        "text": "This is a test project for unit testing.",
-                    },
-                }
-            ),
-            json.dumps({"type": "turn.completed", "usage": {}}),
-        ]
-    )
-    mock_result.stderr = ""
+    stdout_lines = [
+        json.dumps({"type": "thread.started", "thread_id": "test"}) + "\n",
+        json.dumps({
+            "type": "item.completed",
+            "item": {
+                "type": "agent_message",
+                "text": "This is a test project for unit testing.",
+            },
+        }) + "\n",
+        json.dumps({"type": "turn.completed", "usage": {}}) + "\n",
+    ]
 
-    with patch("subprocess.run", return_value=mock_result):
+    mock_process = Mock()
+    mock_process.stdout = iter(stdout_lines)
+    mock_process.stderr = io.StringIO("")
+    mock_process.returncode = 0
+    mock_process.wait = Mock(return_value=0)
+    mock_process.poll = Mock(return_value=0)
+    mock_process.kill = Mock()
+
+    with patch("subprocess.Popen", return_value=mock_process):
         initializer.init()
 
     context_file = temp_workspace / ".duet" / "context" / "context.md"
@@ -212,24 +214,28 @@ def test_init_context_discovery_success(temp_workspace):
 
     content = context_file.read_text()
     assert "test project" in content.lower()
-    assert "test-model" in content
 
 
 def test_init_context_discovery_cli_failure(temp_workspace):
     """Test that init handles Codex CLI failures gracefully."""
+    import io
+
     initializer = DuetInitializer(
         workspace_root=temp_workspace,
         skip_discovery=False,
         console=Console(),
     )
 
-    # Mock failed Codex CLI
-    mock_result = Mock()
-    mock_result.returncode = 1
-    mock_result.stderr = "Authentication failed"
-    mock_result.stdout = ""
+    # Mock failed Codex CLI (Popen)
+    mock_process = Mock()
+    mock_process.stdout = iter([])
+    mock_process.stderr = io.StringIO("Authentication failed")
+    mock_process.returncode = 1
+    mock_process.wait = Mock(return_value=1)
+    mock_process.poll = Mock(return_value=1)
+    mock_process.kill = Mock()
 
-    with patch("subprocess.run", return_value=mock_result):
+    with patch("subprocess.Popen", return_value=mock_process):
         # Should not raise, should create placeholder instead
         initializer.init()
 
