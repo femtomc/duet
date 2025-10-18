@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-import json
 import subprocess
-import tempfile
-from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from ..models import AssistantRequest, AssistantResponse
 from .base import AssistantAdapter, register_adapter
@@ -52,50 +49,44 @@ class CodexAdapter(AssistantAdapter):
             CodexError: If the CLI invocation fails or returns invalid data
         """
         try:
-            # Create temporary file for prompt
-            with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as tmp:
-                tmp.write(request.prompt)
-                prompt_file = Path(tmp.name)
+            # Invoke Codex CLI
+            # Actual format: codex exec --model <model> <prompt>
+            # Prompt is passed as positional argument
+            result = subprocess.run(
+                [
+                    self.cli_path,
+                    "exec",  # Non-interactive mode
+                    "--model",
+                    self.model,
+                    request.prompt,  # Positional argument
+                ],
+                capture_output=True,
+                text=True,
+                timeout=self.timeout,
+                check=False,  # Don't raise on non-zero exit
+            )
 
-            try:
-                # Invoke Codex CLI
-                # Note: Codex CLI does not accept --temperature flag
-                # Expected format: codex --model <model> --prompt-file <file> --output json
-                result = subprocess.run(
-                    [
-                        self.cli_path,
-                        "--model",
-                        self.model,
-                        "--prompt-file",
-                        str(prompt_file),
-                        "--output",
-                        "json",
-                    ],
-                    capture_output=True,
-                    text=True,
-                    timeout=self.timeout,
-                    check=False,  # Don't raise on non-zero exit
+            # Check for errors
+            if result.returncode != 0:
+                error_msg = result.stderr.strip() or "Unknown error"
+                raise CodexError(
+                    f"Codex CLI failed with exit code {result.returncode}: {error_msg}"
                 )
 
-                # Check for errors
-                if result.returncode != 0:
-                    error_msg = result.stderr.strip() or "Unknown error"
-                    raise CodexError(
-                        f"Codex CLI failed with exit code {result.returncode}: {error_msg}"
-                    )
+            # Codex exec returns plain text, wrap in expected format
+            # Since Codex doesn't output JSON, we create a normalized response
+            content = result.stdout.strip()
+            if not content:
+                raise CodexError("Codex returned empty response")
 
-                # Parse JSON response
-                try:
-                    response_data = json.loads(result.stdout)
-                except json.JSONDecodeError as exc:
-                    raise CodexError(f"Failed to parse Codex JSON response: {exc}") from exc
+            # Create normalized response (Codex doesn't provide structured output)
+            response_data = {
+                "content": content,
+                "concluded": False,  # Default
+                "metadata": {"raw_output": True},
+            }
 
-                # Normalize response
-                return self._normalize_response(response_data)
-
-            finally:
-                # Clean up temporary file
-                prompt_file.unlink(missing_ok=True)
+            return self._normalize_response(response_data)
 
         except subprocess.TimeoutExpired as exc:
             raise CodexError(f"Codex CLI timeout after {self.timeout} seconds") from exc

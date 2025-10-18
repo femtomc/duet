@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
-import tempfile
-from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from ..models import AssistantRequest, AssistantResponse
 from .base import AssistantAdapter, register_adapter
@@ -54,59 +52,43 @@ class ClaudeCodeAdapter(AssistantAdapter):
             ClaudeCodeError: If the CLI invocation fails or returns invalid data
         """
         try:
-            # Create temporary file for prompt
-            with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as tmp:
-                tmp.write(request.prompt)
-                prompt_file = Path(tmp.name)
-
-            try:
-                # Invoke Claude CLI
-                # Note: Claude Code CLI does not accept --temperature flag
-                # Expected format: claude --model <model> --prompt-file <file> --output json
-                cmd = [
+            # Invoke Claude CLI
+            # Actual format: claude --print --output-format json --model <model> <prompt>
+            # Workspace context set via cwd parameter
+            result = subprocess.run(
+                [
                     self.cli_path,
+                    "--print",  # Non-interactive mode
+                    "--output-format",
+                    "json",
                     "--model",
                     self.model,
-                    "--prompt-file",
-                    str(prompt_file),
-                    "--output",
-                    "json",
-                ]
+                    request.prompt,  # Positional argument
+                ],
+                capture_output=True,
+                text=True,
+                timeout=self.timeout,
+                check=False,  # Don't raise on non-zero exit
+                cwd=self.workspace_root,  # Workspace context via working directory
+            )
 
-                # Add workspace context if available
-                if self.workspace_root != ".":
-                    cmd.extend(["--workspace", str(self.workspace_root)])
-
-                result = subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=self.timeout,
-                    check=False,  # Don't raise on non-zero exit
-                    cwd=self.workspace_root,  # Run in workspace directory
+            # Check for errors
+            if result.returncode != 0:
+                error_msg = result.stderr.strip() or "Unknown error"
+                raise ClaudeCodeError(
+                    f"Claude Code CLI failed with exit code {result.returncode}: {error_msg}"
                 )
 
-                # Check for errors
-                if result.returncode != 0:
-                    error_msg = result.stderr.strip() or "Unknown error"
-                    raise ClaudeCodeError(
-                        f"Claude Code CLI failed with exit code {result.returncode}: {error_msg}"
-                    )
+            # Parse JSON response
+            try:
+                response_data = json.loads(result.stdout)
+            except json.JSONDecodeError as exc:
+                raise ClaudeCodeError(
+                    f"Failed to parse Claude Code JSON response: {exc}"
+                ) from exc
 
-                # Parse JSON response
-                try:
-                    response_data = json.loads(result.stdout)
-                except json.JSONDecodeError as exc:
-                    raise ClaudeCodeError(
-                        f"Failed to parse Claude Code JSON response: {exc}"
-                    ) from exc
-
-                # Normalize response
-                return self._normalize_response(response_data)
-
-            finally:
-                # Clean up temporary file
-                prompt_file.unlink(missing_ok=True)
+            # Normalize response
+            return self._normalize_response(response_data)
 
         except subprocess.TimeoutExpired as exc:
             raise ClaudeCodeError(
@@ -127,26 +109,26 @@ class ClaudeCodeAdapter(AssistantAdapter):
         """
         Normalize Claude Code CLI response to AssistantResponse format.
 
-        Expected JSON structure:
+        Actual JSON structure from claude --print --output-format json:
         {
-            "content": "...",
-            "concluded": false,
-            "metadata": {
-                "files_modified": [...],
-                "commands_executed": [...],
-                ...
-            }
+            "type": "result",
+            "subtype": "success",
+            "result": "The actual response text...",
+            "session_id": "...",
+            "usage": {...},
+            ...
         }
 
         Falls back to extracting content from various common fields.
         """
-        # Primary extraction
-        content = data.get("content")
+        # Primary extraction from Claude Code's actual output format
+        content = data.get("result")  # Claude Code uses "result" field
 
         # Fallback extraction for common response formats
         if not content:
             content = (
-                data.get("text")
+                data.get("content")
+                or data.get("text")
                 or data.get("response")
                 or data.get("output")
                 or data.get("message")

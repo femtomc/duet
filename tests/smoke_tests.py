@@ -110,10 +110,12 @@ def test_codex_cli_exists():
 
 def test_codex_simple_request():
     """Test Codex adapter with a simple request."""
-    adapter = CodexAdapter(model="gpt-4", timeout=60)
+    # Note: Model availability depends on Codex configuration
+    # Check ~/.codex/config.toml for available models
+    adapter = CodexAdapter(model="o3-mini", timeout=60)
     request = AssistantRequest(
         role="planner",
-        prompt="Respond with a JSON object containing: {\"content\": \"Hello\", \"concluded\": false}",
+        prompt="Say hello and confirm you received this message.",
         context={},
     )
 
@@ -124,18 +126,16 @@ def test_codex_simple_request():
         return bool(response.content)
     except CodexError as exc:
         print(f"  Codex error: {exc}")
+        print(f"  NOTE: This may fail if model not available in your Codex config")
         return False
 
 
 def test_codex_json_parsing():
     """Test that Codex response is parsed correctly."""
-    adapter = CodexAdapter(model="gpt-4", timeout=60)
+    adapter = CodexAdapter(model="o3-mini", timeout=60)
     request = AssistantRequest(
         role="planner",
-        prompt=(
-            "Respond with JSON containing:\n"
-            '{"content": "Test response", "concluded": true, "metadata": {"test": "value"}}'
-        ),
+        prompt="Create a brief implementation plan for adding a new feature.",
         context={},
     )
 
@@ -146,7 +146,8 @@ def test_codex_json_parsing():
         print(f"  Metadata keys: {list(response.metadata.keys())}")
         return True
     except CodexError as exc:
-        print(f"  JSON parsing failed: {exc}")
+        print(f"  Response parsing failed: {exc}")
+        print(f"  NOTE: This may fail if model not available in your Codex config")
         return False
 
 
@@ -195,11 +196,11 @@ def test_claude_simple_request():
     """Test Claude Code adapter with a simple request."""
     with tempfile.TemporaryDirectory() as tmpdir:
         adapter = ClaudeCodeAdapter(
-            model="claude-sonnet-4", timeout=90, workspace_root=tmpdir
+            model="sonnet", timeout=90, workspace_root=tmpdir
         )
         request = AssistantRequest(
             role="implementer",
-            prompt="Respond with a JSON object containing: {\"content\": \"Implementation complete\", \"concluded\": false}",
+            prompt="Say hello and confirm you received this message.",
             context={},
         )
 
@@ -220,11 +221,11 @@ def test_claude_workspace_context():
         (workspace / "test_file.txt").write_text("test content")
 
         adapter = ClaudeCodeAdapter(
-            model="claude-sonnet-4", timeout=90, workspace_root=str(workspace)
+            model="sonnet", timeout=90, workspace_root=str(workspace)
         )
         request = AssistantRequest(
             role="implementer",
-            prompt="List the files in the current workspace and respond with JSON.",
+            prompt="List the files in the current directory.",
             context={},
         )
 
@@ -242,14 +243,11 @@ def test_claude_json_parsing():
     """Test that Claude response is parsed correctly."""
     with tempfile.TemporaryDirectory() as tmpdir:
         adapter = ClaudeCodeAdapter(
-            model="claude-sonnet-4", timeout=90, workspace_root=tmpdir
+            model="sonnet", timeout=90, workspace_root=tmpdir
         )
         request = AssistantRequest(
             role="implementer",
-            prompt=(
-                "Respond with JSON containing:\n"
-                '{"content": "Test implementation", "files_modified": ["file.py"]}'
-            ),
+            prompt="Respond with a one-sentence summary of what you can do.",
             context={},
         )
 
@@ -259,7 +257,7 @@ def test_claude_json_parsing():
             print(f"  Metadata keys: {list(response.metadata.keys())}")
             return True
         except ClaudeCodeError as exc:
-            print(f"  JSON parsing failed: {exc}")
+            print(f"  Response parsing failed: {exc}")
             return False
 
 
