@@ -28,19 +28,20 @@ This roadmap tracks major milestones for Duet. Items marked as complete are alre
 - Introduce SQLite-backed persistence (`.duet/duet.db`) alongside existing JSON artifacts.
 - Track runs, iterations, artifacts, and decisions for queryable history.
 - Expose CLI helpers (`duet history`, `duet inspect`) powered by the database.
-- Provide migration utilities (`duet migrate`) for existing JSON-only runs.
+- Provide migration utilities (`duet migrate`) for backfilling existing JSON-only runs.
 
 ## Sprint 6 – Streaming Infrastructure and Observability *(Complete)*
 - **Streaming Adapters**: Replace blocking `subprocess.run` with `subprocess.Popen` for real-time JSONL parsing.
 - **Timeout Protection**: Background thread + queue polling ensures hung CLIs are terminated after configured timeout.
-- **Event Persistence**: New `events` table in SQLite (schema v2) with migration support.
+- **Event Persistence**: New `events` table in SQLite for capturing all streaming events.
 - **Rich Live Display**: Real-time streaming console output during runs (4fps refresh, transient panels).
 - **Quiet Mode**: `--quiet` flag and `logging.quiet` config to disable live display (events still persisted).
 - **CLI Enhancements**:
   - `duet history`: Advanced filtering (--phase, --verdict, --since, --until, --contains, --format json)
   - `duet inspect`: Event timeline display (--show-events, --output json)
-- **Tests**: 86 passing tests including streaming adapter unit tests and integration tests for event persistence.
+- **Tests**: 85 passing tests including streaming adapter unit tests and integration tests for event persistence.
 - **Documentation**: Updated README and Adapter Guide with streaming API, event types, and usage examples.
+- **Simplified Schema**: Removed versioning and migration complexity (we're the only users).
 
 ## Sprint 7 – Hardening and Advanced Resume (Planned)
 - Implement resumable runs via the database.
