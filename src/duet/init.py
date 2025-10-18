@@ -77,8 +77,8 @@ class DuetInitializer:
         # Generate configuration
         self._create_config()
 
-        # Create prompt templates
-        self._create_prompt_templates()
+        # Create workflow definition (Sprint 9: DSL-based)
+        self._create_workflow_definition()
 
         # Create scaffold files
         self._create_scaffold_files()
@@ -94,15 +94,15 @@ class DuetInitializer:
         self.console.print()
         self.console.print("[bold]Next steps:[/]")
         self.console.print("  1. Review configuration: cat .duet/duet.yaml")
-        self.console.print("  2. Customize prompts in: .duet/prompts/")
+        self.console.print("  2. Customize workflow: edit .duet/ide.py (Sprint 9 DSL)")
         self.console.print("  3. Run orchestration: uv run duet run")
+        self.console.print("  4. Or run phase-by-phase: uv run duet next")
         self.console.print()
 
     def _create_directories(self) -> None:
         """Create .duet directory structure."""
         directories = [
             self.config_path,
-            self.config_path / "prompts",
             self.config_path / "runs",
             self.config_path / "logs",
             self.config_path / "context",
@@ -120,11 +120,21 @@ This directory contains Duet orchestration artifacts and configuration.
 ## Structure
 
 - **duet.yaml**: Configuration file (models, workflow, guardrails)
-- **prompts/**: Prompt templates for PLAN, IMPLEMENT, REVIEW phases
+- **ide.py**: Workflow definition using Python DSL (Sprint 9)
 - **runs/**: Orchestration run artifacts (checkpoints, iterations, summaries)
 - **logs/**: Structured JSONL event logs
 - **context/**: Repository context and discovery outputs
-- **duet.db**: (Future) SQLite database for run metadata
+- **duet.db**: SQLite database for run metadata and state checkpoints
+
+## Workflow Customization (Sprint 9)
+
+Edit `ide.py` to customize your workflow:
+- Define agents (Codex, Claude Code, custom adapters)
+- Declare channels for message passing
+- Configure phases with consumes/publishes patterns
+- Set transition guards and priorities
+
+See `docs/workflow_dsl.md` for DSL reference.
 
 ## Usage
 
@@ -133,14 +143,16 @@ Start an orchestration run:
 uv run duet run
 ```
 
+Stateful workflow (phase-by-phase):
+```bash
+uv run duet next
+uv run duet next "provide feedback"
+uv run duet cont <run-id>
+```
+
 Check run status:
 ```bash
 uv run duet status <run-id>
-```
-
-View run summary:
-```bash
-uv run duet summary <run-id>
 ```
 
 ## Documentation
@@ -207,158 +219,103 @@ logging:
         config_file.write_text(config_content, encoding="utf-8")
         self.console.log(f"[green]Created:[/] {self._display_path(config_file)}")
 
-    def _create_prompt_templates(self) -> None:
-        """Create prompt template files."""
-        prompts_dir = self.config_path / "prompts"
+    def _create_workflow_definition(self) -> None:
+        """Create workflow definition using Python DSL (Sprint 9)."""
+        # Read template from package
+        from importlib import resources
 
-        # PLAN prompt
-        plan_prompt = """# Plan Phase Prompt Template
+        try:
+            # Try to read template from package resources
+            import duet.templates
+            template_path = Path(duet.templates.__file__).parent / "ide.py.template"
 
-**Role**: Planner (Codex)
+            if template_path.exists():
+                template_content = template_path.read_text(encoding="utf-8")
+            else:
+                # Fallback: inline template if package resource missing
+                template_content = self._get_inline_workflow_template()
+        except Exception:
+            # Fallback: inline template
+            template_content = self._get_inline_workflow_template()
 
-**Objective**: Draft an implementation plan for the next increment.
+        # Write ide.py
+        workflow_file = self.config_path / "ide.py"
+        workflow_file.write_text(template_content, encoding="utf-8")
+        self.console.log(f"[green]Created:[/] {self._display_path(workflow_file)}")
 
-## Instructions
+        # Validate that generated workflow loads correctly
+        try:
+            from .workflow_loader import load_workflow
+            graph = load_workflow(workflow_path=workflow_file)
+            self.console.log(f"[dim]Validated workflow:[/] {len(graph.phases)} phases, {len(graph.agents)} agents")
+        except Exception as exc:
+            self.console.log(f"[yellow]Warning: Generated workflow validation failed: {exc}[/]")
 
-1. Review the task requirements and any prior review feedback
-2. Break down the implementation into concrete steps
-3. Identify files that need to be modified
-4. Note any potential risks or dependencies
-5. Provide a clear, actionable plan for the implementer
+    def _get_inline_workflow_template(self) -> str:
+        """Fallback inline workflow template if package resource missing."""
+        return '''"""
+Duet Workflow Definition (Sprint 9 DSL).
 
-## Output Format
+This file defines the orchestration workflow for your project using Duet's
+Python DSL. Customize agents, channels, phases, and transitions to fit your
+development process.
 
-Provide a structured plan with:
-- **Overview**: High-level summary of changes
-- **Steps**: Numbered list of implementation tasks
-- **Files**: List of files to modify/create
-- **Risks**: Potential issues or dependencies
-- **Testing**: How to verify the implementation
-
----
-
-**Current Template** (used if this file is consumed in future versions):
-{prompt_from_orchestrator}
-
----
-
-<!-- Edit this template to customize planning prompts -->
+Documentation: See docs/workflow_dsl.md for detailed DSL reference.
 """
 
-        # IMPLEMENT prompt
-        implement_prompt = """# Implement Phase Prompt Template
+from duet.dsl import Agent, Channel, Phase, Transition, When, Workflow
 
-**Role**: Implementer (Claude Code)
-
-**Objective**: Apply the plan to the repository and commit changes.
-
-## Instructions
-
-1. Follow the implementation plan carefully
-2. Modify/create files as specified
-3. Write clean, well-documented code
-4. Run tests to verify functionality
-5. Create clear commit messages
-6. Ensure all changes are committed
-
-## Guidelines
-
-- **Code Quality**: Follow repository conventions and style
-- **Testing**: Run existing tests, add new tests if needed
-- **Git**: Stage and commit all changes with descriptive messages
-- **Documentation**: Update docs if interface changes
-
-## Output Format
-
-Provide:
-- **Summary**: What was implemented
-- **Files Modified**: List of changed files
-- **Commits**: Commit SHAs created
-- **Tests**: Test results (pass/fail)
-- **Notes**: Any issues or deviations from plan
-
----
-
-**Current Template** (used if this file is consumed in future versions):
-{prompt_from_orchestrator}
-
----
-
-<!-- Edit this template to customize implementation prompts -->
-"""
-
-        # REVIEW prompt
-        review_prompt = """# Review Phase Prompt Template
-
-**Role**: Reviewer (Codex)
-
-**Objective**: Review implementation and provide structured verdict.
-
-## Instructions
-
-1. Compare implementation against the original plan
-2. Review code quality, correctness, and completeness
-3. Check that tests pass and coverage is adequate
-4. Verify commit messages are clear
-5. Provide actionable feedback if changes needed
-
-## Review Criteria
-
-- **Correctness**: Does the implementation match the plan?
-- **Quality**: Is the code well-structured and documented?
-- **Testing**: Are tests comprehensive and passing?
-- **Completeness**: Are all requirements addressed?
-- **Safety**: Any security or reliability concerns?
-
-## Verdict Options
-
-Provide one of:
-
-- **APPROVE**: Implementation is acceptable, ready to merge
-  - Use when all criteria met
-  - Set in metadata: `{{"verdict": "approve"}}`
-
-- **CHANGES_REQUESTED**: Revisions needed, loop back to planning
-  - Use for minor issues or missing requirements
-  - Provide specific feedback for next iteration
-  - Set in metadata: `{{"verdict": "changes_requested"}}`
-
-- **BLOCKED**: Critical issues requiring human intervention
-  - Use for major problems or unclear requirements
-  - Explain why human review is needed
-  - Set in metadata: `{{"verdict": "blocked"}}`
-
-## Output Format
-
-Provide:
-- **Summary**: Overall assessment
-- **Verdict**: APPROVE | CHANGES_REQUESTED | BLOCKED
-- **Strengths**: What was done well
-- **Issues**: Problems found (if any)
-- **Recommendations**: Specific changes needed (if CHANGES_REQUESTED)
-
-Include verdict in response metadata as: `{{"verdict": "approve"}}` (or changes_requested/blocked)
-
----
-
-**Current Template** (used if this file is consumed in future versions):
-{prompt_from_orchestrator}
-
----
-
-<!-- Edit this template to customize review prompts -->
-"""
-
-        templates = {
-            "plan.md": plan_prompt,
-            "implement.md": implement_prompt,
-            "review.md": review_prompt,
-        }
-
-        for filename, content in templates.items():
-            template_path = prompts_dir / filename
-            template_path.write_text(content, encoding="utf-8")
-            self.console.log(f"[green]Created:[/] {self._display_path(template_path)}")
+workflow = Workflow(
+    agents=[
+        Agent(name="planner", provider="codex", model="gpt-5-codex", timeout=300),
+        Agent(name="implementer", provider="claude", model="sonnet", timeout=600),
+        Agent(name="reviewer", provider="codex", model="gpt-5-codex"),
+    ],
+    channels=[
+        Channel(name="task", description="Input task specification", schema="text"),
+        Channel(name="plan", description="Implementation plan", schema="text"),
+        Channel(name="code", description="Implementation artifacts", schema="git_diff"),
+        Channel(name="verdict", description="Review outcome", schema="verdict"),
+        Channel(name="feedback", description="Review feedback", schema="text"),
+    ],
+    phases=[
+        Phase(
+            name="plan",
+            agent="planner",
+            consumes=["task", "feedback"],
+            publishes=["plan"],
+            description="Draft implementation plan",
+        ),
+        Phase(
+            name="implement",
+            agent="implementer",
+            consumes=["plan"],
+            publishes=["code"],
+            description="Execute plan and make changes",
+        ),
+        Phase(
+            name="review",
+            agent="reviewer",
+            consumes=["plan", "code"],
+            publishes=["verdict", "feedback"],
+            description="Review implementation",
+        ),
+        Phase(name="done", agent="reviewer", description="Complete", is_terminal=True),
+        Phase(name="blocked", agent="reviewer", description="Blocked", is_terminal=True),
+    ],
+    transitions=[
+        Transition(from_phase="plan", to_phase="implement"),
+        Transition(from_phase="implement", to_phase="review"),
+        Transition(from_phase="review", to_phase="done",
+                   when=When.channel_has("verdict", "approve"), priority=10),
+        Transition(from_phase="review", to_phase="plan",
+                   when=When.channel_has("verdict", "changes_requested"), priority=5),
+        Transition(from_phase="review", to_phase="blocked",
+                   when=When.channel_has("verdict", "blocked"), priority=15),
+    ],
+    initial_phase="plan",
+)
+'''
 
     def _create_scaffold_files(self) -> None:
         """Create .gitkeep files and placeholder database."""

@@ -39,7 +39,16 @@ def init(
         "sonnet", "--model-claude", help="Claude Code model for implementation"
     ),
 ) -> None:
-    """Initialize a new Duet workspace with configuration and scaffolding."""
+    """
+    Initialize a new Duet workspace with configuration and workflow definition.
+
+    Creates .duet/ directory with:
+    - duet.yaml: Configuration (models, guardrails, logging)
+    - ide.py: Workflow definition using Python DSL (Sprint 9)
+    - context/: Repository discovery outputs
+    - runs/, logs/: Artifact directories
+    - duet.db: SQLite database for state management
+    """
     try:
         initializer = DuetInitializer(
             workspace_root=workspace,
