@@ -78,6 +78,10 @@ class LoggingConfig(BaseModel):
     quiet: bool = Field(
         False, description="Disable streaming console output during runs (Sprint 6)"
     )
+    stream_mode: str = Field(
+        "detailed",
+        description="Streaming display mode: detailed | compact | off (Sprint 7)",
+    )
 
     @validator("jsonl_dir")
     def _expand_path(cls, value: Path) -> Path:

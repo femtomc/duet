@@ -193,6 +193,7 @@ logging:
   enable_jsonl: true
   jsonl_dir: "{self.config_path / 'logs'}"
   quiet: false  # Set to true to disable live streaming output (Sprint 6)
+  stream_mode: "detailed"  # Display mode: detailed | compact | off (Sprint 7)
 
 # ────────────────────────────────────────────────────────────────────────────
 # Tips:

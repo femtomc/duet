@@ -64,6 +64,9 @@ def run(
     quiet: bool = typer.Option(
         False, "--quiet", "-q", help="Disable streaming console output (Sprint 6)."
     ),
+    stream_mode: Optional[str] = typer.Option(
+        None, "--stream-mode", help="Streaming display mode: detailed | compact | off (Sprint 7)."
+    ),
 ) -> None:
     """Execute the duet orchestration loop."""
     duet_config = find_config(config)
@@ -71,6 +74,11 @@ def run(
     # Override quiet mode if CLI flag provided
     if quiet:
         duet_config.logging.quiet = True
+        duet_config.logging.stream_mode = "off"
+
+    # Override stream_mode if CLI flag provided
+    if stream_mode:
+        duet_config.logging.stream_mode = stream_mode
 
     artifact_store = ArtifactStore(duet_config.storage.run_artifact_dir, console=console)
 
