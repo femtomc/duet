@@ -63,7 +63,7 @@ Duet orchestrates iterative software delivery by coordinating Codex for planning
 
 | Command | Description |
 |---------|-------------|
-| `duet next [--run-id ID] [--feedback TEXT]` | Execute the next phase for a stateful run (creates new run if no ID) |
+| `duet next [FEEDBACK] [--run-id ID]` | Execute next phase (auto-resumes most recent run, optional feedback) |
 | `duet cont RUN_ID [--max-phases N]` | Continue executing phases until done or blocked |
 | `duet back STATE_ID [--force]` | Restore git workspace and database to a previous state |
 
@@ -130,11 +130,14 @@ Each run maintains a series of **checkpoints** (states) that track:
    # Create new run and execute first phase
    duet next
 
-   # Continue existing run
-   duet next --run-id run-20251018-142030
+   # Auto-resume most recent run
+   duet next
 
-   # Provide feedback for the next phase
-   duet next --run-id run-20251018-142030 --feedback "Try variant B"
+   # Provide feedback (auto-resumes)
+   duet next "Try variant B"
+
+   # Target specific run with feedback
+   duet next "Fix error handling" --run-id run-20251018-142030
    ```
 
 2. **Auto-continue until completion or blocking**:

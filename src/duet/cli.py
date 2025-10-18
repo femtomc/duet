@@ -556,13 +556,21 @@ def migrate(
 
 @app.command()
 def next(
-    run_id: Optional[str] = typer.Option(None, "--run-id", help="Run ID to continue (creates new run if not provided)"),
-    feedback: Optional[str] = typer.Option(None, "--feedback", help="User feedback to include in the next phase"),
+    feedback: Optional[str] = typer.Argument(None, help="User feedback to include in the next phase"),
+    run_id: Optional[str] = typer.Option(None, "--run-id", help="Run ID to continue (auto-resumes most recent if not provided)"),
     config: Optional[Path] = typer.Option(None, "--config", "-c", help="Config file path."),
     quiet: bool = typer.Option(False, "--quiet", "-q", help="Disable streaming console output."),
     stream_mode: Optional[str] = typer.Option(None, "--stream-mode", help="Streaming display mode: detailed | compact | off."),
 ) -> None:
-    """Execute the next phase for a stateful run (Sprint 8)."""
+    """
+    Execute the next phase for a stateful run (Sprint 8).
+
+    Examples:
+        duet next                      # Auto-resume most recent run
+        duet next "try variant B"      # Provide feedback
+        duet next --run-id run-123     # Target specific run
+        duet next "fix errors" --run-id run-123
+    """
     duet_config = find_config(config)
 
     # Override quiet mode if CLI flag provided
@@ -590,6 +598,20 @@ def next(
 
     # Create orchestrator
     orchestrator = Orchestrator(duet_config, artifact_store, console=console, db=db)
+
+    # Auto-resume: If no run_id specified, find the most recent active run
+    if not run_id:
+        # Query for most recent run that's not done/blocked
+        recent_runs = db.search_runs(limit=10)
+        for run in recent_runs:
+            # Skip completed or blocked runs
+            if run["phase"] not in ("done", "blocked"):
+                # Check if it has an active state
+                active_state = db.get_active_state(run["run_id"])
+                if active_state and active_state["phase_status"] not in ("done", "blocked"):
+                    run_id = run["run_id"]
+                    console.print(f"[dim]Auto-resuming run: {run_id}[/]")
+                    break
 
     # Execute next phase
     try:

@@ -13,3 +13,4 @@ build/
 # Local run outputs
 runs/
 logs/
+.duet/

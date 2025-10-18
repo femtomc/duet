@@ -903,9 +903,12 @@ class Orchestrator:
                     # Create initial state
                     state_id = f"{run_id}-plan-ready"
                     baseline = None
+                    initial_metadata = None
                     if self.git.is_git_repo():
                         try:
-                            baseline = self.git.get_current_commit()
+                            baseline_info = self.git.create_state_baseline(state_id)
+                            baseline = baseline_info["commit"]
+                            initial_metadata = baseline_info
                         except GitError:
                             pass
 
@@ -915,6 +918,7 @@ class Orchestrator:
                         phase_status="plan-ready",
                         baseline_commit=baseline,
                         notes="Initial state",
+                        metadata=initial_metadata,
                     )
                     self.db.update_active_state(run_id, state_id)
                     active_state = self.db.get_state(state_id)
@@ -923,7 +927,13 @@ class Orchestrator:
                 run_id=run_id,
                 iteration=run["iteration"],
                 phase=Phase(run["phase"]),
-                metadata={"started_at": run["started_at"]},
+                metadata={
+                    "started_at": run["started_at"],
+                    "consecutive_replans": run.get("consecutive_replans", 0),
+                    "original_branch": run.get("original_branch"),
+                    "feature_branch": run.get("feature_branch"),
+                    "baseline_commit": run.get("baseline_commit"),
+                },
             )
         else:
             # Create new run
@@ -944,9 +954,12 @@ class Orchestrator:
             # Create initial state
             state_id = f"{run_id}-plan-ready"
             baseline = None
+            initial_metadata = None
             if self.git.is_git_repo():
                 try:
-                    baseline = self.git.get_current_commit()
+                    baseline_info = self.git.create_state_baseline(state_id)
+                    baseline = baseline_info["commit"]
+                    initial_metadata = baseline_info
                 except GitError:
                     pass
 
@@ -956,6 +969,7 @@ class Orchestrator:
                 phase_status="plan-ready",
                 baseline_commit=baseline,
                 notes="Initial state",
+                metadata=initial_metadata,
             )
             self.db.update_active_state(run_id, state_id)
             active_state = self.db.get_state(state_id)
@@ -1133,10 +1147,13 @@ class Orchestrator:
 
         # Create git baseline if needed
         baseline = active_state.get("baseline_commit")
+        state_metadata = None
         if self.git.is_git_repo():
             try:
                 baseline_info = self.git.create_state_baseline(new_state_id)
                 baseline = baseline_info["commit"]
+                # Store full baseline info (branch, state_branch, clean) for duet back
+                state_metadata = baseline_info
             except GitError as exc:
                 self.console.log(f"[yellow]Git baseline creation failed: {exc}[/]")
 
@@ -1149,12 +1166,21 @@ class Orchestrator:
             notes=decision.rationale,
             verdict=response.verdict.value if response.verdict else None,
             feedback=feedback,
+            metadata=state_metadata,  # Preserve branch info for restoration
         )
         self.db.update_active_state(run_id, new_state_id)
 
-        # Update run record
+        # Update run record and track consecutive replans
         snapshot.phase = decision.next_phase
         snapshot.iteration = snapshot.iteration
+
+        # Update consecutive_replans counter when REVIEW → PLAN
+        if current_phase == Phase.REVIEW and decision.next_phase == Phase.PLAN:
+            consecutive_replans = snapshot.metadata.get("consecutive_replans", 0) + 1
+            snapshot.metadata["consecutive_replans"] = consecutive_replans
+        elif decision.next_phase == Phase.DONE:
+            snapshot.metadata["consecutive_replans"] = 0
+
         self.db.update_run(snapshot)
 
         # ──── Determine Next Action ────
