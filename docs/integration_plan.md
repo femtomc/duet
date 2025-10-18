@@ -1,36 +1,43 @@
 # Integration Plan
 
-The current codebase ships with an `EchoAdapter` that mirrors prompts. Follow the milestones below to connect the orchestration runtime to real assistants.
+This roadmap tracks major milestones for Duet. Items marked as complete are already in the main branch; upcoming milestones are ordered by priority.
 
-## Milestone 1 – Local Validation
-- Configure `config/duet.yaml` to point both assistants to the `echo` adapter.
-- Run `duet run --config config/duet.yaml` and inspect artifacts under `runs/<run-id>/`.
-- Extend prompts in `Orchestrator._compose_request` to include repository-specific context (recent commits, TODO list, etc.).
+## Sprint 1 – Orchestrator Foundation *(Complete)*
+- Implement deterministic PLAN → IMPLEMENT → REVIEW loop.
+- Persist checkpoints, iterations, and summaries to disk.
+- Provide CLI commands (`run`, `status`, `summary`, `show-config`).
+- Add acceptance tests using the echo adapter.
 
-## Milestone 2 – Adapter API Integration
-- Implement `CodexAdapter` and `ClaudeAdapter` classes under `src/duet/adapters/`.
-- Reuse the locally authenticated CLI sessions for each assistant; optionally support environment-variable credentials when available.
-- Normalize API responses into `AssistantResponse`, populating `metadata` with raw outputs for debugging.
-- Ensure adapters surface error conditions explicitly (e.g., raise `AdapterError` on HTTP 4xx/5xx).
+## Sprint 2 – Adapter Integrations *(Complete)*
+- Implement Codex and Claude Code adapters against the local CLIs.
+- Normalize outputs into `AssistantResponse` with rich metadata.
+- Provide smoke tests and adapter documentation.
 
-## Milestone 3 – Workflow Policies
-- Replace `_decide_next_phase` heuristics with policy checks that:
-  - Confirm Claude produced commits (via git diff or structured response).
-  - Parse Codex review verdicts (`approve`, `changes_requested`, `blocked`).
-  - Optionally route to a human approver using notifications (Slack/email) when `requires_human_approval` is true.
-- Provide configuration knobs in `duet.yaml` for iteration limits, review thresholds, and merge behaviour.
+## Sprint 3 – Workflow Policies and Git Guardrails *(Complete)*
+- Support structured review verdicts (APPROVE / CHANGES_REQUESTED / BLOCKED).
+- Enforce git change detection and feature-branch isolation.
+- Introduce guardrail configuration (iteration caps, replan limits, phase runtime limits).
+- Add human approval workflow and JSONL logging.
 
-## Milestone 4 – Git Operations
-- Integrate a git library (e.g., `GitPython`) to manage branches per run.
-- Ensure Claude operates on a scratch branch and pushes commits for later review.
-- Record commit SHAs in the run artifacts and attach diffs to review prompts.
+## Sprint 4 – Workspace Bootstrap (`duet init`) *(Complete)*
+- Scaffold `.duet/` with configuration, prompt templates, context notes, logs, and run directories.
+- Generate editable prompt templates and repository context via Codex discovery.
+- Document the bootstrap workflow and add unit tests for initialization.
 
-## Milestone 5 – Observability and UX
-- Emit structured logs (JSONL) for ingestion into external dashboards.
-- Add a `status` command to list historical runs and their terminal states.
-- Consider building a lightweight TUI (Textual) or web dashboard for real-time monitoring.
+## Sprint 5 – Persistent History (Planned)
+- Introduce SQLite-backed persistence (`.duet/duet.db`) alongside existing JSON artifacts.
+- Track runs, iterations, artifacts, and decisions for queryable history.
+- Expose CLI helpers (`duet history`, `duet inspect`) powered by the database.
+- Provide migration utilities for existing JSON-only runs.
 
-## Milestone 6 – Production Hardening
-- Introduce resilience features: retry/backoff, timeouts, heartbeats, metrics.
-- Support pausing/resuming runs and migrating state to a persistent database (SQLite/Postgres).
-- Add automated tests covering state transitions, adapter failures, and config validation.
+## Sprint 6 – Observability and UX Enhancements (Planned)
+- Expand CLI ergonomics (filtered run listings, richer summaries).
+- Optional TUI or web status dashboard consuming the SQLite data.
+- Structured log export for external monitoring systems.
+
+## Sprint 7 – Hardening and Advanced Resume (Planned)
+- Implement resumable runs via the database.
+- Add retry/backoff policies, adapter timeouts, and health metrics.
+- Strengthen automated coverage for persistence, failure modes, and approval workflows.
+
+Future items (notifications, additional adapters, integration with external ticketing systems) can be scheduled once the persistence and observability milestones are complete.

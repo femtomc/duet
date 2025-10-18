@@ -1,193 +1,115 @@
 # Duet
 
-Workflow orchestrator that automates the collaboration between Codex (planning/review) and Claude Code (implementation).
+Duet orchestrates iterative software delivery by coordinating Codex for planning and review with Claude Code for implementation. It automates the plan → implement → review loop, enforces guardrails, and preserves artifacts for observability and audit.
 
-## Features
+## Requirements
 
-✅ **Implemented**:
-- Deterministic state machine (PLAN → IMPLEMENT → REVIEW → DONE/BLOCKED)
-- Pluggable adapter system (Echo, Codex, Claude Code)
-- CLI commands: `run`, `status`, `summary`, `show-config`
-- Structured artifact persistence with iteration tracking
-- Checkpoint-based resumability
-- Comprehensive logging (rich console + optional JSONL)
-- Extensive test coverage (unit + integration tests)
-- Cross-platform compatibility (Windows, macOS, Linux)
-
-✅ **Recent Additions**:
-- Codex and Claude Code CLI integrations (smoke tested)
-- Git operations and commit tracking
-- Workflow policies and approval routing
-- Review verdict parsing (APPROVE/CHANGES_REQUESTED/BLOCKED)
-- Guardrail enforcement (iterations, replans, runtime)
-- Feature branch isolation
-- JSONL streaming support (Codex)
+- Python 3.10 or newer
+- [uv](https://docs.astral.sh/uv/) for dependency management
+- Codex CLI (authenticated via `codex auth login`)
+- Claude Code CLI (authenticated via `claude auth login`)
+- Git repository for the target workspace
 
 ## Quick Start
 
-### Installation
-
-1. Install [uv](https://docs.astral.sh/uv/) and ensure Python 3.10+ is available
-2. Clone the repository:
-   ```bash
-   git clone https://github.com/femtomc/duet.git
-   cd duet
-   ```
-3. Sync dependencies:
+1. **Install dependencies**
    ```bash
    uv sync --group dev
    ```
 
-### Initialize Your Project Workspace
+2. **Bootstrap the workspace**
+   ```bash
+   uv run duet init
+   ```
+   This creates `.duet/` with configuration, prompt templates, context notes, and run/log directories. Use `--help` for additional options (custom models, skip discovery, alternate location).
 
-**Recommended: One-Command Setup**
+3. **Review generated files**
+   - `.duet/duet.yaml`: adapter configuration and workflow guardrails
+   - `.duet/prompts/*.md`: editable prompt templates for each phase
+   - `.duet/context/context.md`: repository overview generated during init
 
-Navigate to your project and initialize Duet:
-```bash
-cd /path/to/your/project
-uv run /path/to/duet/duet init
-```
+4. **Run smoke tests (recommended before production)**
+   ```bash
+   uv run python tests/smoke_tests.py --both
+   ```
 
-This automatically creates:
-- `.duet/` directory structure
-- `.duet/duet.yaml` with production-ready configuration
-- `.duet/prompts/` with editable templates (plan, implement, review)
-- `.duet/context/context.md` with Codex repository analysis
+5. **Start an orchestration run**
+   ```bash
+   uv run duet run --run-id feature-x
+   ```
 
-**Customization**:
-```bash
-# Review generated config
-cat .duet/duet.yaml
+## CLI Reference
 
-# Edit configuration (optional)
-vim .duet/duet.yaml
+| Command | Description |
+|---------|-------------|
+| `duet init` | Scaffold `.duet/` (config, prompts, context, logs, runs) |
+| `duet run [--config PATH] [--run-id ID]` | Execute the orchestration loop |
+| `duet status RUN_ID` | Inspect the latest checkpoint for a run |
+| `duet summary RUN_ID [--save]` | Display or persist a run summary |
+| `duet show-config [--config PATH]` | Pretty-print the resolved configuration |
 
-# Customize prompts (optional)
-vim .duet/prompts/review.md
+All commands accept `--config PATH` to point to an alternate `duet.yaml`. If omitted, the loader searches `.duet/duet.yaml`, `duet.yaml`, and `config/duet.yaml` in precedence order.
 
-# Review repository context
-cat .duet/context/context.md
-```
-
-**Init Options**:
-```bash
-uv run duet init --force                # Overwrite existing .duet/
-uv run duet init --skip-discovery       # Skip Codex analysis (offline mode)
-uv run duet init --model-codex gpt-4    # Customize Codex model
-uv run duet init --model-claude opus    # Customize Claude model
-```
-
-<details>
-<summary><strong>Alternative: Manual Configuration</strong></summary>
-
-If you prefer not to use `duet init`:
-
-```bash
-# Copy example config
-cp config/duet.example.yaml duet.yaml
-
-# Edit manually
-vim duet.yaml
-```
-
-Note: Manual setup does not create prompt templates or run context discovery.
-
-</details>
-
-### Usage
-
-**Run orchestration**:
-```bash
-uv run duet run [--config duet.yaml] [--run-id my-run]
-```
-
-**Check run status**:
-```bash
-uv run duet status <run-id>
-```
-
-**View run summary**:
-```bash
-uv run duet summary <run-id> [--save]
-```
-
-**Show configuration**:
-```bash
-uv run duet show-config
-```
-
-### Testing
-
-**Automated tests** (mocked, no real CLI required):
-```bash
-uv run pytest
-```
-
-**Manual acceptance test** (echo adapter):
-```bash
-uv run python tests/manual_test.py
-```
-
-**Smoke tests** (requires real CLIs - run before production):
-```bash
-# Test both Codex and Claude Code adapters
-uv run python tests/smoke_tests.py --both
-
-# Test individual adapters
-uv run python tests/smoke_tests.py --codex
-uv run python tests/smoke_tests.py --claude
-```
-
-See [Smoke Testing Guide](docs/smoke_testing.md) for details.
-
-## Architecture
+## .duet Directory Layout
 
 ```
-src/duet/
-├── adapters/          # Pluggable assistant adapters
-│   ├── base.py        # Abstract adapter interface & registry
-│   ├── echo.py        # Echo adapter (testing/development)
-│   ├── codex.py       # Codex adapter (planning/review)
-│   └── claude_code.py # Claude Code adapter (implementation)
-├── artifacts.py       # Artifact storage & persistence
-├── cli.py             # CLI commands (Typer)
-├── config.py          # Configuration models (Pydantic)
-├── logging.py         # Structured logging (rich + JSONL)
-├── models.py          # Domain models (Phase, Request, Response, etc.)
-└── orchestrator.py    # Core orchestration loop & state machine
+.duet/
+├── duet.yaml           # Adapter configuration and workflow guardrails
+├── prompts/            # Prompt templates for PLAN / IMPLEMENT / REVIEW
+├── context/            # Repository discovery notes
+├── runs/               # Run artifacts (checkpoints, iterations, summaries)
+├── logs/               # JSONL event stream (optional)
+└── duet.db             # Reserved for SQLite persistence (Sprint 5)
 ```
+
+Artifacts inside `runs/<run-id>/` include:
+- `checkpoint.json`: latest `RunSnapshot`
+- `iterations/iter-*.json`: structured record for each phase iteration
+- `interactions/*.json`: raw prompt/response exchanges
+- `summary.json`: aggregated run-level summary
+
+## Running and Monitoring
+
+1. Launch a run with `duet run`. The orchestrator:
+   - Creates or checks out a feature branch (`duet/<run-id>` by default)
+   - Alternates Codex (plan/review) and Claude Code (implement) phases
+   - Enforces guardrails (iteration limits, replan limits, git change detection)
+   - Writes artifacts to `.duet/runs/<run-id>/` and logs events via Rich/JSONL
+
+2. Inspect progress at any time:
+   ```bash
+   uv run duet status feature-x
+   uv run duet summary feature-x --save
+   ```
+
+3. If a run requires human intervention (e.g., guardrail breach or BLOCKED verdict), the orchestrator creates `.duet/runs/<run-id>/PENDING_APPROVAL`. Review artifacts, clear the flag, and resume with `duet run --run-id <run-id>`.
+
+## Testing and Validation
+
+- **Unit and integration tests**
+  ```bash
+  uv run pytest
+  ```
+- **Manual echo loop (offline acceptance)**
+  ```bash
+  uv run python tests/manual_test.py
+  ```
+- **Smoke tests (real CLIs)**
+  ```bash
+  uv run python tests/smoke_tests.py --codex
+  uv run python tests/smoke_tests.py --claude
+  ```
+  The smoke suite auto-selects supported Codex models (honoring `CODEX_SMOKE_MODEL` if set).
 
 ## Documentation
 
-- **[Adapter Guide](docs/adapter_guide.md)**: Configure and implement adapters
-- **[Orchestration Overview](docs/orchestration_overview.md)**: Architecture and design
-- **[Integration Plan](docs/integration_plan.md)**: Development roadmap
-
-## Adapters
-
-### Echo Adapter
-For testing and development without API calls. Mirrors prompts back.
-
-### Codex Adapter
-Invokes Codex CLI for planning and review tasks. Requires local authentication.
-
-### Claude Code Adapter
-Invokes Claude CLI for implementation tasks. Requires local authentication.
-
-See [Adapter Guide](docs/adapter_guide.md) for details.
-
-## Authentication
-
-The orchestrator uses **local CLI authentication**:
-- **Codex**: Authenticate via `codex auth login`
-- **Claude Code**: Authenticate via `claude auth login`
-- **Echo**: No authentication required (testing only)
-
-No API keys are stored in configuration files.
+- `docs/orchestration_overview.md`: architecture and workflow
+- `docs/adapter_guide.md`: adapter behavior and configuration
+- `docs/integration_plan.md`: milestone roadmap
+- `docs/smoke_testing.md`: manual validation procedures
 
 ## Project Status
 
-**Current Milestone**: Milestone 2 - Adapter API Integration
-**Next Milestone**: Milestone 3 - Workflow Policies & Approval Routing
-
-See [Integration Plan](docs/integration_plan.md) for the complete roadmap.
+- Core orchestration loop, guardrails, git integration, and adapter support are production-ready.
+- `duet init` automates workspace scaffolding (Sprint 4).
+- Upcoming work (Sprint 5) introduces SQLite-backed persistence and richer historical queries. See `docs/integration_plan.md` for details.

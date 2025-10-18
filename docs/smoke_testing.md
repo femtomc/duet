@@ -1,303 +1,72 @@
 # Smoke Testing Guide
 
-This guide covers end-to-end validation of Duet adapters against real Codex and Claude Code CLIs.
-
-## ⚠️ Important
-
-**All automated tests use mocked subprocess calls.** Before relying on Duet for production tasks, you must run manual smoke tests against the real CLIs to validate:
-
-1. CLI executables are found and accessible
-2. Prompt formatting is accepted by the CLIs
-3. JSON response parsing works correctly
-4. Error handling behaves as expected
-5. Timeout behavior is appropriate
-
----
+This guide describes how to validate Duet against the real Codex and Claude Code CLIs before running production orchestration loops. All automated tests in the repository use mocked subprocess calls, so smoke tests are the definitive check that the local CLIs, authentication, and adapters agree on I/O formats.
 
 ## Prerequisites
 
-### For Codex Tests
-
-1. **Install Codex CLI**:
-   ```bash
-   npm install -g codex-cli  # (or equivalent)
-   ```
-
-2. **Authenticate**:
+1. Install and authenticate the CLIs:
    ```bash
    codex auth login
-   ```
-
-3. **Verify**:
-   ```bash
-   codex --version
-   ```
-
-### For Claude Code Tests
-
-1. **Install Claude Code CLI** (follow official docs)
-
-2. **Authenticate**:
-   ```bash
    claude auth login
    ```
-
-3. **Verify**:
+2. Verify the binaries are on `PATH`:
    ```bash
+   codex --version
    claude --version
    ```
+3. Ensure the repository has been bootstrapped with `uv run duet init` so that `.duet/` exists.
 
----
-
-## Running Smoke Tests
-
-### Test Both Adapters (Recommended)
+## Running the Smoke Suite
 
 ```bash
-uv run python tests/smoke_tests.py --both
+uv run python tests/smoke_tests.py --both       # Codex and Claude
+uv run python tests/smoke_tests.py --codex      # Codex only
+uv run python tests/smoke_tests.py --claude     # Claude Code only
 ```
 
-### Test Codex Only
+The Codex tests try models in priority order:
+1. `CODEX_SMOKE_MODEL` (if set)
+2. `model` from `~/.codex/config.toml`
+3. Known fallbacks (`gpt-5-codex`, `o3-mini`)
 
-```bash
-uv run python tests/smoke_tests.py --codex
-```
+If a model is rejected with “Unsupported model”, the runner automatically advances to the next candidate.
 
-### Test Claude Code Only
+## Test Coverage
 
-```bash
-uv run python tests/smoke_tests.py --claude
-```
+### Codex
+- **CLI discovery** – confirms `codex` is available via `PATH`.
+- **Simple request** – executes `codex exec --json --model <candidate> "<prompt>"` and verifies that the adapter extracts the final `agent_message`.
+- **JSONL parsing** – checks that the adapter tolerates mixed event streams and records metadata (event types, token usage).
+- **Error handling** – uses an intentionally invalid model to ensure `CodexError` is raised.
 
----
-
-## What Gets Tested
-
-### Codex Adapter Tests
-
-1. **CLI Exists**
-   - Validates `codex` command is in PATH
-   - Runs `codex --version` to confirm installation
-   - **Expected**: Version output or success
-
-2. **Simple Request**
-   - Sends basic prompt requesting JSON response
-   - Validates response is received and non-empty
-   - **Expected**: Response with content
-
-3. **JSON Parsing**
-   - Sends prompt requesting specific JSON structure
-   - Validates adapter correctly parses response
-   - Checks `content`, `concluded`, and `metadata` fields
-   - **Expected**: Correctly parsed AssistantResponse
-
-4. **Error Handling**
-   - Attempts request with invalid model name
-   - Validates adapter raises `CodexError` (not crash)
-   - **Expected**: CodexError exception caught
-
-### Claude Code Adapter Tests
-
-1. **CLI Exists**
-   - Validates `claude` command is in PATH
-   - Runs `claude --version` to confirm installation
-   - **Expected**: Version output or success
-
-2. **Simple Request**
-   - Sends basic prompt in temporary workspace
-   - Validates response is received and non-empty
-   - **Expected**: Response with content
-
-3. **Workspace Context**
-   - Creates temporary workspace with test file
-   - Sends prompt about workspace contents
-   - Validates Claude receives workspace context
-   - **Expected**: Response acknowledges workspace files
-
-4. **JSON Parsing**
-   - Sends prompt requesting specific JSON structure
-   - Validates adapter correctly parses response
-   - Checks `content`, `files_modified`, and metadata
-   - **Expected**: Correctly parsed AssistantResponse
-
-5. **Error Handling**
-   - Attempts request with invalid model name
-   - Validates adapter raises `ClaudeCodeError` (not crash)
-   - **Expected**: ClaudeCodeError exception caught
-
----
+### Claude Code
+- **CLI discovery** – confirms `claude` is available via `PATH`.
+- **Simple request** – calls `claude --print --output-format json --model <model> "<prompt>"` and verifies the response.
+- **Workspace context** – ensures the adapter’s `cwd` propagation exposes temporary files to Claude.
+- **JSON parsing** – validates that metadata such as `files_modified` is captured.
+- **Error handling** – checks that invalid models raise `ClaudeCodeError`.
 
 ## Interpreting Results
 
-### ✓ All Tests Pass
+- **All tests pass** – Both adapters can reach their CLIs, parse responses, and handle errors. You can proceed to production orchestration runs.
+- **Specific failures** – Use the table below to diagnose:
 
-Adapters are validated and ready for production use. You can safely:
-- Use `provider: "codex"` in production configs
-- Use `provider: "claude-code"` in production configs
-- Run real orchestration loops with confidence
+| Symptom | Likely Cause | Remedy |
+|---------|--------------|--------|
+| `Codex CLI not found` | CLI not installed or not on `PATH` | Install or adjust environment |
+| `Authentication failed` | CLI session expired | Re-run `codex auth login` / `claude auth login` |
+| `Unsupported model` | Requested model unavailable | Set `CODEX_SMOKE_MODEL` or update config |
+| `Codex CLI timeout` | Network issues or long-running prompt | Increase adapter timeout or retry |
+| JSON decode error | CLI output format changed | Verify CLI flags and update adapter if necessary |
 
-### ✗ Some Tests Fail
+Failures leave detailed output in the console so you can inspect `stderr` or the prompt that was issued.
 
-**Common Failure Modes**:
+## Rerunning Discovery
 
-#### CLI Not Found
-```
-Codex CLI not found at: codex
-```
-
-**Fix**: Install CLI and ensure it's in PATH
-
-#### Authentication Error
-```
-Codex error: Authentication failed
-```
-
-**Fix**: Run authentication command (`codex auth login`)
-
-#### JSON Parsing Error
-```
-JSON parsing failed: Failed to parse Codex JSON response
-```
-
-**Possible Causes**:
-- CLI doesn't support `--output json` flag
-- CLI returns non-JSON format
-- Response structure differs from expected
-
-**Fix**: Check CLI documentation for correct flags and response format. May need to update adapter's CLI invocation or response normalization.
-
-#### Timeout
-```
-Codex error: Codex CLI timeout after 60 seconds
-```
-
-**Fix**: Increase timeout in adapter config or check network connectivity
-
----
-
-## Expected CLI Behavior
-
-### Codex CLI Expected Interface
+If you want to regenerate the `.duet/context/context.md` repository overview after the smoke suite, run:
 
 ```bash
-# Command format used by the adapter
-codex exec --model <model> "<prompt text>"
-
-# Output format
-Plain text (Codex currently returns unstructured text. The adapter wraps it in
-an AssistantResponse with standard fields.)
+uv run duet init --force
 ```
 
-> Tip: You can override the model used in smoke tests by setting
-> `CODEX_SMOKE_MODEL`. If the requested model is unavailable, the smoke tests
-> automatically fall back to the first model returned by `codex models list`
-> (defaulting to `o3-mini` if the CLI cannot provide a list).
-
-### Claude Code CLI Expected Interface
-
-```bash
-# Command format used by the adapter
-claude --print --output-format json --model <model> "<prompt text>"
-
-# Expected output format
-{
-  "type": "result",
-  "result": "Implementation summary...",
-  "metadata": { ... }
-}
-```
-
-**OR** with fallback content extraction (same as Codex) if `result` is missing.
-
----
-
-## Manual Validation Checklist
-
-After smoke tests pass, manually verify:
-
-- [ ] Codex CLI installed and authenticated
-- [ ] Claude Code CLI installed and authenticated
-- [ ] Codex adapter responds to simple prompts
-- [ ] Claude adapter responds in workspace context
-- [ ] JSON responses parse correctly
-- [ ] Error handling catches failures gracefully
-- [ ] Timeouts are reasonable for your network
-- [ ] Response content meets expectations
-- [ ] Metadata fields are populated
-- [ ] No unexpected crashes or hangs
-
----
-
-## Troubleshooting
-
-### "Git executable not found"
-
-Git change detection requires git to be installed. Install git or disable git validation during smoke tests.
-
-### "Permission denied"
-
-Check file permissions on:
-- Workspace directory
-- Temporary directories
-- CLI executables
-
-### "Model not found"
-
-Update model names in smoke tests to match available models:
-- Codex: `gpt-4`, `gpt-3.5-turbo`, etc.
-- Claude: `claude-sonnet-4`, `claude-opus-4`, etc.
-
-### Adapter Works But Orchestrator Fails
-
-If smoke tests pass but orchestration fails:
-1. Check workspace permissions
-2. Verify git repository is initialized
-3. Review orchestrator logs for specific errors
-4. Try running with `enable_jsonl: true` for detailed logs
-
----
-
-## Continuous Validation
-
-**Best Practice**: Run smoke tests after:
-- Upgrading Codex CLI
-- Upgrading Claude Code CLI
-- Changing API credentials
-- Deploying to new environment
-- Modifying adapter code
-
-**Command**:
-```bash
-# Quick check before production use
-uv run python tests/smoke_tests.py --both
-
-# Add to deployment scripts
-./deploy.sh && uv run python tests/smoke_tests.py --both || echo "Smoke tests failed!"
-```
-
----
-
-## Automated Testing vs Smoke Testing
-
-| Test Type | Purpose | When to Run | Requirements |
-|-----------|---------|-------------|--------------|
-| **Unit Tests** | Validate logic with mocks | Every commit | None (mocked) |
-| **Integration Tests** | Validate component interaction | Every commit | None (mocked) |
-| **Smoke Tests** | Validate real CLI behavior | Before production | Real CLIs + Auth |
-| **Acceptance Tests** | Validate full orchestration | Before releases | Echo adapter only |
-
-**All tests except smoke tests run in CI automatically.**
-**Smoke tests must be run manually with real API access.**
-
----
-
-## Next Steps
-
-Once smoke tests pass:
-1. Update configuration files with real provider names
-2. Run full orchestration with small test task
-3. Monitor artifacts and logs for unexpected behavior
-4. Gradually increase task complexity
-5. Establish error handling procedures
-
-**Remember**: Smoke tests validate CLI integration only. Full orchestration validation requires running real plan → implement → review loops with the echo adapter first, then with real adapters on non-critical tasks.
+This recreates the `.duet/` scaffolding (including prompts and config), so copy any custom edits first.

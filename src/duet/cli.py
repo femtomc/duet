@@ -11,7 +11,9 @@ from rich.console import Console
 from .artifacts import ArtifactStore
 from .config import DuetConfig, find_config
 from .init import DuetInitializer, InitError
+from .migrate import ArtifactMigrator
 from .orchestrator import Orchestrator
+from .persistence import DuetDatabase
 
 app = typer.Typer(help="Automate the Codex ↔ Claude workflow.")
 console = Console()
@@ -63,7 +65,15 @@ def run(
     """Execute the duet orchestration loop."""
     duet_config = find_config(config)
     artifact_store = ArtifactStore(duet_config.storage.run_artifact_dir, console=console)
-    orchestrator = Orchestrator(duet_config, artifact_store, console=console)
+
+    # Initialize database if .duet/duet.db exists
+    db = None
+    db_path = duet_config.storage.workspace_root / ".duet" / "duet.db"
+    if db_path.exists() and db_path.stat().st_size > 0:  # Non-empty DB file
+        db = DuetDatabase(db_path)
+        console.log("[dim]Using SQLite database for persistence[/]")
+
+    orchestrator = Orchestrator(duet_config, artifact_store, console=console, db=db)
     orchestrator.run(run_id=run_id)
 
 
@@ -127,6 +137,130 @@ def status(
 
 
 @app.command()
+def history(
+    phase: Optional[str] = typer.Option(None, help="Filter by phase (plan/implement/review/done/blocked)"),
+    limit: int = typer.Option(20, help="Maximum number of runs to display"),
+    config: Optional[Path] = typer.Option(None, "--config", "-c", help="Config file path."),
+) -> None:
+    """List recent orchestration runs."""
+    from rich.table import Table
+
+    duet_config = find_config(config)
+
+    # Try to use database if available
+    db_path = duet_config.storage.workspace_root / ".duet" / "duet.db"
+    if db_path.exists() and db_path.stat().st_size > 0:
+        db = DuetDatabase(db_path)
+        runs = db.list_runs(phase=phase, limit=limit)
+
+        if not runs:
+            console.print("[yellow]No runs found in database.[/]")
+            return
+
+        table = Table(title=f"Recent Runs (limit={limit})")
+        table.add_column("Run ID", style="cyan")
+        table.add_column("Phase", style="magenta")
+        table.add_column("Iteration", justify="right")
+        table.add_column("Started", style="dim")
+        table.add_column("Status", style="green")
+
+        for run in runs:
+            status_emoji = "✓" if run["phase"] == "done" else ("⚠" if run["phase"] == "blocked" else "→")
+            completed = "Done" if run["completed_at"] else "In Progress"
+
+            table.add_row(
+                run["run_id"],
+                run["phase"].upper(),
+                str(run["iteration"]),
+                run["started_at"][:19] if run["started_at"] else "N/A",
+                f"{status_emoji} {completed}",
+            )
+
+        console.print(table)
+        console.print(f"\n[dim]Showing {len(runs)} of {limit} runs[/]")
+    else:
+        console.print("[yellow]Database not found. Initialize with: uv run duet init[/]")
+        console.print("[dim]Or use: uv run duet summary <run-id> for filesystem-based history[/]")
+
+
+@app.command()
+def inspect(
+    run_id: str = typer.Argument(..., help="Run ID to inspect"),
+    config: Optional[Path] = typer.Option(None, "--config", "-c", help="Config file path."),
+) -> None:
+    """Display detailed per-iteration information for a run."""
+    from rich.panel import Panel
+    from rich.table import Table
+
+    duet_config = find_config(config)
+
+    # Try to use database
+    db_path = duet_config.storage.workspace_root / ".duet" / "duet.db"
+    if not db_path.exists() or db_path.stat().st_size == 0:
+        console.print("[yellow]Database not found. Use: uv run duet summary <run-id>[/]")
+        raise typer.Exit(1)
+
+    db = DuetDatabase(db_path)
+
+    # Get run info
+    run = db.get_run(run_id)
+    if not run:
+        console.print(f"[red]Run not found: {run_id}[/]")
+        raise typer.Exit(1)
+
+    # Display run overview
+    console.print(Panel(f"[bold cyan]Run: {run_id}[/]", expand=False))
+    console.print(f"[bold]Phase:[/] {run['phase'].upper()}")
+    console.print(f"[bold]Iterations:[/] {run['iteration']}")
+    console.print(f"[bold]Started:[/] {run['started_at']}")
+    console.print(f"[bold]Completed:[/] {run['completed_at'] or 'In Progress'}")
+    if run["notes"]:
+        console.print(f"[bold]Notes:[/] {run['notes']}")
+
+    # Display statistics
+    stats = db.get_run_statistics(run_id)
+    console.print(f"\n[bold]Statistics:[/]")
+    console.print(f"  Total Input Tokens: {stats['total_input_tokens']:,}")
+    console.print(f"  Total Output Tokens: {stats['total_output_tokens']:,}")
+    if stats["total_cached_tokens"] > 0:
+        console.print(f"  Cached Tokens: {stats['total_cached_tokens']:,}")
+
+    # Display iteration details
+    iterations = db.list_iterations(run_id)
+    if iterations:
+        console.print(f"\n[bold]Iterations:[/] {len(iterations)}")
+        table = Table()
+        table.add_column("Iter", justify="right")
+        table.add_column("Phase")
+        table.add_column("Verdict")
+        table.add_column("Git", justify="right")
+        table.add_column("Tokens", justify="right")
+
+        for iteration in iterations:
+            verdict = iteration.get("verdict") or "-"
+            git_info = (
+                f"{iteration['files_changed'] or 0}f"
+                if iteration.get("files_changed")
+                else "-"
+            )
+            tokens = (
+                f"{iteration['input_tokens'] or 0}/{iteration['output_tokens'] or 0}"
+                if iteration.get("input_tokens")
+                else "-"
+            )
+
+            table.add_row(
+                str(iteration["iteration"]),
+                iteration["phase"].upper(),
+                verdict[:20],
+                git_info,
+                tokens,
+            )
+
+        console.print(table)
+
+
+@app.command()
 def summary(
     run_id: str = typer.Argument(..., help="Run ID to generate summary for."),
     config: Optional[Path] = typer.Option(None, "--config", "-c", help="Config file path."),
@@ -181,3 +315,37 @@ def summary(
     if save:
         summary_path = artifact_store.save_run_summary(run_id)
         console.print(f"\n[green]Summary saved to:[/] {summary_path}")
+
+
+@app.command()
+def migrate(
+    config: Optional[Path] = typer.Option(None, "--config", "-c", help="Config file path."),
+    force: bool = typer.Option(False, "--force", help="Re-migrate runs that already exist in database"),
+) -> None:
+    """Migrate filesystem artifacts to SQLite database."""
+    duet_config = find_config(config)
+
+    # Check if database exists
+    db_path = duet_config.storage.workspace_root / ".duet" / "duet.db"
+    if not db_path.exists():
+        console.print("[red]Database not found. Initialize with: uv run duet init[/]")
+        raise typer.Exit(1)
+
+    if db_path.stat().st_size == 0:
+        console.print("[yellow]Database is empty (placeholder file). Initializing schema...[/]")
+        db = DuetDatabase(db_path)
+        console.print("[green]Schema initialized.[/]")
+    else:
+        db = DuetDatabase(db_path)
+
+    artifact_store = ArtifactStore(duet_config.storage.run_artifact_dir, console=console)
+    migrator = ArtifactMigrator(artifact_store, db, console=console)
+
+    console.print()
+    console.print("[cyan bold]Starting artifact migration to SQLite...[/]")
+    console.print()
+
+    migrator.migrate_all(force=force)
+
+    console.print()
+    console.print("[green]✓ Migration complete. Use 'duet history' to view runs.[/]")

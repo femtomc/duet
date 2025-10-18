@@ -30,56 +30,37 @@ codex:
 
 ### Codex Adapter (`codex`)
 
-**Purpose**: Planning and review using OpenAI Codex
-**Use Case**: Production planning and code review
+**Purpose**: Planning and review via the Codex CLI
 
-The Codex adapter invokes the Codex CLI for planning and review tasks.
+**Prerequisites**
+1. Install the Codex CLI.
+2. Authenticate: `codex auth login`.
+3. Verify the installation: `codex --version`.
 
-**Prerequisites**:
-1. Install the Codex CLI: `npm install -g codex-cli` (or equivalent)
-2. Authenticate: `codex auth login`
-3. Verify: `codex --version`
-
-**Configuration**:
+**Configuration**
 ```yaml
 codex:
   provider: "codex"
-  model: "gpt-4"
-  timeout: 300  # Optional: CLI timeout in seconds (default: 300)
+  model: "gpt-5-codex"
+  timeout: 300
 ```
 
-**CLI Invocation**:
+**CLI Invocation**
 ```bash
-codex exec --json --model <model> --ask-for-approval never --sandbox read-only "<prompt>"
+codex exec --json --model <model> "<prompt text>"
 ```
 
-**Response Format (JSONL Streaming)**:
+Codex streams JSONL events. The adapter reads each line, extracts the final `agent_message`, and records metadata such as token usage and the ordered list of event types. Invalid JSON lines are captured as synthetic `parse_error` events rather than terminating the run.
 
-Codex with `--json` outputs JSONL (JSON Lines) - one JSON object per line:
-```jsonl
-{"type":"session_start","session_id":"abc123"}
-{"type":"message","role":"user","content":"Create a plan"}
-{"type":"message","role":"assistant","content":"Here is the plan..."}
-{"type":"usage","input_tokens":10,"output_tokens":20}
-```
+**Metadata captured**
+- `stream_events`: number of JSONL lines processed
+- `event_types`: event types in order of arrival
+- `input_tokens`, `output_tokens`, `cached_input_tokens`: usage values (when provided)
+- `thread_id`: thread identifier emitted by Codex (when available)
 
-The adapter:
-1. Parses each line as a JSON object
-2. Extracts the final `assistant` message for content
-3. Collects metadata from all events (tokens, tool usage, session ID)
-4. Handles partial/invalid JSON lines gracefully (recorded as parse_error events)
-
-**Captured Metadata**:
-- `stream_events`: Total number of events
-- `event_types`: List of event types encountered
-- `input_tokens`, `output_tokens`: Token usage
-- `tool_calls`: List of tools used (if any)
-- `session_id`: Codex session identifier
-
-**Error Handling**:
-- `CodexError`: Raised on CLI failures, timeouts, empty streams, or missing assistant messages
-- Partial JSON lines don't fail the request (captured as parse_error events)
-- Errors are caught by the orchestrator and mark the run as `BLOCKED`
+**Error handling**
+- `CodexError` is raised on CLI exit codes, timeouts, empty streams, or missing assistant messages.
+- The orchestrator treats adapter errors as `BLOCKED` and persisting artifacts for inspection.
 
 ---
 
@@ -103,32 +84,16 @@ claude:
   timeout: 600  # Optional: CLI timeout in seconds (default: 600)
 ```
 
-**CLI Invocation**:
+**CLI Invocation**
 ```bash
-claude --model <model> --prompt-file <file> \
-       --workspace <path> --output json
+claude --print --output-format json --model <model> "<prompt text>"
 ```
 
-**Expected Response Format**:
-```json
-{
-  "content": "Implementation summary...",
-  "concluded": false,
-  "files_modified": ["src/main.py", "tests/test.py"],
-  "commands_executed": ["pytest", "git commit -m '...'"],
-  "commit_sha": "abc123",
-  "metadata": { ... }
-}
-```
+Claude Code returns a JSON object with the assistant response. The adapter maps fields such as `files_modified`, `commands_executed`, and `commit_sha` into the response metadata so later policies can validate repository changes.
 
-**Code-Specific Metadata**:
-- `files_modified`: List of modified file paths
-- `commands_executed`: List of shell commands run
-- `commit_sha`: Git commit SHA if changes were committed
-
-**Error Handling**:
-- `ClaudeCodeError`: Raised on CLI failures, timeouts, invalid JSON, or missing content
-- Errors are caught by the orchestrator and mark the run as `BLOCKED`
+**Error handling**
+- `ClaudeCodeError` is raised on CLI exit codes, timeouts, invalid JSON payloads, or missing `content`.
+- Adapter errors propagate to the orchestrator and block the run with descriptive notes.
 
 ---
 

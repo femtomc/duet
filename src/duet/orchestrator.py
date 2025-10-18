@@ -64,6 +64,7 @@ class Orchestrator:
         config: DuetConfig,
         artifact_store: ArtifactStore,
         console: Optional[Console] = None,
+        db: Optional[DuetDatabase] = None,
     ) -> None:
         self.config = config
         self.artifacts = artifact_store
@@ -91,6 +92,11 @@ class Orchestrator:
 
         # Initialize approval notifier
         self.approver = ApprovalNotifier(artifact_store, console=self.console)
+
+        # Initialize database (optional - may be None for filesystem-only mode)
+        self.db = db
+        if self.db:
+            self.console.log("[dim]Database persistence enabled[/]")
 
     def _build_adapter(self, assistant_cfg):
         """
@@ -136,6 +142,13 @@ class Orchestrator:
         )
         self.console.rule(f"Starting Duet run {snapshot.run_id}")
         self.artifacts.checkpoint(snapshot)
+
+        # ──── Database: Insert Run Record ────
+        if self.db:
+            try:
+                self.db.insert_run(snapshot)
+            except Exception as exc:
+                self.console.log(f"[yellow]DB write failed: {exc}[/]")
 
         # ──── Git Baseline Commit (for change detection) ────
         baseline_commit = None
@@ -355,6 +368,46 @@ class Orchestrator:
             # Keep legacy interactions for backward compatibility during transition
             self._persist_interaction(snapshot.run_id, current_phase, request, response)
 
+            # ──── Database: Insert Iteration Record ────
+            if self.db:
+                try:
+                    # Extract git metadata
+                    git_meta = response.metadata.get("git_changes", {})
+
+                    # Extract usage metadata
+                    usage_meta = {}
+                    if "input_tokens" in response.metadata:
+                        usage_meta["input_tokens"] = response.metadata["input_tokens"]
+                    if "output_tokens" in response.metadata:
+                        usage_meta["output_tokens"] = response.metadata["output_tokens"]
+                    if "cached_input_tokens" in response.metadata:
+                        usage_meta["cached_input_tokens"] = response.metadata["cached_input_tokens"]
+
+                    # Extract stream metadata
+                    stream_meta = {}
+                    if "stream_events" in response.metadata:
+                        stream_meta["stream_events"] = response.metadata["stream_events"]
+                    if "thread_id" in response.metadata:
+                        stream_meta["thread_id"] = response.metadata["thread_id"]
+
+                    self.db.insert_iteration(
+                        run_id=snapshot.run_id,
+                        iteration=iteration,
+                        phase=current_phase,
+                        prompt=request.prompt,
+                        response_content=response.content,
+                        verdict=response.verdict,
+                        concluded=response.concluded,
+                        next_phase=decision.next_phase,
+                        requires_human=decision.requires_human,
+                        decision_rationale=decision.rationale,
+                        git_metadata=git_meta if git_meta else None,
+                        usage_metadata=usage_meta if usage_meta else None,
+                        stream_metadata=stream_meta if stream_meta else None,
+                    )
+                except Exception as exc:
+                    self.console.log(f"[yellow]DB iteration write failed: {exc}[/]")
+
             # ──── Edge Case: Human Approval Required ────
             if decision.requires_human and self.config.workflow.require_human_approval:
                 snapshot.phase = Phase.BLOCKED
@@ -384,6 +437,13 @@ class Orchestrator:
 
         snapshot.metadata["completed_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
         self.artifacts.checkpoint(snapshot)
+
+        # ──── Database: Update Run with Final State ────
+        if self.db:
+            try:
+                self.db.update_run(snapshot)
+            except Exception as exc:
+                self.console.log(f"[yellow]DB final update failed: {exc}[/]")
 
         # ──── Git Branch Cleanup ────
         if (
