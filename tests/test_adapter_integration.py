@@ -17,8 +17,9 @@ import pytest
 from rich.console import Console
 
 from duet.artifacts import ArtifactStore
-from duet.config import AssistantConfig, DuetConfig, StorageConfig, WorkflowConfig
+from duet.config import AssistantConfig, DuetConfig, LoggingConfig, StorageConfig, WorkflowConfig
 from duet.orchestrator import Orchestrator
+from duet.persistence import DuetDatabase
 
 
 def mock_popen_jsonl(stdout_lines: list[str], returncode: int = 0):
@@ -227,6 +228,101 @@ def test_adapter_error_handling_in_orchestration(temp_workspace, temp_artifacts_
 
     assert snapshot.phase == Phase.BLOCKED
     assert "Adapter failure" in snapshot.notes or "error" in snapshot.notes.lower()
+
+
+def test_orchestrator_persists_streaming_events(temp_workspace, temp_artifacts_dir):
+    """Test that orchestrator persists streaming events to SQLite (Sprint 6)."""
+    config = DuetConfig(
+        codex=AssistantConfig(provider="codex", model="gpt-4"),
+        claude=AssistantConfig(provider="echo", model="echo-v1"),
+        workflow=WorkflowConfig(max_iterations=1, require_human_approval=False),
+        storage=StorageConfig(
+            workspace_root=temp_workspace, run_artifact_dir=temp_artifacts_dir
+        ),
+        logging=LoggingConfig(quiet=True),  # Disable Live display for testing
+    )
+
+    console = Console()
+    artifact_store = ArtifactStore(temp_artifacts_dir, console=console)
+
+    # Create in-memory database for testing
+    db = DuetDatabase(":memory:")
+
+    orchestrator = Orchestrator(config, artifact_store, console=console, db=db)
+
+    # Mock Codex streaming response
+    stdout_lines = [
+        json.dumps({"type": "thread.started", "thread_id": "test-events"}) + "\n",
+        json.dumps({"type": "item.completed", "item": {
+            "type": "agent_message",
+            "text": "Plan with streaming events"
+        }}) + "\n",
+        json.dumps({"type": "turn.completed", "usage": {"input_tokens": 50, "output_tokens": 100}}) + "\n",
+    ]
+    mock_process = mock_popen_jsonl(stdout_lines, returncode=0)
+
+    with patch("subprocess.Popen", return_value=mock_process):
+        snapshot = orchestrator.run(run_id="test-event-persistence")
+
+    # Verify events were persisted to database
+    events = db.list_events("test-event-persistence")
+    assert len(events) > 0, "No events were persisted to database"
+
+    # Verify event structure
+    first_event = events[0]
+    assert "event_type" in first_event
+    assert "payload" in first_event
+    assert "timestamp" in first_event
+    assert first_event["run_id"] == "test-event-persistence"
+
+    # Verify specific event types were captured
+    event_types = [e["event_type"] for e in events]
+    assert "thread.started" in event_types
+    assert "item.completed" in event_types
+    assert "turn.completed" in event_types
+
+    # Verify event count matches stream
+    assert db.count_events("test-event-persistence") == len(events)
+
+
+def test_orchestrator_quiet_mode_still_persists_events(temp_workspace, temp_artifacts_dir):
+    """Test that quiet mode disables display but still persists events (Sprint 6)."""
+    config = DuetConfig(
+        codex=AssistantConfig(provider="codex", model="gpt-4"),
+        claude=AssistantConfig(provider="echo", model="echo-v1"),
+        workflow=WorkflowConfig(max_iterations=1, require_human_approval=False),
+        storage=StorageConfig(
+            workspace_root=temp_workspace, run_artifact_dir=temp_artifacts_dir
+        ),
+        logging=LoggingConfig(quiet=True),  # Enable quiet mode
+    )
+
+    console = Console()
+    artifact_store = ArtifactStore(temp_artifacts_dir, console=console)
+    db = DuetDatabase(":memory:")
+
+    orchestrator = Orchestrator(config, artifact_store, console=console, db=db)
+
+    # Mock Codex response
+    stdout_lines = [
+        json.dumps({"type": "thread.started", "thread_id": "quiet-test"}) + "\n",
+        json.dumps({"type": "item.completed", "item": {
+            "type": "agent_message",
+            "text": "Quiet mode plan"
+        }}) + "\n",
+    ]
+    mock_process = mock_popen_jsonl(stdout_lines, returncode=0)
+
+    with patch("subprocess.Popen", return_value=mock_process):
+        snapshot = orchestrator.run(run_id="test-quiet-mode")
+
+    # Verify events were still persisted despite quiet mode
+    events = db.list_events("test-quiet-mode")
+    assert len(events) > 0, "Events should be persisted even in quiet mode"
+
+    # Verify run completed
+    assert snapshot.run_id == "test-quiet-mode"
+    assert snapshot.iteration >= 1
 
 
 if __name__ == "__main__":
