@@ -104,6 +104,20 @@ class Orchestrator:
         if self.db:
             self.console.log("[dim]Database persistence enabled[/]")
 
+        # Load workflow (Sprint 10: DSL-based execution)
+        self.workflow_graph = None
+        self.workflow_executor = None
+        try:
+            from .workflow_loader import load_workflow
+            self.workflow_graph = load_workflow(workspace_root=config.storage.workspace_root)
+
+            from .executor import WorkflowExecutor
+            self.workflow_executor = WorkflowExecutor(self.workflow_graph, console=self.console)
+            self.console.log(f"[dim]Loaded workflow:[/] {len(self.workflow_graph.phases)} phases")
+        except Exception as exc:
+            # Workflow loading optional for now (backward compatibility)
+            self.console.log(f"[dim]Workflow not loaded (using legacy mode): {exc}[/]")
+
     def _build_adapter(self, assistant_cfg):
         """
         Build an adapter from configuration.
@@ -189,6 +203,13 @@ class Orchestrator:
         )
         self.console.rule(f"Starting Duet run {snapshot.run_id}")
         self.artifacts.checkpoint(snapshot)
+
+        # ──── Seed Channels (Sprint 10) ────
+        if self.workflow_executor:
+            # Seed task channel from metadata or default
+            task_input = snapshot.metadata.get("task", "Implement the requested changes")
+            self.workflow_executor.seed_channel("task", task_input)
+            self.console.log(f"[dim]Seeded task channel[/]")
 
         # ──── Database: Insert Run Record ────
         if self.db:
@@ -336,6 +357,9 @@ class Orchestrator:
                         self.console.log(
                             f"[yellow]Unknown verdict in metadata: {verdict_str}[/]"
                         )
+
+            # ──── Update Channels (Sprint 10) ────
+            self._update_channels_from_response(current_phase, response)
 
             # ──── Edge Case: Empty Response ────
             if not response.content or not response.content.strip():
@@ -569,11 +593,36 @@ class Orchestrator:
         """
         Create the request payload based on the active phase.
 
+        Sprint 10: Uses WorkflowExecutor + PromptBuilder if workflow loaded,
+        falls back to legacy _compose_*_request methods otherwise.
+
         Each phase receives actionable inputs:
         - PLAN: Prior review feedback (if looping), iteration context, objectives
         - IMPLEMENT: Current plan, workspace path, repository context
         - REVIEW: Plan + implementation response, iteration history summary
         """
+        # Sprint 10: Use PromptBuilder if workflow executor available
+        if self.workflow_executor:
+            from .prompt_builder import PromptContext, get_builder
+
+            # Build prompt context from snapshot and channels
+            prompt_context = PromptContext(
+                run_id=snapshot.run_id,
+                iteration=snapshot.iteration,
+                phase=phase.value,
+                agent=self._get_agent_for_phase(phase),
+                max_iterations=self.max_iterations,
+                channel_payloads=self.workflow_executor.get_current_channels(),
+                consecutive_replans=snapshot.metadata.get("consecutive_replans", 0),
+                workspace_root=str(self.config.storage.workspace_root),
+                metadata=snapshot.metadata,
+            )
+
+            # Build request using phase-specific builder
+            builder = get_builder(phase.value)
+            return builder.build(prompt_context)
+
+        # Legacy mode: hardcoded prompts
         role_map = {
             Phase.PLAN: "planner",
             Phase.IMPLEMENT: "implementer",
@@ -603,6 +652,49 @@ class Orchestrator:
 
         context.update(phase_context)
         return AssistantRequest(role=role_map.get(phase, "system"), prompt=prompt, context=context)
+
+    def _get_agent_for_phase(self, phase: Phase) -> str:
+        """Get agent name for a phase (for workflow mode)."""
+        if phase in (Phase.PLAN, Phase.REVIEW):
+            return "planner"  # or "reviewer"
+        elif phase == Phase.IMPLEMENT:
+            return "implementer"
+        return "system"
+
+    def _update_channels_from_response(
+        self,
+        phase: Phase,
+        response: AssistantResponse,
+    ) -> None:
+        """
+        Update channel store with outputs from response (Sprint 10).
+
+        Maps response content and metadata to channels based on phase.
+
+        Args:
+            phase: Phase that was executed
+            response: Assistant response with content/metadata
+        """
+        if not self.workflow_executor:
+            return  # No channel store in legacy mode
+
+        # Map phase to published channels
+        if phase == Phase.PLAN:
+            self.workflow_executor.channel_store.set("plan", response.content)
+
+        elif phase == Phase.IMPLEMENT:
+            self.workflow_executor.channel_store.set("code", response.content)
+
+        elif phase == Phase.REVIEW:
+            # Extract verdict
+            if response.verdict:
+                self.workflow_executor.channel_store.set("verdict", response.verdict.value)
+            elif "verdict" in response.metadata:
+                self.workflow_executor.channel_store.set("verdict", response.metadata["verdict"])
+
+            # Extract feedback if present
+            if response.content and not response.concluded:
+                self.workflow_executor.channel_store.set("feedback", response.content)
 
     def _compose_plan_request(self, snapshot: RunSnapshot) -> tuple[str, dict]:
         """Compose request for PLAN phase with prior feedback if available."""
