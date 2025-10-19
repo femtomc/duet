@@ -402,6 +402,7 @@ class Phase(BaseElement):
     description: str = ""
     is_terminal: bool = False
     metadata: Dict[str, Any] = field(default_factory=dict)
+    tools: List[Any] = field(default_factory=list)  # List[Tool] - avoid circular import
 
     def __post_init__(self):
         if not self.name:
@@ -517,6 +518,23 @@ class Phase(BaseElement):
         if loop_to:
             metadata_update["replan_target"] = loop_to.name
         return self.with_metadata(**metadata_update)
+
+    # ──── Tool Attachment (Sprint DSL-2) ────
+
+    def with_tool(self, tool: Any) -> Phase:  # Type: Tool - avoid circular import
+        """
+        Attach a tool to this phase (fluent API).
+
+        Tools run at specified times (pre/post phase) and can read/write channels.
+
+        Args:
+            tool: Tool instance to attach
+
+        Returns a new Phase instance with tool added (copy-on-write).
+        """
+        from dataclasses import replace
+        new_tools = list(self.tools) + [tool]
+        return replace(self, tools=new_tools)
 
     # ──── Convenience Constructors (Sprint DSL-2) ────
 
