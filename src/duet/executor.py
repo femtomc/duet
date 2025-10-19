@@ -51,28 +51,36 @@ class GuardEvaluator:
 
     def build_guard_context(
         self,
-        channel_store: ChannelStore,
+        channel_store_or_dataspace,  # ChannelStore or Dataspace
         response: Optional[AssistantResponse] = None,
         git_changes: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Build context dictionary for guard evaluation.
 
-        Context includes:
-        - All channel payloads (by name)
-        - Response metadata (verdict, etc.)
-        - Git change information
-        - Additional runtime data
+        Queries dataspace for latest ChannelFacts to build context.
 
         Args:
-            channel_store: Current channel state
+            channel_store_or_dataspace: Dataspace for fact queries (or ChannelStore for compat)
             response: Assistant response (if available)
             git_changes: Git change metadata
 
         Returns:
-            Context dictionary for guard evaluation
+            Context dictionary for guard evaluation (channel_name -> value)
         """
-        context = dict(channel_store.get_all())
+        # Check if dataspace
+        if hasattr(channel_store_or_dataspace, 'query'):
+            # Query dataspace for all latest ChannelFacts
+            from .dataspace import ChannelFact, FactPattern
+
+            pattern = FactPattern(fact_type=ChannelFact)
+            facts = channel_store_or_dataspace.query(pattern, latest_only=True)
+
+            # Build context from facts
+            context = {fact.channel_name: fact.value for fact in facts}
+        else:
+            # Legacy ChannelStore (backward compat)
+            context = dict(channel_store_or_dataspace.get_all())
 
         # Add verdict from response if available
         if response:

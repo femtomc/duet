@@ -522,9 +522,9 @@ class Orchestrator:
             if not self.workflow_executor:
                 raise RuntimeError("Workflow executor required (ensure .duet/workflow.py exists)")
 
-            # Build guard context
+            # Build guard context from dataspace
             guard_context = self.workflow_executor.guard_evaluator.build_guard_context(
-                self.workflow_executor.channel_store,
+                self.dataspace,
                 response=response,
                 git_changes=response.metadata.get("git_changes"),
             )
@@ -1347,7 +1347,7 @@ class Orchestrator:
                 raise RuntimeError("Workflow executor required (ensure .duet/workflow.py exists)")
 
             guard_context = self.workflow_executor.guard_evaluator.build_guard_context(
-                self.workflow_executor.channel_store,
+                self.dataspace,
                 response=response,
                 git_changes=response.metadata.get("git_changes"),
             )
