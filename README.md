@@ -3,23 +3,24 @@
 
   # Duet
 
-  **Programmable agentic time machine for Codex ↔ Claude Code**
+  **Programmable agents with a time machine**
 </div>
 
-Duet coordinates planning, implementation, and review across Codex and Claude Code.  
-Workflows are defined in Python, executed phase‑by‑phase, and recorded in a durable message log so every channel, prompt, and verdict can be inspected or replayed.
+Duet is a programmable agentic orchestration tool -- it's a kind of swiss army watch for defining structured interactions with agents. Whereas agentic IDEs like Codex, Claude Code, Kiro bake in opinions about the _interaction model_ through which the user engages which their agents -- Duet is designed to be programmable: for instance, the "spec-driven development" interaction model from a system like Kiro is a Duet program.
 
----
+These interaction models take the form of _workflow programs_ (lightweightly embedded in Python) and are executed by an actor-based execution runtime. Duet's backend takes care of a bunch of other things that you'd probably find yourself wanting: the ability to jump backwards and forwards in the history of the workflow, the ability to query and inspect _everything_, etc.
+
+In short, it's a programmable agentic CLI IDE.
 
 ## Why Duet?
+
+Here's the AI gloss:
 
 - **Programmable workflows** – describe agents, channels, guards, and transitions in `.duet/workflow.py`.
 - **Channel-based messaging** – phases publish structured payloads (`task`, `plan`, `code`, `verdict`, `feedback`, …) instead of opaque text blobs.
 - **Stateful execution** – run the loop one phase at a time with `duet next`, rewind with `duet back`, or continue automatically.
 - **Persistent history** – every checkpoint, channel update, event, and verdict is stored in SQLite for replay and audit.
 - **Guardrails built-in** – git change detection, iteration limits, human approvals, baseline management, and more.
-
----
 
 ## Quick Start
 
@@ -49,8 +50,6 @@ uv run duet run            # automatic loop
 | `.duet/logs/` | JSONL event stream (if enabled) |
 | `.duet/duet.db` | SQLite database (runs, states, messages, events) |
 | `.duet/context/` | Repository discovery notes |
-
----
 
 ## Workflow at a Glance
 
@@ -91,8 +90,6 @@ Prompt builders receive channel payloads through a `PromptContext`, so the gener
 
 Learn more in [`docs/workflow_dsl.md`](docs/workflow_dsl.md).
 
----
-
 ## Channel History & Replay
 
 Every channel update is persisted to the `messages` table with timestamps and metadata.  
@@ -103,8 +100,6 @@ This powers:
 - `duet back STATE_ID` – restores git baseline **and** channel snapshot so phases resume with identical context.
 
 Message persistence makes the workspace replayable, auditable, and ready for analytics or streaming UIs.
-
----
 
 ## CLI Highlights
 
@@ -122,8 +117,6 @@ Message persistence makes the workspace replayable, auditable, and ready for ana
 
 All commands accept `--config PATH` to point at a specific `duet.yaml`.
 
----
-
 ## Requirements
 
 - Python 3.10+
@@ -132,15 +125,8 @@ All commands accept `--config PATH` to point at a specific `duet.yaml`.
 - Claude Code CLI (`claude auth login`)
 - Git repository for the workspace
 
----
-
 ## Documentation & Planning
 
 - Workflow DSL reference: [`docs/workflow_dsl.md`](docs/workflow_dsl.md)
 - Current roadmap & sprint notes: [`docs/sprint_planning.md`](docs/sprint_planning.md)
 - Message persistence overview: (coming soon) additional CLI docs and examples
-
----
-
-Duet is evolving rapidly—feedback and contributions are welcome.  
-File an issue or open a PR to help shape the future of programmable AI workflows.
