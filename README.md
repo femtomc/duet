@@ -3,7 +3,7 @@
 
   # Duet
 
-  **Programmable agents in a time machine**
+  **Programmable conversations in a time machine**
 </div>
 
 Duet is a programmable agentic orchestration system. What does that even mean? Here's a likely even more unsatisfying description: a swiss army watch for defining and executing structured interactions with agents.
