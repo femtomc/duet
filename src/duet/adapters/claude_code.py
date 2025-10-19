@@ -278,6 +278,11 @@ class ClaudeCodeAdapter(AssistantAdapter):
                 f"Claude Code CLI not found at '{self.cli_path}'. "
                 "Ensure it is installed and in PATH."
             ) from exc
+        except PermissionError as exc:
+            raise ClaudeCodeError(
+                f"Permission denied when invoking Claude Code CLI. "
+                "Check file permissions or authentication."
+            ) from exc
         except Exception as exc:
             # Catch-all for unexpected errors
             if isinstance(exc, ClaudeCodeError):

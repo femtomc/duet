@@ -65,9 +65,17 @@ class GitWorkspace:
         result = self._run_git("rev-parse", "--abbrev-ref", "HEAD")
         return result.stdout.strip()
 
-    def get_current_commit(self) -> str:
-        """Get the current commit SHA."""
-        result = self._run_git("rev-parse", "HEAD")
+    def get_current_commit(self) -> Optional[str]:
+        """
+        Get the current commit SHA.
+
+        Returns:
+            Commit SHA or None if repository has no commits yet.
+        """
+        result = self._run_git("rev-parse", "HEAD", check=False)
+        if result.returncode != 0:
+            # No commits yet (fresh repository)
+            return None
         return result.stdout.strip()
 
     def detect_changes(self, baseline_commit: Optional[str] = None) -> GitChangesSummary:
@@ -101,11 +109,8 @@ class GitWorkspace:
         # Combine unstaged and untracked
         all_unstaged = list(set(unstaged_files + untracked_files))
 
-        # Get current commit
-        try:
-            commit_sha = self.get_current_commit()
-        except GitError:
-            commit_sha = None  # No commits yet
+        # Get current commit (None if no commits yet)
+        commit_sha = self.get_current_commit()
 
         # Get diff statistics against baseline (or HEAD if no baseline)
         if baseline_commit and commit_sha:
@@ -221,6 +226,15 @@ class GitWorkspace:
         """
         # Get current commit and branch
         commit = self.get_current_commit()
+        if commit is None:
+            # Fresh repository with no commits
+            self.console.log("[dim]Repository has no commits yet - skipping baseline creation[/]")
+            return {
+                "commit": None,
+                "branch": self.get_current_branch() if self.is_git_repo() else None,
+                "state_branch": None,
+                "clean": True,
+            }
         branch = self.get_current_branch()
 
         # Check if working tree is clean

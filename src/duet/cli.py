@@ -15,6 +15,7 @@ from .migrate import ArtifactMigrator
 from .models import StreamMode
 from .orchestrator import Orchestrator
 from .persistence import DuetDatabase
+from .workflow_loader import WorkflowLoadError, load_workflow
 
 app = typer.Typer(help="Automate the Codex ↔ Claude workflow.")
 console = Console()
@@ -31,6 +32,9 @@ def init(
     force: bool = typer.Option(False, "--force", help="Overwrite existing .duet directory"),
     skip_discovery: bool = typer.Option(
         False, "--skip-discovery", help="Skip Codex repository context discovery"
+    ),
+    init_git: bool = typer.Option(
+        False, "--init-git", help="Initialize git repository with .gitignore and initial commit"
     ),
     model_codex: str = typer.Option(
         "gpt-5-codex", "--model-codex", help="Codex model for planning/review"
@@ -55,6 +59,7 @@ def init(
             config_path=config_path,
             force=force,
             skip_discovery=skip_discovery,
+            init_git=init_git,
             model_codex=model_codex,
             model_claude=model_claude,
             console=console,
@@ -106,17 +111,74 @@ def run(
         db = DuetDatabase(db_path)
         console.log("[dim]Using SQLite database for persistence[/]")
 
-    orchestrator = Orchestrator(duet_config, artifact_store, console=console, db=db)
-    orchestrator.run(run_id=run_id)
+    try:
+        orchestrator = Orchestrator(duet_config, artifact_store, console=console, db=db)
+        orchestrator.run(run_id=run_id)
+    except Exception as exc:
+        # Handle adapter and orchestration errors with friendly messages
+        error_msg = str(exc)
+
+        # Check for workflow load errors
+        if "failed to load workflow" in error_msg.lower() or "workflow validation failed" in error_msg.lower():
+            console.print("[red bold]Workflow Error:[/]")
+            # Extract the core error message without traceback
+            lines = error_msg.split("\n")
+            for line in lines[:5]:  # Show first few lines only
+                console.print(f"[red]{line}[/]")
+            console.print()
+            console.print("[yellow]Suggestions:[/]")
+            console.print("  • Run 'duet lint' to validate your workflow")
+            console.print("  • Check .duet/workflow.py for syntax errors")
+            console.print("  • See docs/workflow_dsl.md for DSL reference")
+            raise typer.Exit(1)
+        # Check for adapter-specific errors
+        elif "not found" in error_msg.lower() and ("codex" in error_msg.lower() or "claude" in error_msg.lower()):
+            console.print("[red bold]Adapter Error:[/]")
+            console.print(f"[red]{error_msg}[/]")
+            console.print()
+            console.print("[yellow]Suggestions:[/]")
+            console.print("  • For testing without real adapters, set provider: 'echo' in .duet/duet.yaml")
+            console.print("  • Install the required CLI: 'codex' or 'claude'")
+            console.print("  • Ensure the CLI is authenticated (e.g., 'codex auth login')")
+            raise typer.Exit(1)
+        elif "permission denied" in error_msg.lower():
+            console.print("[red bold]Adapter Permission Error:[/]")
+            console.print(f"[red]{error_msg}[/]")
+            console.print()
+            console.print("[yellow]Suggestions:[/]")
+            console.print("  • Check file permissions for CLI executables")
+            console.print("  • For testing, use provider: 'echo' in .duet/duet.yaml")
+            raise typer.Exit(1)
+        else:
+            # Re-raise other errors
+            raise
 
 
 @app.command()
-def show_config(
+def lint(
     config: Optional[Path] = typer.Option(None, "--config", "-c", help="Config file path."),
+    workflow: Optional[Path] = typer.Option(None, "--workflow", help="Workflow file path (defaults to .duet/workflow.py)"),
 ) -> None:
-    """Pretty-print the resolved configuration."""
-    duet_config = find_config(config)
-    console.print_json(data=duet_config.model_dump(mode="json"))
+    """Validate the workflow definition without executing it."""
+    try:
+        duet_config = find_config(config)
+    except FileNotFoundError as exc:
+        console.print(f"[red]Failed to locate duet configuration:[/] {exc}")
+        raise typer.Exit(1)
+
+    workflow_path = Path(workflow) if workflow else None
+    workspace_root = duet_config.storage.workspace_root
+
+    try:
+        load_workflow(workflow_path=workflow_path, workspace_root=workspace_root)
+    except WorkflowLoadError as exc:
+        console.print(f"[red]Workflow validation failed:[/] {exc}")
+        raise typer.Exit(1)
+    except Exception as exc:
+        console.print(f"[red]Unexpected error while loading workflow:[/] {exc}")
+        raise typer.Exit(1)
+
+    console.print("[green]Workflow validation succeeded.[/]")
 
 
 @app.command()
@@ -229,8 +291,11 @@ def status(
                 for msg in recent_messages:  # Already DESC ordered
                     if msg["channel"] not in channels_seen:
                         channels_seen.add(msg["channel"])
-                        payload_preview = str(msg["payload"])[:80]
-                        if len(str(msg["payload"])) > 80:
+                        # Trim to first line and limit to 50 chars for compact display
+                        payload_str = str(msg["payload"])
+                        first_line = payload_str.split("\n")[0]
+                        payload_preview = first_line[:50]
+                        if len(payload_str) > 50 or "\n" in payload_str:
                             payload_preview += "..."
                         channel_table.add_row(
                             msg["channel"],
@@ -488,8 +553,11 @@ def inspect(
             channel_table.add_column("Created", style="dim")
 
             for msg in messages[:20]:  # Show first 20 messages
-                payload_preview = str(msg["payload"])[:100]
-                if len(str(msg["payload"])) > 100:
+                # Trim to first line and limit to 60 chars for inspect (slightly more detail than status)
+                payload_str = str(msg["payload"])
+                first_line = payload_str.split("\n")[0]
+                payload_preview = first_line[:60]
+                if len(payload_str) > 60 or "\n" in payload_str:
                     payload_preview += "..."
 
                 channel_table.add_row(
@@ -507,63 +575,6 @@ def inspect(
                 console.print(f"[dim]Use --channel <name> to filter or --output json for full export[/]")
         elif show_channels:
             console.print("\n[dim]No channel messages recorded for this run[/]")
-
-
-@app.command()
-def summary(
-    run_id: str = typer.Argument(..., help="Run ID to generate summary for."),
-    config: Optional[Path] = typer.Option(None, "--config", "-c", help="Config file path."),
-    save: bool = typer.Option(False, "--save", help="Save summary to JSON file."),
-) -> None:
-    """Display a comprehensive summary of a run's iteration history."""
-    from rich.panel import Panel
-    from rich.table import Table
-
-    duet_config = find_config(config)
-    artifact_store = ArtifactStore(duet_config.storage.run_artifact_dir, console=console)
-
-    # Generate summary
-    try:
-        summary_data = artifact_store.generate_run_summary(run_id)
-    except Exception as exc:
-        console.print(f"[red]Failed to generate summary: {exc}[/]")
-        raise typer.Exit(1)
-
-    # Display overview
-    stats = summary_data["statistics"]
-    console.print(Panel(f"[bold cyan]Run Summary: {run_id}[/]", expand=False))
-    console.print(f"[bold]Total Iterations:[/] {stats['total_iterations']}")
-    console.print(f"[bold]Final Phase:[/] {stats['final_phase'].upper()}")
-    console.print(
-        f"[bold]Phase Breakdown:[/] "
-        f"PLAN={stats['phase_counts']['plan']}, "
-        f"IMPLEMENT={stats['phase_counts']['implement']}, "
-        f"REVIEW={stats['phase_counts']['review']}"
-    )
-
-    # Display iteration table
-    if summary_data["iterations"]:
-        console.print("\n[bold]Iteration History:[/]")
-        table = Table()
-        table.add_column("Iter", style="cyan", justify="right")
-        table.add_column("Phase", style="magenta")
-        table.add_column("Decision", style="green")
-        table.add_column("Next", style="yellow")
-
-        for iteration in summary_data["iterations"]:
-            table.add_row(
-                str(iteration["iteration"]),
-                iteration["phase"].upper(),
-                iteration["decision"][:60] + "..." if len(iteration["decision"]) > 60 else iteration["decision"],
-                str(iteration["next_phase"]),
-            )
-
-        console.print(table)
-
-    # Save to file if requested
-    if save:
-        summary_path = artifact_store.save_run_summary(run_id)
-        console.print(f"\n[green]Summary saved to:[/] {summary_path}")
 
 
 @app.command()
@@ -683,8 +694,44 @@ def next(
             console.print(f"\n[yellow]Run blocked. Review state with 'duet status {result['run_id']}'[/]")
 
     except Exception as exc:
-        console.print(f"[red]Error: {exc}[/]")
-        raise typer.Exit(1)
+        # Handle adapter and orchestration errors with friendly messages
+        error_msg = str(exc)
+
+        # Check for workflow load errors
+        if "failed to load workflow" in error_msg.lower() or "workflow validation failed" in error_msg.lower():
+            console.print("[red bold]Workflow Error:[/]")
+            # Extract the core error message without traceback
+            lines = error_msg.split("\n")
+            for line in lines[:5]:  # Show first few lines only
+                console.print(f"[red]{line}[/]")
+            console.print()
+            console.print("[yellow]Suggestions:[/]")
+            console.print("  • Run 'duet lint' to validate your workflow")
+            console.print("  • Check .duet/workflow.py for syntax errors")
+            console.print("  • See docs/workflow_dsl.md for DSL reference")
+            raise typer.Exit(1)
+        # Check for adapter-specific errors
+        elif "not found" in error_msg.lower() and ("codex" in error_msg.lower() or "claude" in error_msg.lower()):
+            console.print("[red bold]Adapter Error:[/]")
+            console.print(f"[red]{error_msg}[/]")
+            console.print()
+            console.print("[yellow]Suggestions:[/]")
+            console.print("  • For testing without real adapters, set provider: 'echo' in .duet/duet.yaml")
+            console.print("  • Install the required CLI: 'codex' or 'claude'")
+            console.print("  • Ensure the CLI is authenticated (e.g., 'codex auth login')")
+            raise typer.Exit(1)
+        elif "permission denied" in error_msg.lower():
+            console.print("[red bold]Adapter Permission Error:[/]")
+            console.print(f"[red]{error_msg}[/]")
+            console.print()
+            console.print("[yellow]Suggestions:[/]")
+            console.print("  • Check file permissions for CLI executables")
+            console.print("  • For testing, use provider: 'echo' in .duet/duet.yaml")
+            raise typer.Exit(1)
+        else:
+            # Default error handling
+            console.print(f"[red]Error: {error_msg}[/]")
+            raise typer.Exit(1)
 
 
 @app.command()
@@ -755,8 +802,44 @@ def cont(
             console.print(f"\n[yellow]Stopped after {max_phases} phases. Run 'duet cont {run_id}' to continue.[/]")
 
     except Exception as exc:
-        console.print(f"[red]Error: {exc}[/]")
-        raise typer.Exit(1)
+        # Handle adapter and orchestration errors with friendly messages
+        error_msg = str(exc)
+
+        # Check for workflow load errors
+        if "failed to load workflow" in error_msg.lower() or "workflow validation failed" in error_msg.lower():
+            console.print("[red bold]Workflow Error:[/]")
+            # Extract the core error message without traceback
+            lines = error_msg.split("\n")
+            for line in lines[:5]:  # Show first few lines only
+                console.print(f"[red]{line}[/]")
+            console.print()
+            console.print("[yellow]Suggestions:[/]")
+            console.print("  • Run 'duet lint' to validate your workflow")
+            console.print("  • Check .duet/workflow.py for syntax errors")
+            console.print("  • See docs/workflow_dsl.md for DSL reference")
+            raise typer.Exit(1)
+        # Check for adapter-specific errors
+        elif "not found" in error_msg.lower() and ("codex" in error_msg.lower() or "claude" in error_msg.lower()):
+            console.print("[red bold]Adapter Error:[/]")
+            console.print(f"[red]{error_msg}[/]")
+            console.print()
+            console.print("[yellow]Suggestions:[/]")
+            console.print("  • For testing without real adapters, set provider: 'echo' in .duet/duet.yaml")
+            console.print("  • Install the required CLI: 'codex' or 'claude'")
+            console.print("  • Ensure the CLI is authenticated (e.g., 'codex auth login')")
+            raise typer.Exit(1)
+        elif "permission denied" in error_msg.lower():
+            console.print("[red bold]Adapter Permission Error:[/]")
+            console.print(f"[red]{error_msg}[/]")
+            console.print()
+            console.print("[yellow]Suggestions:[/]")
+            console.print("  • Check file permissions for CLI executables")
+            console.print("  • For testing, use provider: 'echo' in .duet/duet.yaml")
+            raise typer.Exit(1)
+        else:
+            # Default error handling
+            console.print(f"[red]Error: {error_msg}[/]")
+            raise typer.Exit(1)
 
 
 @app.command()
@@ -810,7 +893,13 @@ def back(
             console.print(f"[red]Git restoration failed: {exc}[/]")
             raise typer.Exit(1)
     else:
-        console.print("[yellow]No git baseline available for this state[/]")
+        console.print("[yellow bold]⚠ No git baseline available for this state[/]")
+        console.print(
+            "[yellow]This state was created without git commits. Workspace changes cannot be restored.[/]"
+        )
+        console.print("[dim]To enable time travel in future runs:[/]")
+        console.print("  • Run: [cyan]duet init --init-git --force[/] [dim]to set up git[/]")
+        console.print("  • Or manually: [cyan]git init && git add . && git commit -m 'Initial commit'[/]")
 
     # Update active state in database
     db.update_active_state(run_id, state_id)

@@ -24,16 +24,11 @@ This document captures the working roadmap for Duet. It is intentionally living 
   - Provide replay helpers and document the syndicated workspace.
   - (Optional) CLI export for message history.
 
-- **Sprint 12 – Tooling & Workflow UX**
-  - DSL linting and validation (`duet lint-ide`).
-  - Hot-reload hints, improved error reporting.
-  - Sample workflows, prompt builder documentation.
-  - Polished streaming/logging output grouped by channel.
-
-- **Sprint 13 – Migration & Hardening**
-  - Legacy-to-DSL migration tooling.
-  - Long-run soak tests, profiling, regression coverage.
-  - Release notes, upgrade guides, polish for GA.
+- **Sprint 12 – Hot Reload, Error UX & Hardening**
+  - Deliver `duet lint` for workflow validation without running the orchestrator.
+  - Improve hot-reload hints and surface clean errors when workflow loading fails.
+  - Provide sample workflows/prompt builder docs to ease customization.
+  - Run acceptance & soak tests; profile long runs, tighten git baseline warnings, and improve adapter failure messaging.
 
 - **Sprint 14 – Performance & Observability Push**
   - Profile orchestrator + persistence path.

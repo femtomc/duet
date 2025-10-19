@@ -24,6 +24,7 @@ class DuetInitializer:
         config_path: Optional[Path] = None,
         force: bool = False,
         skip_discovery: bool = False,
+        init_git: bool = False,
         model_codex: str = "gpt-5-codex",
         model_claude: str = "sonnet",
         console: Optional[Console] = None,
@@ -32,6 +33,7 @@ class DuetInitializer:
         self.config_path = config_path or (self.workspace_root / ".duet")
         self.force = force
         self.skip_discovery = skip_discovery
+        self.init_git = init_git
         self.model_codex = model_codex
         self.model_claude = model_claude
         self.console = console or Console()
@@ -42,6 +44,141 @@ class DuetInitializer:
             return str(path.relative_to(self.workspace_root))
         except ValueError:
             return str(path)
+
+    def _is_git_repo(self) -> bool:
+        """Check if workspace is already a Git repository."""
+        import subprocess
+
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(self.workspace_root), "rev-parse", "--git-dir"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            return result.returncode == 0
+        except FileNotFoundError:
+            # Git not installed
+            return False
+
+    def _initialize_git_repo(self) -> None:
+        """
+        Initialize git repository with .gitignore and initial commit.
+
+        Creates:
+        - git repository (git init)
+        - .gitignore with duet-specific entries
+        - initial commit with .gitignore and .duet/README.md
+        """
+        import subprocess
+
+        self.console.print()
+        self.console.print("[cyan]Initializing Git repository...[/]")
+
+        # 1. Check if git is installed
+        try:
+            subprocess.run(["git", "--version"], capture_output=True, check=True)
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            raise InitError(
+                "Git is not installed or not in PATH. "
+                "Install Git to use --init-git flag."
+            )
+
+        # 2. Initialize repository
+        try:
+            subprocess.run(
+                ["git", "-C", str(self.workspace_root), "init"],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            self.console.log("[green]Created:[/] .git/ (git repository)")
+        except subprocess.CalledProcessError as exc:
+            raise InitError(f"Failed to initialize git repository: {exc.stderr}")
+
+        # 3. Create .gitignore
+        gitignore_path = self.workspace_root / ".gitignore"
+        gitignore_content = """# Duet orchestration artifacts
+.duet/logs/
+.duet/runs/
+.duet/duet.db
+.duet/duet.db-journal
+.duet/__pycache__/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+"""
+
+        if gitignore_path.exists():
+            # Append duet entries if .gitignore already exists
+            existing = gitignore_path.read_text(encoding="utf-8")
+            if ".duet/logs/" not in existing:
+                with gitignore_path.open("a", encoding="utf-8") as f:
+                    f.write("\n" + gitignore_content)
+                self.console.log("[green]Updated:[/] .gitignore (appended duet entries)")
+            else:
+                self.console.log("[dim].gitignore already contains duet entries[/]")
+        else:
+            gitignore_path.write_text(gitignore_content, encoding="utf-8")
+            self.console.log("[green]Created:[/] .gitignore")
+
+        # 4. Stage files for initial commit
+        try:
+            # Stage .gitignore
+            subprocess.run(
+                ["git", "-C", str(self.workspace_root), "add", ".gitignore"],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+
+            # Stage .duet/README.md (created earlier in init flow)
+            duet_readme = self.config_path / "README.md"
+            if duet_readme.exists():
+                subprocess.run(
+                    ["git", "-C", str(self.workspace_root), "add", str(duet_readme.relative_to(self.workspace_root))],
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+        except subprocess.CalledProcessError as exc:
+            self.console.log(f"[yellow]Warning: Failed to stage files: {exc.stderr}[/]")
+
+        # 5. Create initial commit
+        try:
+            subprocess.run(
+                ["git", "-C", str(self.workspace_root), "commit", "-m", "chore: initialize Duet workspace"],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            self.console.print("[green]✓ Created initial git commit[/]")
+        except subprocess.CalledProcessError as exc:
+            # Check if error is because there's nothing to commit (already has commits)
+            if "nothing to commit" in exc.stderr.lower():
+                self.console.log("[dim]Repository already has commits - skipping initial commit[/]")
+            else:
+                self.console.log(f"[yellow]Warning: Failed to create initial commit: {exc.stderr}[/]")
 
     def init(self) -> None:
         """
@@ -88,6 +225,30 @@ class DuetInitializer:
             self._run_context_discovery()
         else:
             self._create_placeholder_context()
+
+        # Git setup: detect and warn/initialize
+        is_git_repo = self._is_git_repo()
+
+        if not is_git_repo:
+            if self.init_git:
+                # User requested git initialization
+                self._initialize_git_repo()
+            else:
+                # Warn about missing git
+                self.console.print()
+                self.console.print("[yellow bold]⚠ No Git repository detected[/]")
+                self.console.print(
+                    "[yellow]Duet needs at least one commit to enable workspace restoration (duet back).[/]"
+                )
+                self.console.print()
+                self.console.print("[dim]To set up Git:[/]")
+                self.console.print("  • Run: [cyan]duet init --init-git --force[/] (in this workspace)")
+                self.console.print("  • Or manually: [cyan]git init && git add . && git commit -m 'Initial commit'[/]")
+                self.console.print()
+        elif self.init_git:
+            # Repo already exists, --init-git is a no-op
+            self.console.print()
+            self.console.print("[dim]Git repository already exists - skipping initialization[/]")
 
         self.console.print()
         self.console.print("[green bold]✓ Duet workspace initialized successfully![/]")
@@ -344,6 +505,7 @@ workflow = Workflow(
         """
         self.console.print()
         self.console.print("[cyan]Running repository context discovery with Codex...[/]")
+        self.console.print("[dim]Tip: Use --skip-discovery to bypass this step[/]")
 
         discovery_prompt = """Analyze this repository and provide a comprehensive overview:
 
@@ -509,15 +671,27 @@ Be concise but comprehensive. This will help the orchestrator understand the cod
             self.console.log(f"[green]Created:[/] {self._display_path(context_file)}")
             self.console.print("[green]✓ Context discovery complete[/]")
 
+        except PermissionError as exc:
+            # Handle EPERM specifically with concise message
+            self.console.print("[yellow]⚠ Context discovery skipped (permission denied)[/]")
+            self.console.print("[dim]  Run with --skip-discovery to avoid this check, or use echo adapter for testing[/]")
+            self._create_placeholder_context()
         except Exception as exc:
-            # Handle CodexError, timeout, or any other discovery failure
+            # Handle CodexError, timeout, or any other discovery failure with concise messages
             error_msg = str(exc)
-            if "not found" in error_msg.lower():
-                self.console.log("[yellow]Codex CLI not found - skipping context discovery[/]")
+            if "not found" in error_msg.lower() or "codex cli not found" in error_msg.lower():
+                self.console.print("[yellow]⚠ Context discovery skipped (Codex CLI not found)[/]")
+                self.console.print("[dim]  Install Codex CLI or use --skip-discovery flag[/]")
             elif "timeout" in error_msg.lower():
-                self.console.log("[yellow]Context discovery timeout - skipping[/]")
+                self.console.print("[yellow]⚠ Context discovery timeout - skipping[/]")
+            elif "permission" in error_msg.lower() or "eperm" in error_msg.lower():
+                self.console.print("[yellow]⚠ Context discovery skipped (permission denied)[/]")
+                self.console.print("[dim]  Run with --skip-discovery to avoid this check[/]")
             else:
-                self.console.log(f"[yellow]Context discovery error: {exc}[/]")
+                # Generic error - show concise message without full traceback
+                first_line = error_msg.split("\n")[0][:100]
+                self.console.print(f"[yellow]⚠ Context discovery failed: {first_line}[/]")
+                self.console.print("[dim]  Using placeholder context. Run with --skip-discovery to bypass[/]")
             self._create_placeholder_context()
 
     def _create_placeholder_context(self) -> None:

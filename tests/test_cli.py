@@ -419,5 +419,150 @@ logging:
         assert config_passed.logging.quiet is True
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Sprint 12: Lint Command Tests
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestLintCommand:
+    """Tests for the duet lint command."""
+
+    def test_lint_valid_workflow(self, temp_config_dir):
+        """Test that lint succeeds on valid workflow."""
+        # Create valid workflow
+        workflow_file = temp_config_dir / "workflow.py"
+        workflow_file.write_text("""
+from duet.dsl import Agent, Channel, Phase, Transition, When, Workflow
+
+workflow = Workflow(
+    agents=[Agent(name="planner", provider="echo", model="test")],
+    channels=[Channel(name="task"), Channel(name="plan")],
+    phases=[
+        Phase(name="plan", agent="planner", consumes=["task"], publishes=["plan"]),
+        Phase(name="done", agent="planner", is_terminal=True),
+    ],
+    transitions=[
+        Transition(from_phase="plan", to_phase="done"),
+    ],
+)
+""")
+
+        # Create minimal config
+        config_file = temp_config_dir / "duet.yaml"
+        config_file.write_text(f"""
+storage:
+  workspace_root: "{temp_config_dir.parent}"
+  run_artifact_dir: "{temp_config_dir / 'runs'}"
+""")
+
+        # Run lint
+        result = runner.invoke(app, ["lint", "--config", str(config_file), "--workflow", str(workflow_file)])
+
+        assert result.exit_code == 0
+        assert "validation succeeded" in result.stdout.lower() or "✓" in result.stdout
+
+    def test_lint_invalid_workflow_no_phases(self, temp_config_dir):
+        """Test that lint fails on workflow with no phases."""
+        # Create invalid workflow
+        workflow_file = temp_config_dir / "workflow.py"
+        workflow_file.write_text("""
+from duet.dsl import Workflow
+
+workflow = Workflow(
+    agents=[],
+    channels=[],
+    phases=[],  # Invalid: no phases
+    transitions=[],
+)
+""")
+
+        config_file = temp_config_dir / "duet.yaml"
+        config_file.write_text(f"""
+storage:
+  workspace_root: "{temp_config_dir.parent}"
+  run_artifact_dir: "{temp_config_dir / 'runs'}"
+""")
+
+        # Run lint (should fail)
+        result = runner.invoke(app, ["lint", "--config", str(config_file), "--workflow", str(workflow_file)])
+
+        assert result.exit_code != 0
+        assert "validation failed" in result.stdout.lower() or "error" in result.stdout.lower()
+
+    def test_lint_unknown_channel(self, temp_config_dir):
+        """Test that lint catches references to unknown channels."""
+        # Create workflow with unknown channel reference
+        workflow_file = temp_config_dir / "workflow.py"
+        workflow_file.write_text("""
+from duet.dsl import Agent, Channel, Phase, Transition, Workflow
+
+workflow = Workflow(
+    agents=[Agent(name="planner", provider="echo", model="test")],
+    channels=[Channel(name="task")],  # Only task channel defined
+    phases=[
+        Phase(name="plan", agent="planner", consumes=["task"], publishes=["unknown_channel"]),  # References undefined channel
+    ],
+    transitions=[],
+)
+""")
+
+        config_file = temp_config_dir / "duet.yaml"
+        config_file.write_text(f"""
+storage:
+  workspace_root: "{temp_config_dir.parent}"
+  run_artifact_dir: "{temp_config_dir / 'runs'}"
+""")
+
+        # Run lint (should fail)
+        result = runner.invoke(app, ["lint", "--config", str(config_file), "--workflow", str(workflow_file)])
+
+        assert result.exit_code != 0
+        assert "unknown channel" in result.stdout.lower() or "error" in result.stdout.lower()
+
+    def test_lint_syntax_error(self, temp_config_dir):
+        """Test that lint catches Python syntax errors."""
+        # Create workflow with syntax error
+        workflow_file = temp_config_dir / "workflow.py"
+        workflow_file.write_text("""
+from duet.dsl import Workflow
+
+workflow = Workflow(
+    agents=[,  # Syntax error: empty element
+    channels=[],
+    phases=[],
+    transitions=[],
+)
+""")
+
+        config_file = temp_config_dir / "duet.yaml"
+        config_file.write_text(f"""
+storage:
+  workspace_root: "{temp_config_dir.parent}"
+  run_artifact_dir: "{temp_config_dir / 'runs'}"
+""")
+
+        # Run lint (should fail)
+        result = runner.invoke(app, ["lint", "--config", str(config_file), "--workflow", str(workflow_file)])
+
+        assert result.exit_code != 0
+
+    def test_lint_missing_workflow_file(self, temp_config_dir):
+        """Test that lint fails gracefully when workflow file doesn't exist."""
+        config_file = temp_config_dir / "duet.yaml"
+        config_file.write_text(f"""
+storage:
+  workspace_root: "{temp_config_dir.parent}"
+  run_artifact_dir: "{temp_config_dir / 'runs'}"
+""")
+
+        nonexistent_workflow = temp_config_dir / "nonexistent.py"
+
+        # Run lint (should fail)
+        result = runner.invoke(app, ["lint", "--config", str(config_file), "--workflow", str(nonexistent_workflow)])
+
+        assert result.exit_code != 0
+        assert "not found" in result.stdout.lower() or "error" in result.stdout.lower()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

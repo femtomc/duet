@@ -107,6 +107,10 @@ class Orchestrator:
         # Load workflow (DSL-based execution - required)
         from .workflow_loader import load_workflow, WorkflowLoadError
 
+        # Track workflow file for hot-reload
+        self._workflow_path = self._resolve_workflow_path()
+        self._workflow_mtime = self._get_workflow_mtime()
+
         try:
             self.workflow_graph = load_workflow(workspace_root=config.storage.workspace_root)
         except WorkflowLoadError as exc:
@@ -118,6 +122,60 @@ class Orchestrator:
         from .executor import WorkflowExecutor
         self.workflow_executor = WorkflowExecutor(self.workflow_graph, console=self.console)
         self.console.log(f"[dim]Loaded workflow:[/] {len(self.workflow_graph.phases)} phases")
+
+    def _resolve_workflow_path(self) -> Optional[Path]:
+        """Resolve workflow file path for hot-reload tracking."""
+        try:
+            from .workflow_loader import _resolve_workflow_path
+            return _resolve_workflow_path(None, self.config.storage.workspace_root)
+        except Exception:
+            return None
+
+    def _get_workflow_mtime(self) -> Optional[float]:
+        """Get workflow file modification time."""
+        if self._workflow_path and self._workflow_path.exists():
+            return self._workflow_path.stat().st_mtime
+        return None
+
+    def _check_and_reload_workflow(self) -> None:
+        """
+        Check if workflow file has been modified and reload if needed.
+
+        Aborts execution with friendly error if reload fails.
+        """
+        if not self._workflow_path or not self._workflow_path.exists():
+            return
+
+        current_mtime = self._workflow_path.stat().st_mtime
+        if current_mtime == self._workflow_mtime:
+            return  # No change
+
+        # Workflow updated - reload
+        self.console.print()
+        self.console.print("[cyan]⟳ Workflow updated; reloading...[/]")
+
+        from .workflow_loader import load_workflow, WorkflowLoadError
+        from .executor import WorkflowExecutor
+
+        try:
+            new_graph = load_workflow(workspace_root=self.config.storage.workspace_root)
+            self.workflow_graph = new_graph
+            self.workflow_executor = WorkflowExecutor(new_graph, console=self.console)
+            self._workflow_mtime = current_mtime
+
+            self.console.print(f"[green]✓ Workflow reloaded:[/] {len(self.workflow_graph.phases)} phases")
+        except WorkflowLoadError as exc:
+            self.console.print()
+            self.console.print("[red bold]Workflow Reload Failed:[/]")
+            error_lines = str(exc).split("\n")
+            for line in error_lines[:5]:
+                self.console.print(f"[red]{line}[/]")
+            self.console.print()
+            self.console.print("[yellow]Suggestions:[/]")
+            self.console.print("  • Run 'duet lint' to validate your workflow")
+            self.console.print("  • Fix .duet/workflow.py and try again")
+            self.console.print("  • See docs/workflow_dsl.md for DSL reference")
+            raise RuntimeError("Workflow reload failed - aborting execution") from exc
 
     def _build_adapter(self, assistant_cfg):
         """
@@ -192,6 +250,9 @@ class Orchestrator:
 
     def run(self, run_id: Optional[str] = None) -> RunSnapshot:
         """Execute orchestration loop until termination."""
+        # Check for workflow updates and reload if needed
+        self._check_and_reload_workflow()
+
         iteration = 0
         snapshot = RunSnapshot(
             run_id=run_id or self._derive_run_id(),
@@ -224,14 +285,19 @@ class Orchestrator:
         # ──── Git Baseline Commit (for change detection) ────
         baseline_commit = None
         if self.git.is_git_repo():
-            try:
-                baseline_commit = self.git.get_current_commit()
+            baseline_commit = self.git.get_current_commit()
+            if baseline_commit:
                 snapshot.metadata["baseline_commit"] = baseline_commit
                 self.console.log(f"[dim]Baseline commit: {baseline_commit[:8]}[/]")
-            except Exception:
-                # No commits yet (empty repo)
-                baseline_commit = None
-                self.console.log("[dim]No commits yet (empty repository)[/]")
+            else:
+                # No commits yet (fresh repository) - warn about missing time travel
+                self.console.print()
+                self.console.print("[yellow bold]⚠ Warning: No git commits found[/]")
+                self.console.print(
+                    "[yellow]Workspace changes won't be reverted when using 'duet back'.[/]"
+                )
+                self.console.print("[dim]Run: [cyan]duet init --init-git --force[/dim] [dim]or commit manually[/]")
+                self.console.print()
 
         # ──── Git Feature Branch Creation ────
         original_branch = None
@@ -404,11 +470,7 @@ class Orchestrator:
                         changes = self.git.detect_changes(baseline_commit=baseline_commit)
 
                         # Get current commit to check if new commit was created
-                        current_commit = None
-                        try:
-                            current_commit = self.git.get_current_commit()
-                        except GitError:
-                            pass
+                        current_commit = self.git.get_current_commit()
 
                         # Check if new commits were created
                         new_commits_created = (
@@ -686,9 +748,15 @@ class Orchestrator:
         response: AssistantResponse,
     ) -> None:
         """
-        Update channel store with outputs from response (Sprint 10).
+        Update channel store with outputs from response (Sprint 10+).
 
-        Maps response content and metadata to channels based on phase.
+        Automatically maps response content and metadata to channels based on the
+        phase's declared 'publishes' list in the workflow definition.
+
+        Mapping strategy:
+        1. For single-channel publishes: content -> channel
+        2. For multi-channel publishes: metadata keys -> channels, content -> first channel
+        3. Special handling for verdict (from response.verdict or metadata["verdict"])
 
         Args:
             phase: Phase that was executed
@@ -697,23 +765,34 @@ class Orchestrator:
         if not self.workflow_executor:
             return  # No channel store available
 
-        # Map phase to published channels
-        if phase == Phase.PLAN:
-            self.workflow_executor.channel_store.set("plan", response.content)
+        # Get the phase definition from the workflow graph to find published channels
+        phase_def = self.workflow_graph.get_phase(phase.value)
+        if not phase_def or not phase_def.publishes:
+            return  # No channels declared for this phase
 
-        elif phase == Phase.IMPLEMENT:
-            self.workflow_executor.channel_store.set("code", response.content)
+        published_channels = phase_def.publishes
 
-        elif phase == Phase.REVIEW:
-            # Extract verdict
-            if response.verdict:
-                self.workflow_executor.channel_store.set("verdict", response.verdict.value)
-            elif "verdict" in response.metadata:
-                self.workflow_executor.channel_store.set("verdict", response.metadata["verdict"])
+        # Strategy: Map response to declared channels
+        for channel_name in published_channels:
+            # Special handling for verdict channel (from ReviewVerdict enum or metadata)
+            if channel_name == "verdict":
+                if response.verdict:
+                    self.workflow_executor.channel_store.set("verdict", response.verdict.value)
+                elif "verdict" in response.metadata:
+                    self.workflow_executor.channel_store.set("verdict", response.metadata["verdict"])
+                continue
 
-            # Extract feedback if present
-            if response.content and not response.concluded:
-                self.workflow_executor.channel_store.set("feedback", response.content)
+            # Check if metadata has this channel as a key (explicit mapping)
+            if channel_name in response.metadata:
+                self.workflow_executor.channel_store.set(channel_name, response.metadata[channel_name])
+                continue
+
+            # Fallback: Use response content for the first non-verdict channel
+            # (Assumes content is the primary output)
+            if channel_name == published_channels[0] or (
+                len(published_channels) == 1 and channel_name != "verdict"
+            ):
+                self.workflow_executor.channel_store.set(channel_name, response.content)
 
     def _persist_channel_messages(
         self,
@@ -820,6 +899,9 @@ class Orchestrator:
             - next_action: Suggested next action (continue/blocked/done)
             - message: Human-readable status message
         """
+        # Check for workflow updates and reload if needed
+        self._check_and_reload_workflow()
+
         if not self.db:
             raise RuntimeError("Database required for stateful workflow. Initialize with DuetDatabase.")
 
@@ -1146,6 +1228,13 @@ class Orchestrator:
                 baseline = baseline_info["commit"]
                 # Store full baseline info (branch, state_branch, clean) for duet back
                 state_metadata.update(baseline_info)
+
+                # Warn if no baseline (no commits)
+                if baseline is None:
+                    self.console.log(
+                        "[yellow]⚠ No git commits - 'duet back' won't restore changes. "
+                        "Run: [cyan]duet init --init-git --force[/cyan] or commit manually[/]"
+                    )
             except GitError as exc:
                 self.console.log(f"[yellow]Git baseline creation failed: {exc}[/]")
 

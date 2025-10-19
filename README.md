@@ -29,16 +29,25 @@ Here's the AI gloss:
 uv sync --group dev
 
 # 2. Bootstrap the workspace (creates .duet/)
-uv run duet init
+duet init
+
+# 2a. (Optional but recommended) Initialize git for time travel
+duet init --init-git --force  # Creates git repo + .gitignore + initial commit
+# OR manually: git init && git add . && git commit -m "Initial commit"
 
 # 3. Inspect the generated workflow and config
 cat .duet/workflow.py
 cat .duet/duet.yaml
 
-# 4. Execute a phase or run the full loop
-uv run duet next           # phase-by-phase
-uv run duet run            # automatic loop
+# 4. Validate the workflow (optional)
+duet lint
+
+# 5. Execute a phase or run the full loop
+duet next           # phase-by-phase
+duet run            # automatic loop
 ```
+
+**Note on Git**: Duet needs at least one git commit to enable workspace restoration with `duet back`. If no git repository is detected during `duet init`, you'll see a warning with setup instructions.
 
 `duet init` creates:
 
@@ -101,18 +110,65 @@ This powers:
 
 Message persistence makes the workspace replayable, auditable, and ready for analytics or streaming UIs.
 
+## Testing & Development
+
+### Using the Echo Adapter
+
+The **echo adapter** allows testing workflows without Codex/Claude credentials. It's perfect for:
+- Validating workflow logic and transitions
+- Testing channel persistence
+- Developing custom workflows
+- CI/CD pipelines
+
+**Setup:**
+```yaml
+# In .duet/duet.yaml:
+codex:
+  provider: "echo"
+  model: "echo-v1"
+
+claude:
+  provider: "echo"
+  model: "echo-v1"
+```
+
+**Behavior:**
+- Echoes back prompts with role and context information
+- Auto-approves when acting as a reviewer (sets `verdict: approve`)
+- No external API calls or authentication required
+- Instant responses for fast iteration
+
+### Validating Workflows
+
+Use `duet lint` to validate your workflow before running:
+
+```bash
+duet lint                    # Validate .duet/workflow.py
+duet lint --workflow custom.py  # Validate custom file
+```
+
+**Checks:**
+- ✓ All phases reference valid agents
+- ✓ All channel references (consumes/publishes) are defined
+- ✓ No duplicate phase/channel/agent names
+- ✓ At least one phase exists
+- ✓ Valid Python syntax
+
+**Workflow hot-reload:** Duet automatically detects changes to `.duet/workflow.py` and reloads before each phase execution.
+
 ## CLI Highlights
 
 | Command | Purpose |
 |---------|---------|
-| `duet init` | Scaffold `.duet/` (config, workflow.py, context, logs, runs, database) |
+| `duet init [--init-git]` | Scaffold `.duet/` (config, workflow.py, context, logs, runs, database). Use `--init-git` to create git repo with .gitignore and initial commit |
 | `duet run` | Execute the full plan→implement→review loop automatically |
 | `duet next [--run-id ID] [FEEDBACK]` | Execute the next phase (auto-resumes most recent run) |
 | `duet cont RUN_ID [--max-phases N]` | Continue phases until done or blocked |
-| `duet back STATE_ID [--force]` | Restore workspace/database to a prior checkpoint |
+| `duet back STATE_ID [--force]` | Restore workspace/database to a prior checkpoint (requires git commits) |
 | `duet status RUN_ID` | Inspect run status, active state, latest channel values |
 | `duet inspect RUN_ID [--channel NAME]` | Detailed iteration, event, and channel history |
 | `duet messages RUN_ID [--channel NAME]` | Query channel message history with filters |
+| `duet lint [--workflow PATH]` | Validate workflow definition without executing it |
 | `duet migrate [--force]` | Apply schema upgrades to existing `.duet/duet.db` |
 
 All commands accept `--config PATH` to point at a specific `duet.yaml`.
@@ -123,10 +179,11 @@ All commands accept `--config PATH` to point at a specific `duet.yaml`.
 - [uv](https://docs.astral.sh/uv/) for dependency management
 - Codex CLI (`codex auth login`)
 - Claude Code CLI (`claude auth login`)
-- Git repository for the workspace
+- **Git** - Required for workspace restoration (`duet back`). Use `duet init --init-git` to set up automatically
 
 ## Documentation & Planning
 
-- Workflow DSL reference: [`docs/workflow_dsl.md`](docs/workflow_dsl.md)
-- Current roadmap & sprint notes: [`docs/sprint_planning.md`](docs/sprint_planning.md)
-- Message persistence overview: (coming soon) additional CLI docs and examples
+- **Workflow DSL reference**: [`docs/workflow_dsl.md`](docs/workflow_dsl.md)
+- **Example workflows**: [`examples/`](examples/) - Custom channels, testing patterns, and advanced features
+- **Current roadmap**: [`docs/sprint_planning.md`](docs/sprint_planning.md)
+- **Testing guide**: Use echo adapter and `duet lint` for validation (see [Testing & Development](#testing--development))
