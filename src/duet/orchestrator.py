@@ -498,82 +498,52 @@ class Orchestrator:
                     self._persist_interaction(snapshot.run_id, current_phase, request, response)
                     break
 
-            # ──── Git Change Validation (Phase Metadata) ────
-            # Check if this phase requires git changes
-            # Only check phase-specific metadata (not global config) to avoid false positives
-            phase_requires_git = self.workflow_graph.requires_git_changes(current_phase)
-
-            # Global config applies only to phases with implementer role hint
-            global_requires_git = False
-            if self.config.workflow.require_git_changes:
-                phase_def = self.workflow_graph.phases.get(current_phase)
-                if phase_def and phase_def.metadata.get("role_hint") == "implementer":
-                    global_requires_git = True
-
-            if phase_requires_git or global_requires_git:
+            # ──── Git Change Detection (for metadata only, no enforcement) ────
+            # Sprint DSL-2+: Git validation moved to tools, but still detect changes for logging
+            if self.git.is_git_repo():
                 try:
-                    if self.git.is_git_repo():
-                        # Compare against baseline commit to detect new commits
-                        # (not just working tree changes, which become empty after commit)
-                        changes = self.git.detect_changes(baseline_commit=baseline_commit)
+                    # Detect changes for logging and metadata
+                    changes = self.git.detect_changes(baseline_commit=baseline_commit)
+                    current_commit = self.git.get_current_commit()
 
-                        # Get current commit to check if new commit was created
-                        current_commit = self.git.get_current_commit()
+                    # Check if new commits were created
+                    new_commits_created = (
+                        baseline_commit
+                        and current_commit
+                        and baseline_commit != current_commit
+                    )
 
-                        # Check if new commits were created
-                        new_commits_created = (
-                            baseline_commit
-                            and current_commit
-                            and baseline_commit != current_commit
+                    # Store change summary in response metadata
+                    response.metadata["git_changes"] = {
+                        "has_changes": changes.has_changes,
+                        "files_changed": changes.files_changed,
+                        "insertions": changes.insertions,
+                        "deletions": changes.deletions,
+                        "staged_files": changes.staged_files,
+                        "commit_sha": changes.commit_sha,
+                        "diff_stat": changes.diff_stat,
+                        "baseline_commit": baseline_commit,
+                        "new_commits_created": new_commits_created,
+                    }
+
+                    # Update baseline if new commits were created
+                    if new_commits_created:
+                        baseline_commit = current_commit
+                        snapshot.metadata["latest_commit"] = current_commit
+
+                    # Log detected changes (informational only - no blocking)
+                    if new_commits_created:
+                        self.console.log(
+                            f"[green]New commit created:[/] {current_commit[:8]} "
+                            f"({changes.files_changed} files, +{changes.insertions}/-{changes.deletions})"
                         )
-
-                        # Store change summary in response metadata
-                        response.metadata["git_changes"] = {
-                            "has_changes": changes.has_changes,
-                            "files_changed": changes.files_changed,
-                            "insertions": changes.insertions,
-                            "deletions": changes.deletions,
-                            "staged_files": changes.staged_files,
-                            "commit_sha": changes.commit_sha,
-                            "diff_stat": changes.diff_stat,
-                            "baseline_commit": baseline_commit,
-                            "new_commits_created": new_commits_created,
-                        }
-
-                        # Update baseline if new commits were created
-                        if new_commits_created:
-                            baseline_commit = current_commit
-                            snapshot.metadata["latest_commit"] = current_commit
-
-                        # Fail iteration if no changes detected (guardrail enforcement)
-                        if not changes.has_changes:
-                            snapshot.phase = "blocked"
-                            snapshot.notes = (
-                                f"Phase '{current_phase}' requires git changes but produced none. "
-                                f"Agent must modify files, stage changes, or create commits."
-                            )
-                            self.console.log(
-                                f"[red]No repository changes detected after phase '{current_phase}' (git changes required)[/]"
-                            )
-                            self._persist_interaction(snapshot.run_id, current_phase, request, response)
-                            break
-
-                        # Log detected changes
-                        if new_commits_created:
-                            self.console.log(
-                                f"[green]New commit created:[/] {current_commit[:8]} "
-                                f"({changes.files_changed} files, +{changes.insertions}/-{changes.deletions})"
-                            )
-                        else:
-                            self.console.log(
-                                f"[green]Detected changes:[/] {changes.files_changed} files, "
-                                f"+{changes.insertions}/-{changes.deletions}"
-                            )
-                    else:
-                        self.console.log("[yellow]Workspace is not a git repository, skipping change detection[/]")
+                    elif changes.has_changes:
+                        self.console.log(
+                            f"[green]Detected changes:[/] {changes.files_changed} files, "
+                            f"+{changes.insertions}/-{changes.deletions}"
+                        )
                 except Exception as exc:
                     # Git detection failure shouldn't block the run, just warn
-                    # Escape square brackets to avoid Rich markup errors
                     error_msg = str(exc).replace("[", "\\[").replace("]", "\\]")
                     self.console.log(f"[yellow]Git change detection failed: {error_msg}[/]")
                     response.metadata["git_changes"] = {"error": str(exc)}
@@ -613,27 +583,11 @@ class Orchestrator:
                     requires_human=True,
                 )
 
-            # ──── Guardrail Enforcement: Human Approval Overrides ────
-            # Check for replan limit (metadata-driven)
-            max_replans = self.config.workflow.max_consecutive_replans
-            if self.workflow_graph.is_replan_transition(current_phase, decision.next_phase) and max_replans is not None:
-                prospective_replans = consecutive_replans + 1
-                if prospective_replans >= max_replans:
-                    decision = TransitionDecision(
-                        next_phase="blocked",
-                        rationale=f"Max consecutive replans ({max_replans}) reached - human approval required.",
-                        requires_human=True,
-                    )
+            # ──── Guardrail Enforcement ────
+            # Sprint DSL-2+: Metadata-based guardrails being phased out
+            # Approvals and validation will be handled by tools attached to phases
 
-            # Check if current phase requires approval before proceeding
-            if self.workflow_graph.requires_approval(current_phase):
-                decision = TransitionDecision(
-                    next_phase="blocked",
-                    rationale=f"Phase '{current_phase}' requires human approval before proceeding.",
-                    requires_human=True,
-                )
-
-            # Global approval requirement for terminal phases
+            # Global approval requirement for terminal phases (keep for now)
             if self.workflow_graph.is_terminal(decision.next_phase) and self.config.workflow.require_human_approval:
                 decision = TransitionDecision(
                     next_phase="blocked",
@@ -702,20 +656,9 @@ class Orchestrator:
                 self.approver.request_approval(snapshot, decision.rationale)
                 break
 
-            # ──── Log State Transition & Track Replans ────
+            # ──── Log State Transition ────
             prev_phase = current_phase
             current_phase = decision.next_phase
-
-            # Track consecutive replans for guardrail enforcement
-            if self.workflow_graph.is_replan_transition(prev_phase, current_phase):
-                consecutive_replans += 1
-                snapshot.metadata["consecutive_replans"] = consecutive_replans
-                self.console.log(
-                    f"[yellow]Consecutive replans: {consecutive_replans}/{self.config.workflow.max_consecutive_replans}[/]"
-                )
-            elif self.workflow_graph.is_terminal(current_phase):
-                consecutive_replans = 0
-                snapshot.metadata["consecutive_replans"] = 0
 
             self.logger.log_state_transition(
                 snapshot.run_id, iteration, prev_phase, current_phase, decision.rationale
@@ -1367,28 +1310,10 @@ class Orchestrator:
                     requires_human=True,
                 )
 
-        # Apply human approval guardrails (metadata-driven)
-        # Check for replan limit
-        max_replans = self.config.workflow.max_consecutive_replans
-        current_replans = snapshot.metadata.get("consecutive_replans", 0)
-        if self.workflow_graph.is_replan_transition(current_phase, decision.next_phase) and max_replans is not None:
-            prospective_replans = current_replans + 1
-            if prospective_replans >= max_replans:
-                decision = TransitionDecision(
-                    next_phase="blocked",
-                    rationale=f"Max consecutive replans ({max_replans}) reached - human approval required.",
-                    requires_human=True,
-                )
+        # Apply guardrails
+        # Sprint DSL-2+: Metadata-based guardrails removed, validation moves to tools
 
-        # Check if current phase requires approval
-        if self.workflow_graph.requires_approval(current_phase):
-            decision = TransitionDecision(
-                next_phase="blocked",
-                rationale=f"Phase '{current_phase}' requires human approval before proceeding.",
-                requires_human=True,
-            )
-
-        # Global approval requirement for terminal phases
+        # Global approval requirement for terminal phases (keep for now)
         if self.workflow_graph.is_terminal(decision.next_phase) and self.config.workflow.require_human_approval:
             decision = TransitionDecision(
                 next_phase="blocked",
@@ -1477,16 +1402,9 @@ class Orchestrator:
             )
             self.console.log(f"[dim]Persisted channel messages for state[/]")
 
-        # Update run record and track consecutive replans
+        # Update run record
         snapshot.phase = decision.next_phase
         snapshot.iteration = snapshot.iteration
-
-        # Update consecutive_replans counter for replan transitions
-        if self.workflow_graph.is_replan_transition(current_phase, decision.next_phase):
-            consecutive_replans = snapshot.metadata.get("consecutive_replans", 0) + 1
-            snapshot.metadata["consecutive_replans"] = consecutive_replans
-        elif self.workflow_graph.is_terminal(decision.next_phase):
-            snapshot.metadata["consecutive_replans"] = 0
 
         self.db.update_run(snapshot)
 

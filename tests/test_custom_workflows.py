@@ -58,39 +58,27 @@ def test_content_workflow_loads():
 
 
 def test_triage_workflow_metadata():
-    """Test that metadata helpers work for triage workflow."""
+    """Test that generic metadata access works for triage workflow."""
     workflow_path = Path(__file__).parent / "fixtures" / "triage_workflow.py"
     graph = load_workflow(workflow_path=workflow_path)
 
-    # Check phase metadata
+    # Check phase metadata (generic access only - no special helpers)
     assert graph.get_phase_metadata("fix", "git_changes_required") is True
     assert graph.get_phase_metadata("qa", "replan_transition") is True
     assert graph.get_phase_metadata("triage", "role_hint") == "planner"
     assert graph.get_phase_metadata("fix", "role_hint") == "implementer"
 
-    # Check metadata helpers
-    assert graph.requires_git_changes("fix") is True
-    assert graph.requires_git_changes("triage") is False
-
-    # Check replan transitions
-    assert graph.is_replan_transition("qa", "triage") is True
-    assert graph.is_replan_transition("triage", "fix") is False
-
 
 def test_content_workflow_metadata():
-    """Test that metadata helpers work for content workflow."""
+    """Test that generic metadata access works for content workflow."""
     workflow_path = Path(__file__).parent / "fixtures" / "content_workflow.py"
     graph = load_workflow(workflow_path=workflow_path)
 
-    # Check phase metadata
+    # Check phase metadata (generic access only)
     assert graph.get_phase_metadata("edit", "replan_transition") is True
     assert graph.get_phase_metadata("analyze", "role_hint") == "planner"
     assert graph.get_phase_metadata("draft", "role_hint") == "implementer"
     assert graph.get_phase_metadata("edit", "role_hint") == "reviewer"
-
-    # Check replan transitions
-    assert graph.is_replan_transition("edit", "analyze") is True
-    assert graph.is_replan_transition("analyze", "draft") is False
 
 
 def test_phase_order():

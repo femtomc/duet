@@ -383,7 +383,13 @@ def test_git_change_detection():
 
 
 def test_no_git_changes_blocks_run():
-    """Test that missing git changes blocks IMPLEMENT phase."""
+    """
+    Test git change detection (enforcement removed in Sprint DSL-2+).
+
+    Sprint DSL-2+: Git change enforcement moved to tools. This test now verifies
+    that git changes are detected and logged, but workflows complete normally.
+    Future: Re-enable when GitChangeTool is implemented.
+    """
     with tempfile.TemporaryDirectory() as tmpdir_workspace:
         with tempfile.TemporaryDirectory() as tmpdir_artifacts:
             workspace = Path(tmpdir_workspace)
@@ -415,7 +421,7 @@ def test_no_git_changes_blocks_run():
                 workflow=WorkflowConfig(
                     max_iterations=5,
                     require_human_approval=False,
-                    require_git_changes=True,  # Enforce
+                    require_git_changes=False,  # Feature disabled (moving to tools)
                 ),
                 storage=StorageConfig(workspace_root=workspace, run_artifact_dir=artifacts),
             )
@@ -423,85 +429,19 @@ def test_no_git_changes_blocks_run():
             artifact_store = ArtifactStore(artifacts, Console())
             orchestrator = Orchestrator(config, artifact_store, Console())
 
-            # Run orchestration - should block when IMPLEMENT produces no changes
+            # Run orchestration - completes normally (no enforcement)
             snapshot = orchestrator.run(run_id="test-no-changes")
 
-            # Verify orchestration blocked due to missing git changes
-            assert snapshot.phase == "blocked"
-            assert "git changes" in snapshot.notes.lower()
-            # Verify it blocked during implement phase (iteration 2)
-            assert snapshot.iteration == 2
+            # Workflow completes (git enforcement removed)
+            assert snapshot.phase == "done"
+            assert snapshot.iteration >= 1
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Consecutive Replan Guardrail Tests
+# Replan Guardrail Tests (Deprecated - Moving to Tool-Based)
 # ──────────────────────────────────────────────────────────────────────────────
-
-
-def test_consecutive_replans_tracked():
-    """Test that consecutive replans are tracked in metadata."""
-    with tempfile.TemporaryDirectory() as tmpdir_workspace:
-        with tempfile.TemporaryDirectory() as tmpdir_artifacts:
-            workspace = Path(tmpdir_workspace)
-            artifacts = Path(tmpdir_artifacts)
-            create_test_workflow(workspace)  # Create workflow file
-
-            config = DuetConfig(
-                codex=AssistantConfig(provider="echo", model="test"),
-                claude=AssistantConfig(provider="echo", model="test"),
-                workflow=WorkflowConfig(
-                    max_iterations=5,
-                    max_consecutive_replans=10,
-                    require_human_approval=False,
-                    require_git_changes=False,  # Disable to focus on replans
-                ),
-                storage=StorageConfig(
-                    workspace_root=workspace,
-                    run_artifact_dir=artifacts,
-                ),
-            )
-
-            artifact_store = ArtifactStore(artifacts, Console())
-            orchestrator = Orchestrator(config, artifact_store, Console())
-
-            snapshot = orchestrator.run(run_id="test-replan-tracking")
-
-            # Check that consecutive_replans was tracked
-            assert "consecutive_replans" in snapshot.metadata
-
-
-def test_max_consecutive_replans_enforced():
-    """Test that max_consecutive_replans is enforced."""
-    with tempfile.TemporaryDirectory() as tmpdir_workspace:
-        with tempfile.TemporaryDirectory() as tmpdir_artifacts:
-            workspace = Path(tmpdir_workspace)
-            artifacts = Path(tmpdir_artifacts)
-            create_test_workflow(workspace)  # Create workflow file
-
-            config = DuetConfig(
-                codex=AssistantConfig(provider="echo", model="test"),
-                claude=AssistantConfig(provider="echo", model="test"),
-                workflow=WorkflowConfig(
-                    max_iterations=10,
-                    max_consecutive_replans=1,  # Very low limit
-                    require_human_approval=True,  # Will block when limit hit
-                    require_git_changes=False,
-                ),
-                storage=StorageConfig(
-                    workspace_root=workspace,
-                    run_artifact_dir=artifacts,
-                ),
-            )
-
-            artifact_store = ArtifactStore(artifacts, Console())
-            orchestrator = Orchestrator(config, artifact_store, Console())
-
-            snapshot = orchestrator.run(run_id="test-replan-limit")
-
-            # Should block due to replan limit
-            assert snapshot.phase == "blocked"
-            # Consecutive replans should be recorded
-            assert snapshot.metadata.get("consecutive_replans", 0) >= 0
+# Sprint DSL-2+: Replan tracking removed from orchestrator. Will be reimplemented
+# as tool/conversation patterns in future sprints when dataspace model is ready.
 
 
 if __name__ == "__main__":
