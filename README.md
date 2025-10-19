@@ -18,13 +18,12 @@ In short, it's a programmable agentic CLI IDE.
 
 ## How does it work?
 
-Here's the AI gloss:
+Here's the gloss (a human wrote this, in the style of AI):
 
 - **Programmable agent interactions** – start by describing your workflow using agents, channels, guards, and transitions in `.duet/workflow.py`. Surprise: it's a graph!
 - **Stateful execution** – the workflow is compiled into a graph representation, and Duet's orchestration backend consumes it. You can then run the execution loop one phase at a time with `duet next`, rewind with `duet back`, or continue automatically with `duet cont`.
 - **Channel-based messaging** – execution is richly instrumented: agents / tools publish structured payloads to channels (e.g. `task`, `plan`, `code`, `verdict`, `feedback`, …) instead of opaque text blobs. These channels form a communication medium for the agents involved in the workflow.
-- **Persistent history** – every checkpoint, channel update, event, and verdict is stored in SQLite for replay and audit.
-- **Guardrails built-in** – git change detection, iteration limits, human approvals, baseline management, and more.
+- **Persistent history** – we save every checkpoint, channel update, event, and verdict -- checkpoints are stored in SQLite for replay and audit, and synced with Git.
 
 ## Quick Start
 
