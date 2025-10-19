@@ -286,9 +286,14 @@ class Orchestrator:
             # Seed task channel using workflow configuration
             task_channel_name = self.workflow_graph.get_task_channel()
             if task_channel_name:
-                task_input = snapshot.metadata.get("task", "Implement the requested changes")
-                self.workflow_executor.seed_channel(task_channel_name, task_input)
-                self.console.log(f"[dim]Initialized channels, seeded '{task_channel_name}'[/]")
+                # Get task input from metadata (required - no default)
+                task_input = snapshot.metadata.get("task")
+                if task_input:
+                    self.workflow_executor.seed_channel(task_channel_name, task_input)
+                    self.console.log(f"[dim]Initialized channels, seeded '{task_channel_name}'[/]")
+                else:
+                    self.console.log("[yellow]Warning: No task input provided in metadata. "
+                                   "Task channel will remain empty. Use --set task='...' or provide via metadata.[/]")
             else:
                 self.console.log("[yellow]Warning: No task channel configured or detected. "
                                "Set workflow.task_channel or add a channel with schema='text'[/]")
@@ -429,8 +434,9 @@ class Orchestrator:
                 )
                 break
 
-            # ──── Extract Verdict from Metadata (REVIEW phase) ────
-            if current_phase == "review" and "verdict" in response.metadata:
+            # ──── Extract Verdict from Metadata (if phase publishes verdict channel) ────
+            phase_def = self.workflow_graph.phases.get(current_phase)
+            if phase_def and "verdict" in phase_def.publishes and "verdict" in response.metadata:
                 verdict_str = response.metadata["verdict"]
                 if isinstance(verdict_str, str):
                     # Normalize verdict string (handle case variations)
@@ -491,8 +497,12 @@ class Orchestrator:
                     self._persist_interaction(snapshot.run_id, current_phase, request, response)
                     break
 
-            # ──── Implementation Validation: Detect Repository Changes ────
-            if current_phase == "implement" and self.config.workflow.require_git_changes:
+            # ──── Git Change Validation (Phase Metadata) ────
+            # Check if this phase requires git changes (via metadata or global config)
+            phase_requires_git = self.workflow_graph.requires_git_changes(current_phase)
+            global_requires_git = self.config.workflow.require_git_changes
+
+            if phase_requires_git or global_requires_git:
                 try:
                     if self.git.is_git_repo():
                         # Compare against baseline commit to detect new commits
@@ -531,11 +541,11 @@ class Orchestrator:
                         if not changes.has_changes:
                             snapshot.phase = "blocked"
                             snapshot.notes = (
-                                "Implementation phase produced no repository changes. "
-                                "Claude must modify files, stage changes, or create commits."
+                                f"Phase '{current_phase}' requires git changes but produced none. "
+                                f"Agent must modify files, stage changes, or create commits."
                             )
                             self.console.log(
-                                "[red]No repository changes detected after IMPLEMENT phase[/]"
+                                f"[red]No repository changes detected after phase '{current_phase}' (git changes required)[/]"
                             )
                             self._persist_interaction(snapshot.run_id, current_phase, request, response)
                             break
@@ -596,22 +606,32 @@ class Orchestrator:
                 )
 
             # ──── Guardrail Enforcement: Human Approval Overrides ────
-            if current_phase == "review":
-                max_replans = self.config.workflow.max_consecutive_replans
-                if decision.next_phase == "plan" and max_replans is not None:
-                    prospective_replans = consecutive_replans + 1
-                    if prospective_replans >= max_replans:
-                        decision = TransitionDecision(
-                            next_phase="blocked",
-                            rationale=f"Max consecutive replans ({max_replans}) reached - human approval required.",
-                            requires_human=True,
-                        )
-                elif decision.next_phase == "done" and self.config.workflow.require_human_approval:
+            # Check for replan limit (metadata-driven)
+            max_replans = self.config.workflow.max_consecutive_replans
+            if self.workflow_graph.is_replan_transition(current_phase, decision.next_phase) and max_replans is not None:
+                prospective_replans = consecutive_replans + 1
+                if prospective_replans >= max_replans:
                     decision = TransitionDecision(
                         next_phase="blocked",
-                        rationale="Human approval required before completion.",
+                        rationale=f"Max consecutive replans ({max_replans}) reached - human approval required.",
                         requires_human=True,
                     )
+
+            # Check if current phase requires approval before proceeding
+            if self.workflow_graph.requires_approval(current_phase):
+                decision = TransitionDecision(
+                    next_phase="blocked",
+                    rationale=f"Phase '{current_phase}' requires human approval before proceeding.",
+                    requires_human=True,
+                )
+
+            # Global approval requirement for terminal phases
+            if self.workflow_graph.is_terminal(decision.next_phase) and self.config.workflow.require_human_approval:
+                decision = TransitionDecision(
+                    next_phase="blocked",
+                    rationale="Human approval required before completion (global config).",
+                    requires_human=True,
+                )
 
             self.console.log(f"[blue]Decision:[/] {decision.rationale}")
 
@@ -1084,9 +1104,13 @@ class Orchestrator:
                 # Seed task channel using workflow configuration
                 task_channel_name = self.workflow_graph.get_task_channel()
                 if task_channel_name:
-                    task_input = snapshot.metadata.get("task", "Implement the requested changes")
-                    self.workflow_executor.seed_channel(task_channel_name, task_input)
-                    self.console.log(f"[dim]Initialized channels, seeded '{task_channel_name}'[/]")
+                    task_input = snapshot.metadata.get("task")
+                    if task_input:
+                        self.workflow_executor.seed_channel(task_channel_name, task_input)
+                        self.console.log(f"[dim]Initialized channels, seeded '{task_channel_name}'[/]")
+                    else:
+                        self.console.log("[yellow]Warning: No task input provided. "
+                                       "Task channel will remain empty. Use --set task='...' or provide via metadata.[/]")
                 else:
                     self.console.log("[yellow]Warning: No task channel configured[/]")
 
@@ -1147,12 +1171,16 @@ class Orchestrator:
 
         self.console.rule(f"[bold cyan]{current_phase.upper()}[/] (Iteration {snapshot.iteration})")
 
-        # Compose request (include feedback if provided)
+        # Compose request (include feedback if provided and phase consumes feedback channel)
         request = self._compose_request(current_phase, snapshot)
-        if feedback and current_phase == "plan":
-            # Inject user feedback into plan request
+        phase_def = self.workflow_graph.phases.get(current_phase)
+        if feedback and phase_def and "feedback" in phase_def.consumes:
+            # Inject user feedback into request for phases that consume it
             request.prompt += f"\n\n──── User Feedback ────\n{feedback}\n"
             request.context["user_feedback"] = feedback
+            # Also seed the feedback channel
+            if self.workflow_executor:
+                self.workflow_executor.seed_channel("feedback", feedback)
 
         adapter = self._select_adapter(current_phase)
         adapter_name = adapter.__class__.__name__
@@ -1213,8 +1241,9 @@ class Orchestrator:
                 "message": f"Phase failed: {exc}",
             }
 
-        # Extract verdict if REVIEW phase
-        if current_phase == "review" and "verdict" in response.metadata:
+        # Extract verdict if phase publishes verdict channel
+        phase_def = self.workflow_graph.phases.get(current_phase)
+        if phase_def and "verdict" in phase_def.publishes and "verdict" in response.metadata:
             verdict_str = response.metadata["verdict"]
             if isinstance(verdict_str, str):
                 verdict_lower = verdict_str.lower().strip()
@@ -1297,24 +1326,34 @@ class Orchestrator:
                     requires_human=True,
                 )
 
-        # Apply human approval guardrails for review phase
-        if current_phase == "review":
-            max_replans = self.config.workflow.max_consecutive_replans
-            current_replans = snapshot.metadata.get("consecutive_replans", 0)
-            if decision.next_phase == "plan" and max_replans is not None:
-                prospective_replans = current_replans + 1
-                if prospective_replans >= max_replans:
-                    decision = TransitionDecision(
-                        next_phase="blocked",
-                        rationale=f"Max consecutive replans ({max_replans}) reached - human approval required.",
-                        requires_human=True,
-                    )
-            elif decision.next_phase == "done" and self.config.workflow.require_human_approval:
+        # Apply human approval guardrails (metadata-driven)
+        # Check for replan limit
+        max_replans = self.config.workflow.max_consecutive_replans
+        current_replans = snapshot.metadata.get("consecutive_replans", 0)
+        if self.workflow_graph.is_replan_transition(current_phase, decision.next_phase) and max_replans is not None:
+            prospective_replans = current_replans + 1
+            if prospective_replans >= max_replans:
                 decision = TransitionDecision(
                     next_phase="blocked",
-                    rationale="Human approval required before completion.",
+                    rationale=f"Max consecutive replans ({max_replans}) reached - human approval required.",
                     requires_human=True,
                 )
+
+        # Check if current phase requires approval
+        if self.workflow_graph.requires_approval(current_phase):
+            decision = TransitionDecision(
+                next_phase="blocked",
+                rationale=f"Phase '{current_phase}' requires human approval before proceeding.",
+                requires_human=True,
+            )
+
+        # Global approval requirement for terminal phases
+        if self.workflow_graph.is_terminal(decision.next_phase) and self.config.workflow.require_human_approval:
+            decision = TransitionDecision(
+                next_phase="blocked",
+                rationale="Human approval required before completion (global config).",
+                requires_human=True,
+            )
 
         # ──── Persist Iteration ────
         git_meta = response.metadata.get("git_changes", {})

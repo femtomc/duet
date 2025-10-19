@@ -254,9 +254,9 @@ class WorkflowExecutor:
             value = self.channel_store.get(channel_name)
             context.channel_payloads[channel_name] = value
 
-        # Build prompt using builder
+        # Build prompt using builder (pass phase definition for metadata access)
         try:
-            builder = get_builder(phase_name)
+            builder = get_builder(phase_name, phase_def)
             request = builder.build(context)
         except Exception as exc:
             return PhaseExecutionResult(

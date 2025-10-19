@@ -106,8 +106,8 @@ class WorkflowGraph:
         Check if a transition counts as a replan.
 
         A replan is detected if:
-        1. The from_phase has metadata replan_transition=True, OR
-        2. Both phases have replan_transition=True set
+        1. The from_phase has metadata replan_transition=True (transitioning FROM a review-like phase back to planning)
+        2. The to_phase has metadata replan_transition=True (transitioning TO a planning-like phase from a review)
 
         Args:
             from_phase: Source phase name
@@ -116,14 +116,13 @@ class WorkflowGraph:
         Returns:
             True if this transition counts as a replan
         """
-        # Check if from_phase is marked as a replan source
-        if self.get_phase_metadata(from_phase, "replan_transition", False):
-            return True
-
-        # Alternative: both phases marked
+        # Check both phases for replan markers
         from_marked = self.get_phase_metadata(from_phase, "replan_transition", False)
         to_marked = self.get_phase_metadata(to_phase, "replan_transition", False)
-        return from_marked and to_marked
+
+        # A replan occurs if either phase is marked as part of a replan transition
+        # Typically: from_phase would be review (source), to_phase would be plan (destination)
+        return from_marked or to_marked
 
     def requires_git_changes(self, phase_name: str) -> bool:
         """Check if a phase requires git changes."""
