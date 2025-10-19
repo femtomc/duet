@@ -152,36 +152,85 @@ class StepResult:
 @dataclass
 class ReadStep:
     """
-    Step that reads values from channels into local context.
+    Step that reads facts/values from dataspace into local context.
 
-    Declarative subscription to channel facts. Values are materialized
-    at step execution time from the global channel/dataspace state.
+    Supports both typed facts (new API) and legacy channel-based reads.
+
+    **Typed Fact API (Preferred):**
+        ReadStep(
+            fact_type=PlanDoc,
+            constraints={"task_id": "123"},
+            into="plan"
+        )
+
+    **Legacy Channel API:**
+        ReadStep(
+            channels=[Channel("plan")],
+            into=["plan"]
+        )
 
     Attributes:
-        channels: Channels to read from
-        into: Optional context keys to store values (defaults to channel names)
+        channels: (Legacy) Channels to read from
+        into: Context keys to store values
+        fact_type: (New) Fact type to query from dataspace
+        constraints: (New) Constraints for fact query
+        latest_only: Whether to return only the latest fact by iteration
     """
 
-    channels: List[Channel]
+    channels: Optional[List[Channel]] = None
     into: Optional[List[str]] = None
+    fact_type: Optional[type] = None
+    constraints: Optional[Dict[str, Any]] = None
+    latest_only: bool = True
 
-    def execute(self, context: FacetContext) -> StepResult:
+    def execute(self, context: FacetContext, dataspace=None) -> StepResult:
         """
-        Read channel values into context.
+        Read facts/values into context.
 
         Args:
             context: Facet execution context
+            dataspace: Dataspace for querying facts (new API)
 
         Returns:
-            StepResult with channel values in context_updates
+            StepResult with facts/values in context_updates
         """
         updates = {}
-        for i, channel in enumerate(self.channels):
-            # Get value from pre-loaded channel_reads
-            value = context.get_channel_value(channel.name)
-            # Store in context with key
-            key = self.into[i] if self.into and i < len(self.into) else channel.name
-            updates[key] = value
+
+        # New API: query fact_type from dataspace
+        if self.fact_type and dataspace:
+            from ..dataspace import FactPattern
+
+            pattern = FactPattern(
+                fact_type=self.fact_type, constraints=self.constraints or {}
+            )
+            facts = dataspace.query(pattern, latest_only=self.latest_only)
+
+            # Store facts in context
+            if self.into:
+                # Single key provided - store first fact or list of facts
+                key = self.into[0] if isinstance(self.into, list) else self.into
+                if self.latest_only and facts:
+                    updates[key] = facts[0]
+                else:
+                    updates[key] = facts
+            else:
+                # No key provided - use fact type name
+                key = self.fact_type.__name__.lower()
+                if self.latest_only and facts:
+                    updates[key] = facts[0]
+                else:
+                    updates[key] = facts
+
+        # Legacy API: read from pre-loaded channel_reads
+        elif self.channels:
+            for i, channel in enumerate(self.channels):
+                # Get value from pre-loaded channel_reads
+                value = context.get_channel_value(channel.name)
+                # Store in context with key
+                key = self.into[i] if self.into and i < len(self.into) else channel.name
+                updates[key] = value
+        else:
+            return StepResult.fail("ReadStep requires either fact_type or channels")
 
         return StepResult(context_updates=updates, success=True)
 
@@ -373,40 +422,113 @@ class HumanStep:
 @dataclass
 class WriteStep:
     """
-    Step that writes value to a channel explicitly.
+    Step that writes a fact to the dataspace or value to a channel.
 
-    Direct channel assertion. In future sprints, this becomes assert_fact().
+    Supports both typed facts (new API) and legacy channel-based writes.
+
+    **Typed Fact API (Preferred):**
+        WriteStep(
+            fact_type=ReviewVerdict,
+            values={"verdict": "approve", "feedback": "Looks good!"},
+            fact_id_key="verdict_id"  # Optional: get fact_id from context
+        )
+
+    **Legacy Channel API:**
+        WriteStep(
+            channel=Channel("verdict"),
+            value_key="verdict_value"
+        )
 
     Attributes:
-        channel: Channel to write to
-        value_key: Key in context containing value to write
-        static_value: Optional static value to write (instead of context lookup)
+        channel: (Legacy) Channel to write to
+        value_key: (Legacy) Key in context containing value to write
+        static_value: (Legacy) Static value to write
+        fact_type: (New) Fact type to construct and assert
+        values: (New) Dict of field values for the fact (fact_id is auto-generated if not provided)
+        fact_id_key: (New) Context key containing fact_id (optional)
+        store_handle_as: (New) Context key to store returned handle (optional)
     """
 
-    channel: Channel
+    channel: Optional[Channel] = None
     value_key: Optional[str] = None
     static_value: Any = None
+    fact_type: Optional[type] = None
+    values: Optional[Dict[str, Any]] = None
+    fact_id_key: Optional[str] = None
+    store_handle_as: Optional[str] = None
 
-    def execute(self, context: FacetContext) -> StepResult:
+    def execute(self, context: FacetContext, dataspace=None) -> StepResult:
         """
-        Write value to channel.
+        Write fact to dataspace or value to channel.
 
         Args:
             context: Facet execution context
+            dataspace: Dataspace for asserting facts (new API)
 
         Returns:
-            StepResult with channel write
+            StepResult with channel write or fact assertion
         """
-        # Get value from context or use static
-        if self.static_value is not None:
-            value = self.static_value
-        elif self.value_key:
-            value = context.get(self.value_key)
-        else:
-            # Default: use channel name as context key
-            value = context.get(self.channel.name)
+        # New API: construct and assert typed fact
+        if self.fact_type and dataspace:
+            import uuid
 
-        return StepResult(
-            channel_writes={self.channel.name: value},
-            success=True,
-        )
+            # Build fact values from provided dict + context
+            fact_values = {}
+            if self.values:
+                for key, value in self.values.items():
+                    # If value is a string starting with "$", treat as context key
+                    if isinstance(value, str) and value.startswith("$"):
+                        context_key = value[1:]
+                        fact_values[key] = context.get(context_key)
+                    else:
+                        fact_values[key] = value
+
+            # Get or generate fact_id
+            if self.fact_id_key:
+                fact_id = context.get(self.fact_id_key)
+                if not fact_id:
+                    fact_id = f"{self.fact_type.__name__.lower()}_{uuid.uuid4().hex[:8]}"
+            elif "fact_id" not in fact_values:
+                fact_id = f"{self.fact_type.__name__.lower()}_{uuid.uuid4().hex[:8]}"
+            else:
+                fact_id = fact_values.get("fact_id")
+
+            # Ensure fact_id is in values
+            fact_values["fact_id"] = fact_id
+
+            # Construct fact instance
+            try:
+                fact = self.fact_type(**fact_values)
+            except TypeError as e:
+                return StepResult.fail(f"Failed to construct {self.fact_type.__name__}: {e}")
+
+            # Assert fact to dataspace
+            handle = dataspace.assert_fact(fact)
+
+            # Track handle in context
+            context.add_handle(handle)
+
+            # Optionally store handle in context for later use
+            context_updates = {}
+            if self.store_handle_as:
+                context_updates[self.store_handle_as] = handle
+
+            return StepResult(context_updates=context_updates, success=True)
+
+        # Legacy API: write to channel
+        elif self.channel:
+            # Get value from context or use static
+            if self.static_value is not None:
+                value = self.static_value
+            elif self.value_key:
+                value = context.get(self.value_key)
+            else:
+                # Default: use channel name as context key
+                value = context.get(self.channel.name)
+
+            return StepResult(
+                channel_writes={self.channel.name: value},
+                success=True,
+            )
+        else:
+            return StepResult.fail("WriteStep requires either fact_type or channel")

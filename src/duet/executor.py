@@ -100,6 +100,7 @@ class GuardEvaluator:
         current_phase: str,
         workflow_graph: WorkflowGraph,
         guard_context: Dict[str, Any],
+        dataspace=None,
     ) -> GuardEvaluationResult:
         """
         Evaluate transitions from current phase, return first match.
@@ -110,7 +111,8 @@ class GuardEvaluator:
         Args:
             current_phase: Name of current phase
             workflow_graph: Compiled workflow graph
-            guard_context: Context for guard evaluation
+            guard_context: Context for guard evaluation (legacy)
+            dataspace: Dataspace for fact-based guard evaluation (new API)
 
         Returns:
             GuardEvaluationResult with chosen transition and rationale
@@ -134,7 +136,7 @@ class GuardEvaluator:
             guard_desc = f"{from_name} → {to_name} (priority={transition.priority})"
 
             try:
-                result = transition.when.evaluate(guard_context)
+                result = transition.when.evaluate(guard_context, dataspace)
                 guard_results[guard_desc] = result
 
                 if result:

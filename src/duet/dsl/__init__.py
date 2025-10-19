@@ -5,7 +5,7 @@ A Python DSL for defining orchestration workflows programmatically.
 Replaces the legacy .duet/prompts/*.md template system with a type-safe,
 composable workflow definition language.
 
-Example:
+Example Workflow:
     from duet.dsl import Workflow, Agent, Channel, Phase, Transition, When
 
     workflow = Workflow(
@@ -42,6 +42,33 @@ Example:
                        when=When.channel_has("verdict", "changes_requested")),
         ],
     )
+
+Custom Fact Types (Typed Facts):
+    from dataclasses import dataclass
+    from duet.dsl import Fact, fact, FactPattern
+
+    # Define your own fact types
+    @fact
+    @dataclass
+    class TaskRequest(Fact):
+        fact_id: str
+        task_description: str
+        priority: int = 1
+
+    # Use in workflows with dataspace
+    from duet.dataspace import Dataspace
+
+    ds = Dataspace()
+    handle = ds.assert_fact(
+        TaskRequest(
+            fact_id="task_123",
+            task_description="Implement feature X",
+            priority=1
+        )
+    )
+
+    # Query for facts
+    tasks = ds.query(FactPattern(fact_type=TaskRequest, constraints={"priority": 1}))
 """
 
 from .workflow import (
@@ -57,11 +84,27 @@ from .workflow import (
     AndGuard,
     ChannelHasGuard,
     EmptyGuard,
+    FactExistsGuard,
+    FactMatchesGuard,
     GitChangesGuard,
     NeverGuard,
     NotGuard,
     OrGuard,
     VerdictGuard,
+)
+
+# Import fact types and utilities for user-defined facts
+from ..dataspace import (
+    ApprovalGrant,
+    ApprovalRequest,
+    CodeArtifact,
+    Fact,
+    FactPattern,
+    FactRegistry,
+    Handle,
+    PlanDoc,
+    ReviewVerdict,
+    fact,
 )
 
 __all__ = [
@@ -83,4 +126,18 @@ __all__ = [
     "AndGuard",
     "OrGuard",
     "NotGuard",
+    "FactExistsGuard",
+    "FactMatchesGuard",
+    # Fact types and utilities
+    "Fact",
+    "fact",
+    "FactPattern",
+    "FactRegistry",
+    "Handle",
+    # Built-in fact types
+    "PlanDoc",
+    "CodeArtifact",
+    "ReviewVerdict",
+    "ApprovalRequest",
+    "ApprovalGrant",
 ]

@@ -988,3 +988,110 @@ def messages(
 
     console.print(table)
     console.print(f"\n[dim]Showing {len(msgs)} messages{f' (limited to {limit})' if len(msgs) == limit else ''}[/]")
+
+
+@app.command()
+def approve(
+    run_id: str = typer.Argument(..., help="Run ID that is awaiting approval"),
+    notes: Optional[str] = typer.Option(None, "--notes", "-n", help="Optional approval notes/feedback"),
+    approver: str = typer.Option("user", "--approver", help="Approver name (default: user)"),
+    config: Optional[Path] = typer.Option(None, "--config", "-c", help="Config file path."),
+) -> None:
+    """
+    Grant approval for a paused workflow run.
+
+    When a workflow pauses at a HumanStep (approval required), this command
+    asserts an ApprovalGrant fact into the dataspace, allowing the workflow
+    to resume execution.
+
+    Usage:
+        duet approve RUN_ID --notes "Looks good, approved!"
+    """
+    import uuid
+
+    from .dataspace import ApprovalGrant, ApprovalRequest, Dataspace, FactPattern
+
+    duet_config = find_config(config)
+
+    # Database required
+    db_path = Path(duet_config.storage.run_artifact_dir).parent / "duet.db"
+    if not db_path.exists():
+        console.print("[red]Database not found. Initialize with: uv run duet init[/]")
+        raise typer.Exit(1)
+
+    db = DuetDatabase(db_path)
+
+    # Check if run exists and is blocked
+    run = db.get_run(run_id)
+    if not run:
+        console.print(f"[red]Run not found:[/] {run_id}")
+        raise typer.Exit(1)
+
+    if run["status"] != "blocked":
+        console.print(f"[yellow]Run is not awaiting approval:[/] status={run['status']}")
+        console.print(f"[dim]Only runs with status='blocked' require approval[/]")
+        raise typer.Exit(1)
+
+    console.print(f"[cyan]Run:[/] {run_id}")
+    console.print(f"[dim]Status:[/] {run['status']}")
+    console.print(f"[dim]Approval reason:[/] {run.get('approval_reason', 'N/A')}")
+    console.print()
+
+    # Initialize dataspace and load pending approval requests
+    dataspace = Dataspace()
+
+    # Query for pending ApprovalRequest facts for this run
+    pattern = FactPattern(fact_type=ApprovalRequest, constraints={})
+    approval_requests = dataspace.query(pattern)
+
+    # Filter to requests for this run (check context)
+    run_requests = [
+        req for req in approval_requests if req.context.get("run_id") == run_id
+    ]
+
+    if not run_requests:
+        console.print(
+            f"[yellow]No pending approval requests found in dataspace for run {run_id}[/]"
+        )
+        console.print(f"[dim]The approval request may have expired or been retracted[/]")
+        # Continue anyway - update run status
+    else:
+        console.print(f"[dim]Found {len(run_requests)} pending approval request(s)[/]")
+        for req in run_requests:
+            console.print(f"  • [cyan]{req.fact_id}[/] from {req.requester}: {req.reason}")
+
+    # Create ApprovalGrant fact
+    # Use the first pending request ID if available, or generate a generic grant
+    if run_requests:
+        request_id = run_requests[0].fact_id
+    else:
+        # No pending requests in dataspace - grant approval generically
+        request_id = f"approval_request_{run_id}"
+
+    grant_id = f"approval_grant_{uuid.uuid4().hex[:8]}"
+    grant = ApprovalGrant(
+        fact_id=grant_id,
+        request_id=request_id,
+        approver=approver,
+        notes=notes,
+        metadata={
+            "run_id": run_id,
+            "granted_at": str(db.now()),
+        },
+    )
+
+    # Assert grant into dataspace
+    handle = dataspace.assert_fact(grant)
+    console.print()
+    console.print(f"[green]✓ Approval granted![/]")
+    console.print(f"[dim]Grant ID: {grant_id}[/]")
+    console.print(f"[dim]Request ID: {request_id}[/]")
+    if notes:
+        console.print(f"[dim]Notes: {notes}[/]")
+
+    # Update run status in database
+    db.update_run_status(run_id, "active")
+    console.print()
+    console.print(f"[cyan]Run status updated to 'active'[/]")
+    console.print(f"\n[green]Continue the run with:[/] duet next --run-id {run_id}")
+    console.print(f"[dim]Or auto-resume:[/] duet cont {run_id}")

@@ -150,6 +150,79 @@ class FacetScheduler:
         if self.executing == facet_id:
             self.executing = None
 
+    def mark_waiting_for_approval(self, facet_id: str, request_id: str) -> None:
+        """
+        Mark facet as waiting for approval.
+
+        Subscribes to ApprovalGrant facts matching the request_id.
+        When grant appears, facet is moved to ready queue.
+
+        Args:
+            facet_id: Facet waiting for approval
+            request_id: ID of ApprovalRequest fact
+        """
+        from .dataspace import ApprovalGrant, FactPattern
+
+        self.waiting.add(facet_id)
+        if self.executing == facet_id:
+            self.executing = None
+
+        # Subscribe to ApprovalGrant for this request
+        pattern = FactPattern(
+            fact_type=ApprovalGrant, constraints={"request_id": request_id}
+        )
+
+        def on_approval_granted(fact):
+            """Callback when approval is granted."""
+            if facet_id in self.waiting:
+                self.waiting.remove(facet_id)
+                self.ready_queue.append(facet_id)
+                self.console.log(
+                    f"[green]Facet {facet_id} approved! Moving to ready queue[/]"
+                )
+
+        self.dataspace.subscribe(pattern, on_approval_granted)
+
+    def check_approvals(self) -> int:
+        """
+        Check for pending approvals and resume waiting facets.
+
+        Queries dataspace for ApprovalGrant facts and moves corresponding
+        waiting facets to the ready queue.
+
+        Returns:
+            Number of facets resumed
+        """
+        from .dataspace import ApprovalGrant, ApprovalRequest, FactPattern
+
+        resumed = 0
+
+        # Query all approval grants
+        grant_pattern = FactPattern(fact_type=ApprovalGrant)
+        grants = self.dataspace.query(grant_pattern)
+
+        # Query all approval requests
+        request_pattern = FactPattern(fact_type=ApprovalRequest)
+        requests = self.dataspace.query(request_pattern)
+
+        # Build map of request_id -> grant
+        granted_requests = {grant.request_id for grant in grants}
+
+        # Check if any waiting facets have grants
+        for facet_id in list(self.waiting):
+            # Check if this facet is waiting for an approval that's been granted
+            # This is a simplified check - in a full implementation, we'd track
+            # which request_id each facet is waiting for
+            subscription = self.facets.get(facet_id)
+            if subscription:
+                # Check if facet's context has an approval request
+                # For now, assume any waiting facet with a grant can resume
+                # This will be improved when facets track their request IDs
+                pass
+
+        # For now, return 0 - full implementation requires facets to track request IDs
+        return resumed
+
 
 # Import after class definition to avoid circular import
 from .dataspace import ChannelFact

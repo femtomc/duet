@@ -125,7 +125,7 @@ class FacetRunner:
 
             try:
                 if isinstance(step, ReadStep):
-                    result = self._execute_read_step(step, context)
+                    result = self._execute_read_step(step, context, dataspace)
                 elif isinstance(step, ToolStep):
                     result = self._execute_tool_step(step, context)
                 elif isinstance(step, AgentStep):
@@ -133,7 +133,7 @@ class FacetRunner:
                 elif isinstance(step, HumanStep):
                     result = self._execute_human_step(step, context, dataspace)
                 elif isinstance(step, WriteStep):
-                    result = self._execute_write_step(step, context)
+                    result = self._execute_write_step(step, context, dataspace)
                 else:
                     result = StepResult.fail(f"Unknown step type: {type(step)}")
 
@@ -207,9 +207,15 @@ class FacetRunner:
             step_logs=step_logs,
         )
 
-    def _execute_read_step(self, step: ReadStep, context: FacetContext) -> StepResult:
-        """Execute ReadStep - channels already loaded in context.channel_reads."""
-        return step.execute(context)
+    def _execute_read_step(
+        self, step: ReadStep, context: FacetContext, dataspace
+    ) -> StepResult:
+        """
+        Execute ReadStep - query facts from dataspace or use preloaded channel reads.
+
+        Supports both typed fact queries (new API) and legacy channel reads.
+        """
+        return step.execute(context, dataspace)
 
     def _execute_tool_step(self, step: ToolStep, context: FacetContext) -> StepResult:
         """Execute ToolStep - run tool and merge results."""
@@ -321,6 +327,12 @@ class FacetRunner:
         """
         return step.execute(context, dataspace)
 
-    def _execute_write_step(self, step: WriteStep, context: FacetContext) -> StepResult:
-        """Execute WriteStep - write value to channel."""
-        return step.execute(context)
+    def _execute_write_step(
+        self, step: WriteStep, context: FacetContext, dataspace
+    ) -> StepResult:
+        """
+        Execute WriteStep - assert typed fact or write to channel.
+
+        Supports both typed fact assertions (new API) and legacy channel writes.
+        """
+        return step.execute(context, dataspace)

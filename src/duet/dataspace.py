@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Type
 from collections import defaultdict
 
 
@@ -35,6 +35,63 @@ class Handle:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Fact Registry (Optional - for future serialization/validation)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class FactRegistry:
+    """
+    Registry for user-defined fact types.
+
+    Allows dynamic fact type registration for serialization, validation,
+    and introspection. Optional - facts work without registration.
+    """
+
+    _registry: Dict[str, Type] = {}
+
+    @classmethod
+    def register(cls, name: str, fact_type: Type) -> None:
+        """Register a fact type by name."""
+        cls._registry[name] = fact_type
+
+    @classmethod
+    def get(cls, name: str) -> Optional[Type]:
+        """Get a registered fact type by name."""
+        return cls._registry.get(name)
+
+    @classmethod
+    def all_types(cls) -> Dict[str, Type]:
+        """Get all registered fact types."""
+        return cls._registry.copy()
+
+
+def fact(cls: Type) -> Type:
+    """
+    Decorator for registering user-defined fact types.
+
+    Usage:
+        @fact
+        @dataclass
+        class MyCustomFact(Fact):
+            fact_id: str
+            my_field: str
+            my_value: int
+
+    The decorator:
+    1. Registers the fact type in FactRegistry (optional, for tooling)
+    2. Returns the class unchanged (no modification)
+
+    Args:
+        cls: Class to register as a fact type
+
+    Returns:
+        The same class (unmodified)
+    """
+    FactRegistry.register(cls.__name__, cls)
+    return cls
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Fact Types (Structured Channel Data)
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -46,7 +103,37 @@ class Fact:
     Facts are typed, structured data that replace loose string channel values.
     Each fact has an ID and can be asserted/retracted.
 
-    Not a dataclass to avoid field ordering issues with subclasses.
+    **Creating Custom Facts:**
+
+    User-defined facts should:
+    1. Inherit from Fact
+    2. Be decorated with @dataclass
+    3. Include a fact_id: str field
+    4. Optionally use @fact decorator for registration
+
+    Example:
+        from dataclasses import dataclass
+        from duet.dsl import Fact, fact
+
+        @fact
+        @dataclass
+        class TaskRequest(Fact):
+            fact_id: str
+            task_description: str
+            priority: int
+            assigned_to: str
+
+    Facts can then be asserted into the dataspace:
+        handle = dataspace.assert_fact(
+            TaskRequest(
+                fact_id="task_123",
+                task_description="Implement feature X",
+                priority=1,
+                assigned_to="planner"
+            )
+        )
+
+    Not a dataclass itself to avoid field ordering issues with subclasses.
     """
 
     def matches(self, pattern: FactPattern) -> bool:
@@ -54,6 +141,7 @@ class Fact:
         return pattern.matches(self)
 
 
+@fact
 @dataclass
 class PlanDoc(Fact):
     """Fact representing an implementation plan."""
@@ -65,6 +153,7 @@ class PlanDoc(Fact):
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
+@fact
 @dataclass
 class CodeArtifact(Fact):
     """Fact representing code changes/implementation."""
@@ -77,6 +166,7 @@ class CodeArtifact(Fact):
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
+@fact
 @dataclass
 class ReviewVerdict(Fact):
     """Fact representing a review decision."""
@@ -88,6 +178,7 @@ class ReviewVerdict(Fact):
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
+@fact
 @dataclass
 class ApprovalRequest(Fact):
     """Fact representing a request for human approval."""
@@ -99,6 +190,7 @@ class ApprovalRequest(Fact):
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
+@fact
 @dataclass
 class ApprovalGrant(Fact):
     """Fact representing granted approval."""
@@ -110,6 +202,7 @@ class ApprovalGrant(Fact):
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
+@fact
 @dataclass
 class ChannelFact(Fact):
     """
@@ -117,6 +210,10 @@ class ChannelFact(Fact):
 
     Wraps channel values as structured facts in the dataspace.
     As we move to fully typed facts (PlanDoc, etc.), these will be replaced.
+
+    **DEPRECATED:** This fact type will be removed once all workflows migrate
+    to typed facts. Use domain-specific fact types (PlanDoc, CodeArtifact, etc.)
+    instead of generic channel values.
 
     Attributes:
         fact_id: Unique fact ID
@@ -273,10 +370,25 @@ class Dataspace:
 
     def query(self, pattern: FactPattern, latest_only: bool = False) -> List[Fact]:
         """
-        Query for facts matching a pattern.
+        Query for facts matching a pattern with optional constraints.
+
+        **Typed Fact Queries:**
+            # Query all PlanDoc facts
+            plans = dataspace.query(FactPattern(fact_type=PlanDoc))
+
+            # Query with constraints
+            task_plans = dataspace.query(
+                FactPattern(fact_type=PlanDoc, constraints={"task_id": "123"})
+            )
+
+            # Get latest by iteration
+            latest_plan = dataspace.query(
+                FactPattern(fact_type=PlanDoc, constraints={"task_id": "123"}),
+                latest_only=True
+            )
 
         Args:
-            pattern: Pattern to match
+            pattern: Pattern to match (fact_type + optional constraints)
             latest_only: If True and pattern has channel_name, return only latest by iteration
 
         Returns:
