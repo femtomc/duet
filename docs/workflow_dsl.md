@@ -823,6 +823,52 @@ python -c "from duet.workflow_loader import load_workflow; load_workflow()"
 
 ---
 
+## Channel History & Replay
+
+### Message Persistence
+
+Every channel update is automatically persisted to the `messages` table in SQLite. This provides a complete audit trail of all channel changes throughout workflow execution.
+
+### Viewing Channel History
+
+Use CLI commands to inspect channel messages:
+
+```bash
+# Latest channel values
+duet status run-20251018-142030
+
+# Full channel history
+duet inspect run-20251018-142030 --channel plan
+
+# Dedicated message query
+duet messages run-20251018-142030 --channel code --phase implement
+```
+
+### Replay from Messages
+
+Reconstruct channel state from message history:
+
+```python
+from duet.executor import WorkflowExecutor
+from duet.persistence import DuetDatabase
+
+graph = load_workflow()
+executor = WorkflowExecutor(graph)
+
+db = DuetDatabase(".duet/duet.db")
+messages = db.list_messages(run_id="run-123")
+
+# Replay to reconstruct state
+executor.replay_from_messages(messages)
+
+channels = executor.get_current_channels()
+# State now matches end of run
+```
+
+This enables deterministic replay, audit verification, and analytics on channel flows.
+
+---
+
 ## Future Extensions
 
 Planned enhancements:

@@ -383,3 +383,32 @@ class WorkflowExecutor:
     def restore_channels(self, snapshot: Dict[str, Any]) -> None:
         """Restore channel state from snapshot."""
         self.channel_store.restore(snapshot)
+
+    def replay_from_messages(self, messages: list[Dict[str, Any]]) -> None:
+        """
+        Rebuild channel state from message history.
+
+        Applies messages in chronological order to reconstruct channel state.
+        Useful for duet back when snapshot missing or for deterministic replay.
+
+        Args:
+            messages: List of message dicts from database (chronologically ordered)
+        """
+        from .channels import deserialize_channel_message
+
+        # Clear current state
+        self.channel_store.clear()
+
+        # Apply messages in order
+        for message in messages:
+            channel_name = message["channel"]
+
+            # Deserialize payload
+            payload = deserialize_channel_message(message)
+
+            # Update channel
+            try:
+                self.channel_store.set(channel_name, payload)
+            except ValueError:
+                # Channel not declared in workflow (skip)
+                continue
