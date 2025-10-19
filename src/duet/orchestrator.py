@@ -749,12 +749,14 @@ class Orchestrator:
         # Generate and save run summary
         self.artifacts.save_run_summary(snapshot.run_id)
 
-        # Log run completion
-        status_map = {
-            "done": "completed",
-            "blocked": "blocked",
-        }
-        status = status_map.get(snapshot.phase, "unknown")
+        # Log run completion (handle arbitrary terminal phases)
+        if self.workflow_graph.is_terminal(snapshot.phase):
+            status = "completed"
+        elif snapshot.phase == "blocked":
+            status = "blocked"
+        else:
+            status = "unknown"
+
         self.logger.log_run_complete(
             snapshot.run_id, snapshot.phase, snapshot.iteration, status
         )
@@ -1030,8 +1032,10 @@ class Orchestrator:
                 # No active state, get latest state or start fresh
                 active_state = self.db.get_latest_state(run_id)
                 if not active_state:
-                    # Create initial state
-                    state_id = f"{run_id}-plan-ready"
+                    # Create initial state using workflow's initial phase
+                    initial_phase = self.workflow_graph.initial_phase
+                    phase_status = f"{initial_phase}-ready"
+                    state_id = f"{run_id}-{phase_status}"
                     baseline = None
                     initial_metadata = {}
                     if self.git.is_git_repo():
@@ -1042,13 +1046,14 @@ class Orchestrator:
                         except GitError:
                             pass
 
-                    # Add initial channel snapshot                     if self.workflow_executor:
+                    # Add initial channel snapshot
+                    if self.workflow_executor:
                         initial_metadata["channel_snapshot"] = self.workflow_executor.get_current_channels()
 
                     self.db.insert_state(
                         state_id=state_id,
                         run_id=run_id,
-                        phase_status="plan-ready",
+                        phase_status=phase_status,
                         baseline_commit=baseline,
                         notes="Initial state",
                         metadata=initial_metadata if initial_metadata else None,
@@ -1087,7 +1092,7 @@ class Orchestrator:
             snapshot = RunSnapshot(
                 run_id=run_id,
                 iteration=0,
-                phase="plan",
+                phase=self.workflow_graph.initial_phase,
                 metadata={
                     "started_at": dt.datetime.now(dt.timezone.utc).isoformat(),
                     "consecutive_replans": 0,
@@ -1114,8 +1119,10 @@ class Orchestrator:
                 else:
                     self.console.log("[yellow]Warning: No task channel configured[/]")
 
-            # Create initial state
-            state_id = f"{run_id}-plan-ready"
+            # Create initial state using workflow's initial phase
+            initial_phase = self.workflow_graph.initial_phase
+            phase_status = f"{initial_phase}-ready"
+            state_id = f"{run_id}-{phase_status}"
             baseline = None
             initial_metadata = {}
             if self.git.is_git_repo():
@@ -1126,13 +1133,14 @@ class Orchestrator:
                 except GitError:
                     pass
 
-            # Add initial channel snapshot             if self.workflow_executor:
+            # Add initial channel snapshot
+            if self.workflow_executor:
                 initial_metadata["channel_snapshot"] = self.workflow_executor.get_current_channels()
 
             self.db.insert_state(
                 state_id=state_id,
                 run_id=run_id,
-                phase_status="plan-ready",
+                phase_status=phase_status,
                 baseline_commit=baseline,
                 notes="Initial state",
                 metadata=initial_metadata if initial_metadata else None,
@@ -1171,16 +1179,30 @@ class Orchestrator:
 
         self.console.rule(f"[bold cyan]{current_phase.upper()}[/] (Iteration {snapshot.iteration})")
 
-        # Compose request (include feedback if provided and phase consumes feedback channel)
+        # Compose request (include feedback if provided and phase consumes a feedback-like channel)
         request = self._compose_request(current_phase, snapshot)
         phase_def = self.workflow_graph.phases.get(current_phase)
-        if feedback and phase_def and "feedback" in phase_def.consumes:
-            # Inject user feedback into request for phases that consume it
-            request.prompt += f"\n\n──── User Feedback ────\n{feedback}\n"
-            request.context["user_feedback"] = feedback
-            # Also seed the feedback channel
-            if self.workflow_executor:
-                self.workflow_executor.seed_channel("feedback", feedback)
+        if feedback and phase_def:
+            # Find a feedback channel in phase consumes
+            # Look for: 1) channel named "feedback", 2) channel with schema "text" consumed by phase
+            feedback_channel = None
+            for channel_name in phase_def.consumes:
+                if channel_name == "feedback":
+                    feedback_channel = channel_name
+                    break
+                # Fallback: use any text channel that might accept feedback
+                channel_def = self.workflow_graph.channels.get(channel_name)
+                if channel_def and channel_def.schema == "text" and not feedback_channel:
+                    feedback_channel = channel_name
+
+            if feedback_channel:
+                # Inject user feedback into request for phases that consume it
+                request.prompt += f"\n\n──── User Feedback ────\n{feedback}\n"
+                request.context["user_feedback"] = feedback
+                # Seed the feedback channel
+                if self.workflow_executor:
+                    self.workflow_executor.seed_channel(feedback_channel, feedback)
+                    self.console.log(f"[dim]Seeded '{feedback_channel}' channel with user feedback[/]")
 
         adapter = self._select_adapter(current_phase)
         adapter_name = adapter.__class__.__name__
@@ -1451,7 +1473,7 @@ class Orchestrator:
 
         # ──── Determine Next Action ────
         next_action = "continue"
-        if decision.next_phase == "done":
+        if self.workflow_graph.is_terminal(decision.next_phase):
             next_action = "done"
         elif decision.next_phase == "blocked" or decision.requires_human:
             next_action = "blocked"
@@ -1474,40 +1496,41 @@ class Orchestrator:
         """
         Parse phase status to determine phase and action.
 
+        Supports arbitrary phase names from workflow definition.
+
         Returns:
             Tuple of (phase name, action) where action is 'execute', 'done', or 'blocked'
         """
-        if phase_status == "done":
+        # Check if this is a terminal state indicator
+        if self.workflow_graph.is_terminal(phase_status):
             return None, "done"
+
+        # Check for blocked state
         if phase_status == "blocked":
             return None, "blocked"
 
         # Parse format: <phase>-ready or <phase>-complete
-        parts = phase_status.split("-")
+        # Strategy: split on last hyphen to handle phase names with hyphens
+        if "-" not in phase_status:
+            return None, "blocked"
+
+        parts = phase_status.rsplit("-", 1)
         if len(parts) != 2:
             return None, "blocked"
 
         phase_name, status = parts
-        if phase_name == "plan":
-            phase = "plan"
-        elif phase_name == "implement":
-            phase = "implement"
-        elif phase_name == "review":
-            phase = "review"
-        else:
+
+        # Verify phase exists in workflow
+        if phase_name not in self.workflow_graph.phases:
+            self.console.log(f"[yellow]Warning: phase_status '{phase_status}' references unknown phase '{phase_name}'[/]")
             return None, "blocked"
 
         if status == "ready":
-            return phase, "execute"
+            return phase_name, "execute"
         elif status == "complete":
-            # Phase completed, need to transition to next
-            if phase == "plan":
-                return "implement", "execute"
-            elif phase == "implement":
-                return "review", "execute"
-            elif phase == "review":
-                # Review complete typically means done
-                return None, "done"
+            # Phase completed - this shouldn't normally happen as we create <next_phase>-ready directly
+            # But handle gracefully by treating as ready
+            return phase_name, "execute"
 
         return None, "blocked"
 
@@ -1515,25 +1538,30 @@ class Orchestrator:
         """
         Derive phase status string from executed phase and next phase.
 
+        Generates status strings dynamically for arbitrary phase names.
+
         Args:
-            executed_phase: str that was just executed
-            next_phase: str determined by decision logic
+            executed_phase: Phase that was just executed
+            next_phase: Next phase determined by decision logic
 
         Returns:
-            Phase status string (e.g., 'plan-complete', 'implement-ready')
+            Phase status string (e.g., 'triage-ready', 'qa-ready', 'done', 'blocked')
         """
-        if next_phase == "done":
-            return "done"
+        # Terminal phases return their name directly
+        if self.workflow_graph.is_terminal(next_phase):
+            return next_phase
+
+        # Blocked state
         if next_phase == "blocked":
             return "blocked"
 
-        # Map next phase to status
-        status_map = {
-            "plan": "plan-ready",
-            "implement": "implement-ready",
-            "review": "review-ready",
-        }
-        return status_map.get(next_phase, "blocked")
+        # Verify next phase exists in workflow
+        if next_phase not in self.workflow_graph.phases:
+            self.console.log(f"[yellow]Warning: next_phase '{next_phase}' not found in workflow[/]")
+            return "blocked"
+
+        # Generate ready status for next phase
+        return f"{next_phase}-ready"
 
     def _render_summary(self, snapshot: RunSnapshot) -> None:
         table = Table(title="Duet Run Summary")
