@@ -242,7 +242,7 @@ class Orchestrator:
                         event_type=event["event_type"],
                         payload=event["payload"],
                         iteration=iteration,
-                        phase=phase.value,
+                        phase=phase,
                         timestamp=event["timestamp"].isoformat(),
                     )
                 except Exception as e:
@@ -282,10 +282,16 @@ class Orchestrator:
         if self.workflow_executor:
             # Clear any previous run's channel state
             self.workflow_executor.channel_store.clear()
-            # Seed task channel from metadata or default
-            task_input = snapshot.metadata.get("task", "Implement the requested changes")
-            self.workflow_executor.seed_channel("task", task_input)
-            self.console.log(f"[dim]Initialized channels, seeded task[/]")
+
+            # Seed task channel using workflow configuration
+            task_channel_name = self.workflow_graph.get_task_channel()
+            if task_channel_name:
+                task_input = snapshot.metadata.get("task", "Implement the requested changes")
+                self.workflow_executor.seed_channel(task_channel_name, task_input)
+                self.console.log(f"[dim]Initialized channels, seeded '{task_channel_name}'[/]")
+            else:
+                self.console.log("[yellow]Warning: No task channel configured or detected. "
+                               "Set workflow.task_channel or add a channel with schema='text'[/]")
 
         # ──── Database: Insert Run Record ────
         if self.db:
@@ -334,7 +340,8 @@ class Orchestrator:
                 self.console.log(f"[yellow]Git branch setup failed: {exc}[/]")
                 self.console.log("[yellow]Continuing on current branch[/]")
 
-        current_phase = self.workflow_graph.initial_phase if self.workflow_graph else "plan"
+        # Start with initial phase from workflow
+        current_phase = self.workflow_graph.initial_phase
         consecutive_replans = 0
         while True:
             # ──── Edge Case: Manual Stop ────
@@ -345,17 +352,17 @@ class Orchestrator:
                 break
 
             # ──── Edge Case: Max Iterations ────
-            if iteration >= self.max_iterations and current_phase != "done":
+            if iteration >= self.max_iterations and not self.workflow_graph.is_terminal(current_phase):
                 snapshot.phase = "blocked"
                 snapshot.notes = f"Max iterations ({self.max_iterations}) reached without completion."
                 self.console.log("[yellow]Max iterations reached, marking run as BLOCKED[/]")
                 break
 
             # ──── Terminal Phase Check ────
-            if current_phase == "done":
-                snapshot.phase = "done"
-                snapshot.notes = "Run completed successfully."
-                self.console.log("[green]Run completed[/]")
+            if self.workflow_graph.is_terminal(current_phase):
+                snapshot.phase = current_phase
+                snapshot.notes = f"Run reached terminal phase: {current_phase}"
+                self.console.log(f"[green]Run completed at terminal phase: {current_phase}[/]")
                 break
 
             # ──── Begin Iteration ────
@@ -588,6 +595,24 @@ class Orchestrator:
                     requires_human=True,
                 )
 
+            # ──── Guardrail Enforcement: Human Approval Overrides ────
+            if current_phase == "review":
+                max_replans = self.config.workflow.max_consecutive_replans
+                if decision.next_phase == "plan" and max_replans is not None:
+                    prospective_replans = consecutive_replans + 1
+                    if prospective_replans >= max_replans:
+                        decision = TransitionDecision(
+                            next_phase="blocked",
+                            rationale=f"Max consecutive replans ({max_replans}) reached - human approval required.",
+                            requires_human=True,
+                        )
+                elif decision.next_phase == "done" and self.config.workflow.require_human_approval:
+                    decision = TransitionDecision(
+                        next_phase="blocked",
+                        rationale="Human approval required before completion.",
+                        requires_human=True,
+                    )
+
             self.console.log(f"[blue]Decision:[/] {decision.rationale}")
 
             # ──── Persist Complete Iteration Record ────
@@ -654,13 +679,13 @@ class Orchestrator:
             current_phase = decision.next_phase
 
             # Track consecutive replans for guardrail enforcement
-            if prev_phase == "review" and current_phase == "plan":
+            if self.workflow_graph.is_replan_transition(prev_phase, current_phase):
                 consecutive_replans += 1
                 snapshot.metadata["consecutive_replans"] = consecutive_replans
                 self.console.log(
                     f"[yellow]Consecutive replans: {consecutive_replans}/{self.config.workflow.max_consecutive_replans}[/]"
                 )
-            elif current_phase == "done":
+            elif self.workflow_graph.is_terminal(current_phase):
                 consecutive_replans = 0
                 snapshot.metadata["consecutive_replans"] = 0
 
@@ -711,7 +736,7 @@ class Orchestrator:
         }
         status = status_map.get(snapshot.phase, "unknown")
         self.logger.log_run_complete(
-            snapshot.run_id, snapshot.phase.value, snapshot.iteration, status
+            snapshot.run_id, snapshot.phase, snapshot.iteration, status
         )
 
         self._render_summary(snapshot)
@@ -738,12 +763,16 @@ class Orchestrator:
 
         from .prompt_builder import PromptContext, get_builder
 
+        # Get agent name from workflow
+        phase_def = self.workflow_graph.phases.get(phase)
+        agent_name = phase_def.agent if phase_def else "system"
+
         # Build prompt context from snapshot and channels
         prompt_context = PromptContext(
             run_id=snapshot.run_id,
             iteration=snapshot.iteration,
-            phase=phase.value,
-            agent=self._get_agent_for_phase(phase),
+            phase=phase,
+            agent=agent_name,
             max_iterations=self.max_iterations,
             channel_payloads=self.workflow_executor.get_current_channels(),
             consecutive_replans=snapshot.metadata.get("consecutive_replans", 0),
@@ -751,19 +780,9 @@ class Orchestrator:
             metadata=snapshot.metadata,
         )
 
-        # Build request using phase-specific builder
-        builder = get_builder(phase.value)
+        # Build request using phase-specific builder (uses role_hint from phase metadata)
+        builder = get_builder(phase, phase_def)
         return builder.build(prompt_context)
-
-    def _get_agent_for_phase(self, phase: str) -> str:
-        """Get agent name for a phase (for workflow mode)."""
-        if phase == "plan":
-            return "planner"
-        elif phase == "review":
-            return "reviewer"
-        elif phase == "implement":
-            return "implementer"
-        return "system"
 
     def _update_channels_from_response(
         self,
@@ -789,7 +808,7 @@ class Orchestrator:
             return  # No channel store available
 
         # Get the phase definition from the workflow graph to find published channels
-        phase_def = self.workflow_graph.phases.get(phase.value)
+        phase_def = self.workflow_graph.phases.get(phase)
         if not phase_def or not phase_def.publishes:
             return  # No channels declared for this phase
 
@@ -855,7 +874,7 @@ class Orchestrator:
                 channel_name=channel_name,
                 value=value,
                 schema=schema,
-                source_phase=phase.value,
+                source_phase=phase,
             )
 
             # Insert into database
@@ -866,7 +885,7 @@ class Orchestrator:
                     payload=serialized["payload"],
                     state_id=state_id,
                     iteration=iteration,
-                    phase=phase.value,
+                    phase=phase,
                     metadata=serialized["metadata"],
                 )
             except Exception as exc:
@@ -936,12 +955,12 @@ class Orchestrator:
         timestamp_iso = now.isoformat()  # For payload
         timestamp_safe = now.strftime("%Y%m%dT%H%M%S%fZ")  # For filename (Windows-safe)
         payload = {
-            "phase": phase.value,
+            "phase": phase,
             "timestamp": timestamp_iso,
             "request": request.model_dump(),
             "response": response.model_dump(),
         }
-        filename = f"{timestamp_safe}-{phase.value}.json"
+        filename = f"{timestamp_safe}-{phase}.json"
         self.artifacts.write_json(run_id, f"interactions/{filename}", payload)
 
     def _derive_run_id(self) -> str:
@@ -1061,9 +1080,15 @@ class Orchestrator:
             # Reset and seed channels for new run
             if self.workflow_executor:
                 self.workflow_executor.channel_store.clear()
-                task_input = snapshot.metadata.get("task", "Implement the requested changes")
-                self.workflow_executor.seed_channel("task", task_input)
-                self.console.log(f"[dim]Initialized channels for new run[/]")
+
+                # Seed task channel using workflow configuration
+                task_channel_name = self.workflow_graph.get_task_channel()
+                if task_channel_name:
+                    task_input = snapshot.metadata.get("task", "Implement the requested changes")
+                    self.workflow_executor.seed_channel(task_channel_name, task_input)
+                    self.console.log(f"[dim]Initialized channels, seeded '{task_channel_name}'[/]")
+                else:
+                    self.console.log("[yellow]Warning: No task channel configured[/]")
 
             # Create initial state
             state_id = f"{run_id}-plan-ready"
@@ -1272,6 +1297,25 @@ class Orchestrator:
                     requires_human=True,
                 )
 
+        # Apply human approval guardrails for review phase
+        if current_phase == "review":
+            max_replans = self.config.workflow.max_consecutive_replans
+            current_replans = snapshot.metadata.get("consecutive_replans", 0)
+            if decision.next_phase == "plan" and max_replans is not None:
+                prospective_replans = current_replans + 1
+                if prospective_replans >= max_replans:
+                    decision = TransitionDecision(
+                        next_phase="blocked",
+                        rationale=f"Max consecutive replans ({max_replans}) reached - human approval required.",
+                        requires_human=True,
+                    )
+            elif decision.next_phase == "done" and self.config.workflow.require_human_approval:
+                decision = TransitionDecision(
+                    next_phase="blocked",
+                    rationale="Human approval required before completion.",
+                    requires_human=True,
+                )
+
         # ──── Persist Iteration ────
         git_meta = response.metadata.get("git_changes", {})
         usage_meta = {
@@ -1357,11 +1401,11 @@ class Orchestrator:
         snapshot.phase = decision.next_phase
         snapshot.iteration = snapshot.iteration
 
-        # Update consecutive_replans counter when REVIEW → PLAN
-        if current_phase == "review" and decision.next_phase == "plan":
+        # Update consecutive_replans counter for replan transitions
+        if self.workflow_graph.is_replan_transition(current_phase, decision.next_phase):
             consecutive_replans = snapshot.metadata.get("consecutive_replans", 0) + 1
             snapshot.metadata["consecutive_replans"] = consecutive_replans
-        elif decision.next_phase == "done":
+        elif self.workflow_graph.is_terminal(decision.next_phase):
             snapshot.metadata["consecutive_replans"] = 0
 
         self.db.update_run(snapshot)
@@ -1457,7 +1501,7 @@ class Orchestrator:
         table.add_column("Field", style="bold")
         table.add_column("Value")
         table.add_row("Run ID", snapshot.run_id)
-        table.add_row("Phase", snapshot.phase.value)
+        table.add_row("Phase", snapshot.phase)
         table.add_row("Iteration", str(snapshot.iteration))
         table.add_row("Notes", snapshot.notes or "")
         table.add_row("Started", snapshot.metadata.get("started_at", ""))

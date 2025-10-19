@@ -331,7 +331,10 @@ class WorkflowExecutor:
         """
         Extract channel outputs from assistant response.
 
-        Maps response content and metadata to published channels.
+        Maps response content and metadata to published channels using a generic strategy:
+        1. Check if metadata has the channel name as a key (explicit mapping)
+        2. Special handling for 'verdict' (from response.verdict or metadata)
+        3. Fallback: use response.content for the first published channel
 
         Args:
             response: Assistant response
@@ -342,36 +345,24 @@ class WorkflowExecutor:
         """
         outputs = {}
 
-        # Map common outputs
         for channel_name in publishes:
-            if channel_name == "plan":
-                # Plan phase publishes plan text
-                outputs["plan"] = response.content
+            # Strategy 1: Check metadata for explicit channel mapping
+            if channel_name in response.metadata:
+                outputs[channel_name] = response.metadata[channel_name]
+                continue
 
-            elif channel_name == "code":
-                # Implement phase publishes code summary
-                outputs["code"] = response.content
-
-            elif channel_name == "verdict":
-                # Review phase publishes verdict
+            # Strategy 2: Special handling for verdict
+            if channel_name == "verdict":
                 if response.verdict:
                     outputs["verdict"] = response.verdict.value
                 elif "verdict" in response.metadata:
                     outputs["verdict"] = response.metadata["verdict"]
                 else:
                     outputs["verdict"] = "unknown"
+                continue
 
-            elif channel_name == "feedback":
-                # Review phase may publish feedback
-                # Extract from response content or metadata
-                if "feedback" in response.metadata:
-                    outputs["feedback"] = response.metadata["feedback"]
-                else:
-                    # Fallback: use response content if it's feedback
-                    outputs["feedback"] = response.content
-
-            else:
-                # Generic: use response content
+            # Strategy 3: Fallback to content for first non-verdict channel
+            if not outputs or channel_name == publishes[0]:
                 outputs[channel_name] = response.content
 
         return outputs

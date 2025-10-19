@@ -29,14 +29,24 @@ class EchoAdapter(AssistantAdapter):
         - Echo back the prompt for other roles
 
         This allows test workflows to progress through review gates without manual intervention.
+
+        Detection strategy:
+        1. Check for 'reviewer' in role string
+        2. Check context for phase metadata indicating review phase
         """
-        # Detect if this is a review role and auto-approve for testing
-        is_reviewer = "review" in request.role.lower()
+        # Detect if this is a review role - check both role string and context
+        role_lower = request.role.lower()
+        is_reviewer = (
+            "review" in role_lower
+            or request.context.get("phase") == "review"  # Legacy
+            or request.role in ("reviewer", "qa", "verifier")  # Common reviewer roles
+        )
 
         if is_reviewer:
             content = (
                 f"[ECHO ADAPTER - Auto-Approve]\n"
                 f"Role: {request.role}\n"
+                f"Phase: {request.context.get('phase', 'unknown')}\n"
                 f"Verdict: approve\n"
                 f"Feedback: Echo adapter auto-approved for testing\n"
                 f"Context keys: {', '.join(request.context.keys()) or 'none'}"
@@ -45,6 +55,7 @@ class EchoAdapter(AssistantAdapter):
             content = (
                 f"[ECHO ADAPTER]\n"
                 f"Role: {request.role}\n"
+                f"Phase: {request.context.get('phase', 'unknown')}\n"
                 f"Prompt:\n{request.prompt}\n"
                 f"Context keys: {', '.join(request.context.keys()) or 'none'}"
             )
@@ -55,6 +66,7 @@ class EchoAdapter(AssistantAdapter):
                 "event_type": CanonicalEventType.SYSTEM_NOTICE.value,
                 "payload": {
                     "role": request.role,
+                    "phase": request.context.get("phase"),
                     "prompt_length": len(request.prompt),
                     "context_keys": list(request.context.keys()),
                     "adapter": "echo",

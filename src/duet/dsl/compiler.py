@@ -38,6 +38,7 @@ class WorkflowGraph:
         phases: Map of phase name -> Phase
         transitions: Map of source phase -> list of outgoing transitions
         initial_phase: Name of the starting phase
+        task_channel: Name of channel to seed with task input (None = auto-detect)
         terminal_phases: Set of phase names that end the workflow
         metadata: Additional workflow metadata
     """
@@ -47,6 +48,7 @@ class WorkflowGraph:
     phases: Dict[str, Phase]
     transitions: Dict[str, List[Transition]]  # from_phase -> transitions
     initial_phase: str
+    task_channel: Optional[str] = None
     terminal_phases: Set[str] = field(default_factory=set)
     metadata: Dict[str, Any] = field(default_factory=dict)
 
@@ -59,6 +61,113 @@ class WorkflowGraph:
     def is_terminal(self, phase_name: str) -> bool:
         """Check if a phase is terminal."""
         return phase_name in self.terminal_phases
+
+    def get_task_channel(self) -> Optional[str]:
+        """
+        Get the task channel name with fallback logic.
+
+        Returns:
+            Task channel name if configured or auto-detected, None otherwise
+        """
+        if self.task_channel:
+            return self.task_channel
+
+        # Fallback: find first channel with schema="text"
+        for channel_name, channel in self.channels.items():
+            if channel.schema == "text":
+                return channel_name
+
+        # No suitable channel found
+        return None
+
+    def get_phase_metadata(self, phase_name: str, key: str, default: Any = None) -> Any:
+        """
+        Get metadata value for a phase.
+
+        Args:
+            phase_name: Name of the phase
+            key: Metadata key
+            default: Default value if not found
+
+        Returns:
+            Metadata value or default
+        """
+        phase = self.phases.get(phase_name)
+        if not phase:
+            return default
+        return phase.metadata.get(key, default)
+
+    def requires_approval(self, phase_name: str) -> bool:
+        """Check if a phase requires human approval."""
+        return self.get_phase_metadata(phase_name, "requires_approval", False)
+
+    def is_replan_transition(self, from_phase: str, to_phase: str) -> bool:
+        """
+        Check if a transition counts as a replan.
+
+        A replan is detected if:
+        1. The from_phase has metadata replan_transition=True, OR
+        2. Both phases have replan_transition=True set
+
+        Args:
+            from_phase: Source phase name
+            to_phase: Target phase name
+
+        Returns:
+            True if this transition counts as a replan
+        """
+        # Check if from_phase is marked as a replan source
+        if self.get_phase_metadata(from_phase, "replan_transition", False):
+            return True
+
+        # Alternative: both phases marked
+        from_marked = self.get_phase_metadata(from_phase, "replan_transition", False)
+        to_marked = self.get_phase_metadata(to_phase, "replan_transition", False)
+        return from_marked and to_marked
+
+    def requires_git_changes(self, phase_name: str) -> bool:
+        """Check if a phase requires git changes."""
+        return self.get_phase_metadata(phase_name, "git_changes_required", False)
+
+    def get_phase_order(self) -> List[str]:
+        """
+        Get topological ordering of phases based on transitions.
+
+        Returns:
+            List of phase names in execution order
+        """
+        # Simple BFS from initial phase
+        visited = []
+        queue = [self.initial_phase]
+        seen = {self.initial_phase}
+
+        while queue:
+            current = queue.pop(0)
+            visited.append(current)
+
+            # Add connected phases
+            for transition in self.transitions.get(current, []):
+                if transition.to_phase not in seen:
+                    seen.add(transition.to_phase)
+                    queue.append(transition.to_phase)
+
+        return visited
+
+    def get_channel_consumers(self, channel_name: str) -> List[str]:
+        """Get list of phases that consume a channel."""
+        consumers = []
+        for phase_name, phase in self.phases.items():
+            if channel_name in phase.consumes:
+                consumers.append(phase_name)
+        return consumers
+
+    def get_channel_publishers(self, channel_name: str) -> List[str]:
+        """Get list of phases that publish to a channel."""
+        publishers = []
+        for phase_name, phase in self.phases.items():
+            if channel_name in phase.publishes:
+                publishers.append(phase_name)
+        return publishers
 
 
 class WorkflowCompiler:
@@ -125,6 +234,7 @@ class WorkflowCompiler:
             phases=phases_map,
             transitions=transitions_map,
             initial_phase=workflow.initial_phase,
+            task_channel=workflow.task_channel,
             terminal_phases=terminal_phases,
             metadata=workflow.metadata,
         )

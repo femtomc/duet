@@ -329,6 +329,12 @@ class Phase:
         publishes: List of channel names this phase writes to
         description: Human-readable description of what this phase does
         is_terminal: Whether this phase ends the workflow
+        metadata: Optional metadata for runtime behavior
+                  Supported keys:
+                  - role_hint: str - Hint for prompt builder selection (e.g., "planner", "implementer", "reviewer")
+                  - requires_approval: bool - Whether this phase requires human approval before proceeding
+                  - replan_transition: bool - Whether transitions from this phase count as replans
+                  - git_changes_required: bool - Whether this phase must produce git changes
     """
 
     name: str
@@ -337,6 +343,7 @@ class Phase:
     publishes: List[str] = field(default_factory=list)
     description: str = ""
     is_terminal: bool = False
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
         if not self.name:
@@ -386,6 +393,7 @@ class Workflow:
         phases: List of phase definitions
         transitions: List of transitions between phases
         initial_phase: Name of the starting phase (defaults to first phase)
+        task_channel: Name of channel to seed with initial task input (defaults to auto-detection)
         metadata: Additional workflow metadata
     """
 
@@ -394,6 +402,7 @@ class Workflow:
     phases: List[Phase]
     transitions: List[Transition]
     initial_phase: Optional[str] = None
+    task_channel: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
@@ -413,6 +422,12 @@ class Workflow:
         else:
             # Default to first phase
             self.initial_phase = self.phases[0].name
+
+        # Validate task_channel if specified
+        if self.task_channel:
+            channel_names = {c.name for c in self.channels}
+            if self.task_channel not in channel_names:
+                raise ValueError(f"Task channel '{self.task_channel}' not found in channels")
 
     def get_agent(self, name: str) -> Optional[Agent]:
         """Get agent by name."""

@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
-from .models import AssistantRequest, Phase as ModelPhase
+from .models import AssistantRequest
 
 
 @dataclass
@@ -240,22 +240,82 @@ class DefaultReviewBuilder(PromptBuilder):
         )
 
 
-# Builder registry (maps phase names to builders)
-DEFAULT_BUILDERS: Dict[str, PromptBuilder] = {
+# Builder registry (maps role hints to builders)
+ROLE_BUILDERS: Dict[str, PromptBuilder] = {
+    "planner": DefaultPlanningBuilder(),
+    "implementer": DefaultImplementationBuilder(),
+    "reviewer": DefaultReviewBuilder(),
+    # Legacy phase names for backward compatibility
     "plan": DefaultPlanningBuilder(),
     "implement": DefaultImplementationBuilder(),
     "review": DefaultReviewBuilder(),
 }
 
 
-def get_builder(phase_name: str) -> PromptBuilder:
+class GenericPromptBuilder(PromptBuilder):
+    """
+    Generic fallback builder for arbitrary phases.
+
+    Uses channel payloads generically without hardcoded assumptions.
+    """
+
+    def build(self, context: PromptContext) -> AssistantRequest:
+        """Build generic prompt from available channel payloads."""
+        prompt_parts = [
+            f"Execute phase: {context.phase}",
+            "",
+            f"Iteration: {context.iteration}/{context.max_iterations}",
+            f"Agent: {context.agent}",
+        ]
+
+        # Include all available channel payloads
+        if context.channel_payloads:
+            prompt_parts.append("")
+            prompt_parts.append("──── Available Context ────")
+            for channel_name, value in context.channel_payloads.items():
+                if value is not None:
+                    value_str = str(value)
+                    if len(value_str) > 500:
+                        value_str = value_str[:500] + "... (truncated)"
+                    prompt_parts.append(f"\n{channel_name.upper()}:")
+                    prompt_parts.append(value_str)
+
+        prompt = "\n".join(prompt_parts)
+
+        return AssistantRequest(
+            role=context.agent,
+            prompt=prompt,
+            context={
+                "iteration": context.iteration,
+                "run_id": context.run_id,
+                "phase": context.phase,
+                "max_iterations": context.max_iterations,
+                "workspace_root": context.workspace_root,
+                "channel_payloads": context.channel_payloads,
+            },
+        )
+
+
+def get_builder(phase_name: str, phase_def=None) -> PromptBuilder:
     """
     Get prompt builder for a phase.
 
     Args:
         phase_name: Name of the phase
+        phase_def: Optional Phase definition with metadata
 
     Returns:
-        PromptBuilder instance (uses default if no custom builder registered)
+        PromptBuilder instance (uses role_hint metadata if available, falls back to generic)
     """
-    return DEFAULT_BUILDERS.get(phase_name, DefaultPlanningBuilder())
+    # Check for role_hint in phase metadata
+    if phase_def and phase_def.metadata:
+        role_hint = phase_def.metadata.get("role_hint")
+        if role_hint and role_hint in ROLE_BUILDERS:
+            return ROLE_BUILDERS[role_hint]
+
+    # Fallback: try phase name directly (for backward compatibility)
+    if phase_name in ROLE_BUILDERS:
+        return ROLE_BUILDERS[phase_name]
+
+    # Final fallback: generic builder
+    return GenericPromptBuilder()
