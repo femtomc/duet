@@ -40,6 +40,8 @@ class WorkflowGraph:
         initial_phase: Name of the starting phase
         task_channel: Name of channel to seed with task input (None = auto-detect)
         terminal_phases: Set of phase names that end the workflow
+        channels_by_id: Map of channel ID -> Channel (for object-based lookups)
+        phases_by_id: Map of phase ID -> Phase (for object-based lookups)
         metadata: Additional workflow metadata
     """
 
@@ -50,6 +52,8 @@ class WorkflowGraph:
     initial_phase: str
     task_channel: Optional[str] = None
     terminal_phases: Set[str] = field(default_factory=set)
+    channels_by_id: Dict[str, Channel] = field(default_factory=dict)
+    phases_by_id: Dict[str, Phase] = field(default_factory=dict)
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def get_next_transitions(self, current_phase: str) -> List[Transition]:
@@ -230,32 +234,59 @@ class WorkflowCompiler:
             )
             raise CompilationError(error_msg)
 
-        # Build indexed structures
+        # Build indexed structures (by name for backward compat, by ID for future)
         agents_map = {agent.name: agent for agent in workflow.agents}
         channels_map = {channel.name: channel for channel in workflow.channels}
         phases_map = {phase.name: phase for phase in workflow.phases}
-        transitions_map: Dict[str, List[Transition]] = {}
 
+        # Build ID-based lookups
+        channels_by_id = {channel.id: channel for channel in workflow.channels}
+        phases_by_id = {phase.id: phase for phase in workflow.phases}
+
+        # Build transitions map (keyed by phase name for now)
+        transitions_map: Dict[str, List[Transition]] = {}
         for transition in workflow.transitions:
-            from_phase = transition.from_phase
-            if from_phase not in transitions_map:
-                transitions_map[from_phase] = []
-            transitions_map[from_phase].append(transition)
+            # Normalize from_phase to name string
+            if isinstance(transition.from_phase, Phase):
+                from_phase_name = transition.from_phase.name
+            else:
+                from_phase_name = transition.from_phase
+
+            if from_phase_name not in transitions_map:
+                transitions_map[from_phase_name] = []
+            transitions_map[from_phase_name].append(transition)
 
         # Identify terminal phases
         terminal_phases = {
             phase.name for phase in workflow.phases if phase.is_terminal
         }
 
+        # Get initial phase name (workflow.initial_phase is now Phase object or string)
+        if isinstance(workflow.initial_phase, Phase):
+            initial_phase_name = workflow.initial_phase.name
+        else:
+            initial_phase_name = workflow.initial_phase
+
+        # Get task channel name (workflow.task_channel is now Channel object or string)
+        if isinstance(workflow.task_channel, Channel):
+            task_channel_name = workflow.task_channel.name
+        elif workflow.task_channel is None:
+            task_channel_name = None
+        else:
+            task_channel_name = workflow.task_channel
+
         return WorkflowGraph(
             agents=agents_map,
             channels=channels_map,
             phases=phases_map,
             transitions=transitions_map,
-            initial_phase=workflow.initial_phase,
-            task_channel=workflow.task_channel,
+            initial_phase=initial_phase_name,
+            task_channel=task_channel_name,
             terminal_phases=terminal_phases,
             metadata=workflow.metadata,
+            # New: ID-based lookups
+            channels_by_id=channels_by_id,
+            phases_by_id=phases_by_id,
         )
 
     def _validate_unique_names(self, workflow: Workflow) -> None:
@@ -320,29 +351,50 @@ class WorkflowCompiler:
 
     def _validate_transitions(self, workflow: Workflow) -> None:
         """Validate transition logic and guards."""
-        # Check for unreachable phases
-        reachable = {workflow.initial_phase}
-        worklist = [workflow.initial_phase]
+        # Build phase map for lookups
+        phase_map = {p.name: p for p in workflow.phases}
+
+        # Helper to normalize phase references to Phase objects
+        def normalize_phase_ref(ref: Union[Phase, str]) -> Phase:
+            if isinstance(ref, Phase):
+                return ref
+            return phase_map.get(ref)
+
+        # Check for unreachable phases (using Phase objects)
+        initial = normalize_phase_ref(workflow.initial_phase)
+        reachable = {initial}
+        worklist = [initial]
 
         while worklist:
             current = worklist.pop()
             for transition in workflow.transitions:
-                if transition.from_phase == current and transition.to_phase not in reachable:
-                    reachable.add(transition.to_phase)
-                    worklist.append(transition.to_phase)
+                from_phase_obj = normalize_phase_ref(transition.from_phase)
+                to_phase_obj = normalize_phase_ref(transition.to_phase)
 
-        all_phases = {phase.name for phase in workflow.phases}
+                if from_phase_obj == current and to_phase_obj not in reachable:
+                    reachable.add(to_phase_obj)
+                    worklist.append(to_phase_obj)
+
+        all_phases = set(workflow.phases)
         unreachable = all_phases - reachable
         if unreachable:
+            unreachable_names = sorted([p.name for p in unreachable])
             self.errors.append(
-                f"Unreachable phases: {', '.join(sorted(unreachable))}"
+                f"Unreachable phases: {', '.join(unreachable_names)}"
             )
 
         # Check for phases with no outgoing transitions (should be terminal)
-        terminal_phases = {phase.name for phase in workflow.phases if phase.is_terminal}
+        terminal_phases = {p for p in workflow.phases if p.is_terminal}
         for phase in workflow.phases:
-            has_outgoing = any(t.from_phase == phase.name for t in workflow.transitions)
-            if not has_outgoing and phase.name not in terminal_phases:
+            # Check if phase has any outgoing transitions
+            has_outgoing = False
+            for t in workflow.transitions:
+                from_phase_obj = normalize_phase_ref(t.from_phase)
+                if from_phase_obj == phase:
+                    has_outgoing = True
+                    break
+
+            if not has_outgoing and phase not in terminal_phases:
                 self.errors.append(
                     f"Phase '{phase.name}' has no outgoing transitions but is not marked terminal"
                 )

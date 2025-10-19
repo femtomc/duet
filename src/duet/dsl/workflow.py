@@ -7,26 +7,66 @@ replacing the legacy .duet/prompts/*.md template system.
 Example:
     from duet.dsl import Workflow, Agent, Phase, Transition, When
 
+    plan = Phase(name="plan", agent=planner)
+    implement = Phase(name="implement", agent=implementer)
+
     workflow = Workflow(
         agents=[
             Agent(name="planner", provider="codex", model="gpt-5-codex"),
             Agent(name="implementer", provider="claude", model="sonnet"),
         ],
-        phases=[
-            Phase(name="plan", agent="planner", prompt="Draft implementation plan"),
-            Phase(name="implement", agent="implementer", prompt="Execute the plan"),
-        ],
+        phases=[plan, implement],
         transitions=[
-            Transition(from_phase="plan", to_phase="implement", when=When.always()),
+            Transition(from_phase=plan, to_phase=implement, when=When.always()),
         ],
     )
 """
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Union
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Base Element (UUID-based identity)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class BaseElement:
+    """
+    Base class for DSL elements with stable UUID-based identity.
+
+    Provides:
+    - Unique ID generation (UUID)
+    - Equality and hashing by ID (not by name)
+    - Human-readable name for display
+
+    Subclasses should define 'name' and 'id' fields in their dataclass.
+    """
+
+    def __post_init__(self):
+        """Generate UUID if not provided."""
+        if not hasattr(self, 'id') or self.id is None:
+            # Generate stable UUID based on name for deterministic testing
+            # In production, could use uuid.uuid4() for true uniqueness
+            object.__setattr__(self, 'id', str(uuid.uuid4()))
+
+    def __eq__(self, other):
+        """Equality based on ID, not name."""
+        if not isinstance(other, BaseElement):
+            return False
+        return self.id == other.id
+
+    def __hash__(self):
+        """Hash based on ID."""
+        return hash(self.id)
+
+    def __repr__(self):
+        """Readable representation showing name and ID."""
+        return f"{self.__class__.__name__}(name='{self.name}', id='{self.id[:8]}...')"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -75,27 +115,42 @@ class NeverGuard(Guard):
 
 
 class ChannelHasGuard(Guard):
-    """Guard that checks if a channel (metadata field) has a specific value."""
+    """Guard that checks if a channel has a specific value."""
 
-    def __init__(self, channel: str, value: Any):
-        self.channel = channel
+    def __init__(self, channel: Union[Channel, str], value: Any):
+        # Support both Channel objects and strings (for migration)
+        if isinstance(channel, Channel):
+            self.channel_name = channel.name
+            self.channel_id = channel.id
+        else:
+            # Legacy string support
+            self.channel_name = channel
+            self.channel_id = None
         self.value = value
 
     def evaluate(self, context: Dict[str, Any]) -> bool:
-        return context.get(self.channel) == self.value
+        # Evaluate using channel name (context uses names for now)
+        return context.get(self.channel_name) == self.value
 
     def __repr__(self) -> str:
-        return f"ChannelHas({self.channel}={self.value})"
+        return f"ChannelHas({self.channel_name}={self.value})"
 
 
 class EmptyGuard(Guard):
-    """Guard that checks if a channel (metadata field) is empty/None."""
+    """Guard that checks if a channel is empty/None."""
 
-    def __init__(self, channel: str):
-        self.channel = channel
+    def __init__(self, channel: Union[Channel, str]):
+        # Support both Channel objects and strings (for migration)
+        if isinstance(channel, Channel):
+            self.channel_name = channel.name
+            self.channel_id = channel.id
+        else:
+            # Legacy string support
+            self.channel_name = channel
+            self.channel_id = None
 
     def evaluate(self, context: Dict[str, Any]) -> bool:
-        value = context.get(self.channel)
+        value = context.get(self.channel_name)
         if value is None:
             return True
         if isinstance(value, (str, list, dict)):
@@ -103,7 +158,7 @@ class EmptyGuard(Guard):
         return False
 
     def __repr__(self) -> str:
-        return f"Empty({self.channel})"
+        return f"Empty({self.channel_name})"
 
 
 class VerdictGuard(Guard):
@@ -287,8 +342,8 @@ class Agent:
         return config
 
 
-@dataclass
-class Channel:
+@dataclass(eq=False)
+class Channel(BaseElement):
     """
     Defines a communication channel for message passing between phases.
 
@@ -296,7 +351,8 @@ class Channel:
     Phases consume messages from channels and publish results to channels.
 
     Attributes:
-        name: Unique channel identifier
+        name: Unique channel identifier (human-readable)
+        id: Stable UUID for identity (auto-generated if not provided)
         description: Human-readable description of the channel's purpose
         initial_value: Optional initial value for the channel
         schema: Optional schema/type metadata for validation and persistence
@@ -304,6 +360,7 @@ class Channel:
     """
 
     name: str
+    id: Optional[str] = None
     description: str = ""
     initial_value: Any = None
     schema: Optional[str] = None
@@ -311,10 +368,12 @@ class Channel:
     def __post_init__(self):
         if not self.name:
             raise ValueError("Channel name cannot be empty")
+        # Generate ID if not provided (from BaseElement)
+        BaseElement.__post_init__(self)
 
 
-@dataclass
-class Phase:
+@dataclass(eq=False)
+class Phase(BaseElement):
     """
     Defines a workflow phase with channel-based message passing.
 
@@ -323,10 +382,11 @@ class Phase:
     through structured data rather than prompt templates.
 
     Attributes:
-        name: Unique phase identifier
+        name: Unique phase identifier (human-readable)
+        id: Stable UUID for identity (auto-generated if not provided)
         agent: Name of the agent that executes this phase
-        consumes: List of channel names this phase reads from
-        publishes: List of channel names this phase writes to
+        consumes: List of Channel objects this phase reads from
+        publishes: List of Channel objects this phase writes to
         description: Human-readable description of what this phase does
         is_terminal: Whether this phase ends the workflow
         metadata: Optional metadata for runtime behavior
@@ -339,8 +399,9 @@ class Phase:
 
     name: str
     agent: str
-    consumes: List[str] = field(default_factory=list)
-    publishes: List[str] = field(default_factory=list)
+    id: Optional[str] = None
+    consumes: List[Union[Channel, str]] = field(default_factory=list)
+    publishes: List[Union[Channel, str]] = field(default_factory=list)
     description: str = ""
     is_terminal: bool = False
     metadata: Dict[str, Any] = field(default_factory=dict)
@@ -350,6 +411,8 @@ class Phase:
             raise ValueError("Phase name cannot be empty")
         if not self.agent:
             raise ValueError("Phase agent cannot be empty")
+        # Generate ID if not provided (from BaseElement)
+        BaseElement.__post_init__(self)
         # Note: consumes/publishes can be empty for simple phases
 
 
@@ -359,22 +422,37 @@ class Transition:
     Defines a transition between phases with optional guard conditions.
 
     Attributes:
-        from_phase: Source phase name
-        to_phase: Target phase name
+        from_phase: Source Phase object (not name string)
+        to_phase: Target Phase object (not name string)
         when: Guard condition that must evaluate to True
         priority: Priority for conflict resolution (higher = preferred)
     """
 
-    from_phase: str
-    to_phase: str
+    from_phase: Union[Phase, str]  # Temporarily support both for migration
+    to_phase: Union[Phase, str]    # Temporarily support both for migration
     when: Guard = field(default_factory=AlwaysGuard)
     priority: int = 0
 
     def __post_init__(self):
+        # Validate that phases are provided
         if not self.from_phase:
             raise ValueError("Transition from_phase cannot be empty")
         if not self.to_phase:
             raise ValueError("Transition to_phase cannot be empty")
+
+        # Type checking - prefer Phase objects
+        if isinstance(self.from_phase, str):
+            # TODO: Remove string support in next version
+            pass
+        elif not isinstance(self.from_phase, Phase):
+            raise TypeError(f"Transition from_phase must be Phase object or string, got {type(self.from_phase)}")
+
+        if isinstance(self.to_phase, str):
+            # TODO: Remove string support in next version
+            pass
+        elif not isinstance(self.to_phase, Phase):
+            raise TypeError(f"Transition to_phase must be Phase object or string, got {type(self.to_phase)}")
+
         if not isinstance(self.when, Guard):
             raise TypeError(f"Transition guard must be a Guard instance, got {type(self.when)}")
 
@@ -392,8 +470,8 @@ class Workflow:
         channels: List of channel definitions for message passing
         phases: List of phase definitions
         transitions: List of transitions between phases
-        initial_phase: Name of the starting phase (defaults to first phase)
-        task_channel: Name of channel to seed with initial task input (defaults to auto-detection)
+        initial_phase: Phase object to start with (defaults to first phase)
+        task_channel: Channel object to seed with initial task input (defaults to auto-detection)
         metadata: Additional workflow metadata
     """
 
@@ -401,8 +479,8 @@ class Workflow:
     channels: List[Channel]
     phases: List[Phase]
     transitions: List[Transition]
-    initial_phase: Optional[str] = None
-    task_channel: Optional[str] = None
+    initial_phase: Optional[Union[Phase, str]] = None  # Support both during migration
+    task_channel: Optional[Union[Channel, str]] = None  # Support both during migration
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
@@ -414,20 +492,29 @@ class Workflow:
             raise ValueError("Workflow must have at least one transition")
         # Note: channels can be empty for simple workflows
 
-        # Validate initial_phase
-        if self.initial_phase:
-            phase_names = {p.name for p in self.phases}
-            if self.initial_phase not in phase_names:
-                raise ValueError(f"Initial phase '{self.initial_phase}' not found in phases")
-        else:
+        # Normalize initial_phase to Phase object
+        if self.initial_phase is None:
             # Default to first phase
-            self.initial_phase = self.phases[0].name
+            self.initial_phase = self.phases[0]
+        elif isinstance(self.initial_phase, str):
+            # Legacy string support - convert to Phase object
+            phase_map = {p.name: p for p in self.phases}
+            if self.initial_phase not in phase_map:
+                raise ValueError(f"Initial phase '{self.initial_phase}' not found in phases")
+            self.initial_phase = phase_map[self.initial_phase]
+        elif not isinstance(self.initial_phase, Phase):
+            raise TypeError(f"initial_phase must be Phase object or string, got {type(self.initial_phase)}")
 
-        # Validate task_channel if specified
-        if self.task_channel:
-            channel_names = {c.name for c in self.channels}
-            if self.task_channel not in channel_names:
-                raise ValueError(f"Task channel '{self.task_channel}' not found in channels")
+        # Normalize task_channel to Channel object
+        if self.task_channel is not None:
+            if isinstance(self.task_channel, str):
+                # Legacy string support - convert to Channel object
+                channel_map = {c.name: c for c in self.channels}
+                if self.task_channel not in channel_map:
+                    raise ValueError(f"Task channel '{self.task_channel}' not found in channels")
+                self.task_channel = channel_map[self.task_channel]
+            elif not isinstance(self.task_channel, Channel):
+                raise TypeError(f"task_channel must be Channel object or string, got {type(self.task_channel)}")
 
     def get_agent(self, name: str) -> Optional[Agent]:
         """Get agent by name."""
