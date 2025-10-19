@@ -7,9 +7,31 @@ subscription-based reactive execution.
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from collections import defaultdict
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Handle (Like Syndicate's OutboundAssertion)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+@dataclass
+class Handle:
+    """
+    Handle to an asserted fact (like Syndicate's OutboundAssertion).
+
+    Returned by assert_fact(), used to retract the fact later.
+    Enables facets to manage their assertions explicitly.
+    """
+
+    fact_id: str
+    handle_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+
+    def __repr__(self) -> str:
+        return f"Handle({self.fact_id[:8]}...)"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -140,37 +162,60 @@ class Dataspace:
         self.facts_by_type: Dict[type, Set[str]] = defaultdict(set)  # type -> {fact_ids}
         self.subscriptions: List[Tuple[FactPattern, Callable]] = []
 
-    def assert_fact(self, fact: Fact) -> None:
+    def assert_fact(self, fact: Fact) -> Handle:
         """
-        Assert a fact into the dataspace.
+        Assert a fact into the dataspace (like Syndicate's publish).
 
         Args:
             fact: Fact to assert
 
-        Triggers callbacks for matching subscriptions.
+        Returns:
+            Handle for later retraction
+
+        Triggers callbacks for matching subscriptions (atomic within turn).
         """
         # Store fact
         self.facts[fact.fact_id] = fact
         self.facts_by_type[type(fact)].add(fact.fact_id)
 
-        # Trigger subscriptions
+        # Create handle for retraction
+        handle = Handle(fact_id=fact.fact_id)
+
+        # Trigger subscriptions (TODO: delay until end of turn)
         for pattern, callback in self.subscriptions:
             if pattern.matches(fact):
                 callback(fact)
 
+        return handle
+
+    def retract(self, handle: Handle) -> Optional[Fact]:
+        """
+        Retract a fact using its handle (like Syndicate).
+
+        Args:
+            handle: Handle from assert_fact()
+
+        Returns:
+            Retracted fact if found, None otherwise
+        """
+        return self.retract_fact(handle.fact_id)
+
     def retract_fact(self, fact_id: str) -> Optional[Fact]:
         """
-        Retract a fact from the dataspace.
+        Retract a fact by ID.
 
         Args:
             fact_id: ID of fact to retract
 
         Returns:
             Retracted fact if found, None otherwise
+
+        Triggers callbacks for subscriptions (retraction events).
         """
         fact = self.facts.pop(fact_id, None)
         if fact:
             self.facts_by_type[type(fact)].discard(fact_id)
+            # TODO: Notify subscriptions of retraction
         return fact
 
     def subscribe(self, pattern: FactPattern, callback: Callable[[Fact], None]) -> None:

@@ -22,7 +22,11 @@ def test_dataspace_assert_and_query():
     ds = Dataspace()
 
     plan = PlanDoc(fact_id="plan-1", task_id="task-1", content="Build feature X", iteration=1)
-    ds.assert_fact(plan)
+    handle = ds.assert_fact(plan)
+
+    # assert_fact returns Handle
+    assert handle is not None
+    assert handle.fact_id == "plan-1"
 
     # Query by type
     pattern = FactPattern(fact_type=PlanDoc)
@@ -50,19 +54,39 @@ def test_dataspace_query_with_constraints():
 
 
 def test_dataspace_retract_fact():
-    """Test retracting facts."""
+    """Test retracting facts via handle."""
     ds = Dataspace()
 
     plan = PlanDoc(fact_id="plan-1", task_id="task-1", content="Feature X")
-    ds.assert_fact(plan)
+    handle = ds.assert_fact(plan)
 
     assert len(ds.facts) == 1
 
-    retracted = ds.retract_fact("plan-1")
+    # Retract using handle (Syndicate-style)
+    retracted = ds.retract(handle)
 
     assert retracted is not None
     assert retracted.fact_id == "plan-1"
     assert len(ds.facts) == 0
+
+
+def test_dataspace_handle_lifecycle():
+    """Test handle-based fact lifecycle (assert → retract)."""
+    ds = Dataspace()
+
+    # Assert fact, get handle
+    plan = PlanDoc(fact_id="plan-1", task_id="task-1", content="Feature X")
+    handle = ds.assert_fact(plan)
+
+    # Fact present
+    assert ds.get_fact("plan-1") is not None
+
+    # Retract via handle
+    retracted = ds.retract(handle)
+    assert retracted.fact_id == "plan-1"
+
+    # Fact gone
+    assert ds.get_fact("plan-1") is None
 
 
 def test_dataspace_subscription():
