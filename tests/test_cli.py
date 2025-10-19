@@ -15,7 +15,7 @@ import pytest
 from typer.testing import CliRunner
 
 from duet.cli import app
-from duet.models import Phase, ReviewVerdict, RunSnapshot
+from duet.models import ReviewVerdict, RunSnapshot
 from duet.persistence import DuetDatabase
 
 runner = CliRunner()
@@ -45,7 +45,7 @@ def sample_db(temp_config_dir):
     snapshot1 = RunSnapshot(
         run_id="run-blocked-001",
         iteration=2,
-        phase=Phase.BLOCKED,
+        phase="blocked",
         created_at=dt.datetime(2025, 10, 15, 10, 0, 0, tzinfo=dt.timezone.utc),
         metadata={
             "started_at": "2025-10-15T10:00:00Z",
@@ -59,7 +59,7 @@ def sample_db(temp_config_dir):
     db.insert_iteration(
         run_id="run-blocked-001",
         iteration=1,
-        phase=Phase.PLAN,
+        phase="plan",
         prompt="Create a plan",
         response_content="Planning...",
     )
@@ -68,7 +68,7 @@ def sample_db(temp_config_dir):
     snapshot2 = RunSnapshot(
         run_id="run-approved-002",
         iteration=3,
-        phase=Phase.DONE,
+        phase="done",
         created_at=dt.datetime(2025, 10, 16, 14, 0, 0, tzinfo=dt.timezone.utc),
         metadata={
             "started_at": "2025-10-16T14:00:00Z",
@@ -82,7 +82,7 @@ def sample_db(temp_config_dir):
     db.insert_iteration(
         run_id="run-approved-002",
         iteration=3,
-        phase=Phase.REVIEW,
+        phase="review",
         prompt="Review changes",
         response_content="Looks good",
         verdict=ReviewVerdict.APPROVE,
@@ -92,7 +92,7 @@ def sample_db(temp_config_dir):
     snapshot3 = RunSnapshot(
         run_id="run-inprogress-003",
         iteration=1,
-        phase=Phase.IMPLEMENT,
+        phase="implement",
         created_at=dt.datetime(2025, 10, 17, 9, 0, 0, tzinfo=dt.timezone.utc),
         metadata={
             "started_at": "2025-10-17T09:00:00Z",
@@ -403,7 +403,7 @@ logging:
     with patch("duet.cli.Orchestrator") as MockOrchestrator:
         mock_orch = MockOrchestrator.return_value
         mock_snapshot = RunSnapshot(
-            run_id="test-quiet", iteration=1, phase=Phase.DONE
+            run_id="test-quiet", iteration=1, phase="done"
         )
         mock_orch.run.return_value = mock_snapshot
 

@@ -89,7 +89,7 @@ def main():
 
         # Check 1: Final state
         console.print("[bold]✓ Check 1:[/] Final state")
-        console.print(f"  Phase: {snapshot.phase.value.upper()}")
+        console.print(f"  Phase: {snapshot.phase.upper()}")
         console.print(f"  Iteration: {snapshot.iteration}")
         console.print(f"  Notes: {snapshot.notes or 'None'}")
 

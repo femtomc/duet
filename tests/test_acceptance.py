@@ -15,7 +15,6 @@ from rich.console import Console
 
 from duet.artifacts import ArtifactStore
 from duet.config import AssistantConfig, DuetConfig, LoggingConfig, StorageConfig, WorkflowConfig
-from duet.models import Phase
 from duet.orchestrator import Orchestrator
 
 
@@ -112,15 +111,15 @@ def test_basic_orchestration_loop(echo_config, temp_artifacts_dir):
 
     # Assertions
     assert snapshot.run_id == "test-basic-run"
-    assert snapshot.phase == Phase.BLOCKED  # Echo adapter never sets concluded=True
-    assert snapshot.iteration == 3  # Should hit max iterations
-    assert "Max iterations" in snapshot.notes
+    # Echo adapter auto-approves for reviewer roles, so workflow completes
+    assert snapshot.phase == "done"
+    assert snapshot.iteration >= 1
 
     # Verify checkpoint was created
     checkpoint = artifact_store.load_checkpoint("test-basic-run")
     assert checkpoint is not None
     assert checkpoint.run_id == "test-basic-run"
-    assert checkpoint.phase == Phase.BLOCKED
+    assert checkpoint.phase == "done"
 
 
 def test_artifact_persistence(echo_config, temp_artifacts_dir):
@@ -184,7 +183,8 @@ def test_run_summary_generation(echo_config, temp_artifacts_dir):
     stats = summary["statistics"]
     assert stats["total_iterations"] > 0
     assert "phase_counts" in stats
-    assert stats["final_phase"] == Phase.BLOCKED.value
+    # Echo adapter auto-approves, so workflow completes
+    assert stats["final_phase"] == "done"
 
 
 def test_jsonl_logging(echo_config, temp_artifacts_dir):
@@ -242,7 +242,7 @@ def test_max_iterations_edge_case(temp_workspace, temp_artifacts_dir):
     snapshot = orchestrator.run(run_id="test-max-iter")
 
     assert snapshot.iteration == 1
-    assert snapshot.phase == Phase.BLOCKED
+    assert snapshot.phase == "blocked"
     assert "Max iterations" in snapshot.notes
 
 
@@ -285,7 +285,7 @@ def test_checkpoint_resumability(echo_config, temp_artifacts_dir):
     # Verify checkpoint has required fields for resumption
     assert checkpoint.run_id == "test-checkpoint"
     assert checkpoint.iteration >= 0
-    assert checkpoint.phase in [Phase.BLOCKED, Phase.DONE]
+    assert checkpoint.phase in ["blocked", "done"]
     assert checkpoint.created_at is not None
     assert "started_at" in checkpoint.metadata
     assert "completed_at" in checkpoint.metadata

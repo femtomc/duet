@@ -19,7 +19,7 @@ from rich.console import Console
 
 from duet.artifacts import ArtifactStore
 from duet.config import AssistantConfig, DuetConfig, StorageConfig, WorkflowConfig
-from duet.models import AssistantRequest, AssistantResponse, Phase, ReviewVerdict, TransitionDecision
+from duet.models import AssistantRequest, AssistantResponse, ReviewVerdict, TransitionDecision
 from duet.orchestrator import Orchestrator
 
 
@@ -124,7 +124,7 @@ def test_require_git_changes_flag():
 
             # Should complete without blocking on missing changes
             # (Will still block on max iterations with echo adapter)
-            assert snapshot.phase == Phase.BLOCKED
+            assert snapshot.phase == "blocked"
             assert "no repository changes" not in (snapshot.notes or "").lower()
 
 
@@ -177,7 +177,7 @@ def test_approval_notifier_check_pending():
         from duet.models import RunSnapshot
 
         notifier = ApprovalNotifier(artifact_store, Console())
-        snapshot = RunSnapshot(run_id="test-run", iteration=1, phase=Phase.BLOCKED)
+        snapshot = RunSnapshot(run_id="test-run", iteration=1, phase="blocked")
 
         # Before requesting approval
         assert not notifier.check_approval_pending("test-run")
@@ -397,7 +397,7 @@ def test_no_git_changes_blocks_run():
             # Run will block when IMPLEMENT produces no changes
             snapshot = orchestrator.run(run_id="test-no-changes")
 
-            assert snapshot.phase == Phase.BLOCKED
+            assert snapshot.phase == "blocked"
             assert "no repository changes" in snapshot.notes.lower()
 
 
@@ -459,7 +459,7 @@ def test_max_consecutive_replans_enforced():
             snapshot = orchestrator.run(run_id="test-replan-limit")
 
             # Should block due to replan limit
-            assert snapshot.phase == Phase.BLOCKED
+            assert snapshot.phase == "blocked"
             # Consecutive replans should be recorded
             assert snapshot.metadata.get("consecutive_replans", 0) >= 0
 

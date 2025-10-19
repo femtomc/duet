@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from duet.models import Phase, ReviewVerdict, RunSnapshot
+from duet.models import ReviewVerdict, RunSnapshot
 from duet.persistence import DuetDatabase
 
 
@@ -60,7 +60,7 @@ def test_insert_run(in_memory_db):
     snapshot = RunSnapshot(
         run_id="test-run-001",
         iteration=0,
-        phase=Phase.PLAN,
+        phase="plan",
         metadata={"started_at": dt.datetime.now(dt.timezone.utc).isoformat()},
     )
 
@@ -80,14 +80,14 @@ def test_update_run(in_memory_db):
     snapshot = RunSnapshot(
         run_id="test-run-002",
         iteration=1,
-        phase=Phase.PLAN,
+        phase="plan",
         notes="Initial",
     )
 
     db.insert_run(snapshot)
 
     # Update
-    snapshot.phase = Phase.DONE
+    snapshot.phase = "done"
     snapshot.iteration = 3
     snapshot.notes = "Completed"
     snapshot.metadata["completed_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
@@ -105,7 +105,7 @@ def test_update_run(in_memory_db):
 def test_upsert_run(in_memory_db):
     """Test upsert (insert or update) run record."""
     db = in_memory_db
-    snapshot = RunSnapshot(run_id="test-upsert", iteration=0, phase=Phase.PLAN)
+    snapshot = RunSnapshot(run_id="test-upsert", iteration=0, phase="plan")
 
     # First upsert (insert)
     db.upsert_run(snapshot)
@@ -124,19 +124,19 @@ def test_insert_iteration(in_memory_db):
     db = in_memory_db
 
     # Insert parent run first
-    snapshot = RunSnapshot(run_id="test-run-iter", iteration=0, phase=Phase.PLAN)
+    snapshot = RunSnapshot(run_id="test-run-iter", iteration=0, phase="plan")
     db.insert_run(snapshot)
 
     # Insert iteration
     db.insert_iteration(
         run_id="test-run-iter",
         iteration=1,
-        phase=Phase.PLAN,
+        phase="plan",
         prompt="Create a plan",
         response_content="Here is the plan...",
         verdict=None,
         concluded=False,
-        next_phase=Phase.IMPLEMENT,
+        next_phase="implement",
         requires_human=False,
         decision_rationale="Plan complete",
         git_metadata={"files_changed": 3, "insertions": 42, "deletions": 10},
@@ -160,18 +160,18 @@ def test_insert_iteration(in_memory_db):
 def test_insert_iteration_with_verdict(in_memory_db):
     """Test inserting iteration with review verdict."""
     db = in_memory_db
-    snapshot = RunSnapshot(run_id="test-verdict", iteration=0, phase=Phase.REVIEW)
+    snapshot = RunSnapshot(run_id="test-verdict", iteration=0, phase="review")
     db.insert_run(snapshot)
 
     db.insert_iteration(
         run_id="test-verdict",
         iteration=1,
-        phase=Phase.REVIEW,
+        phase="review",
         prompt="Review changes",
         response_content="Approved",
         verdict=ReviewVerdict.APPROVE,
         concluded=True,
-        next_phase=Phase.DONE,
+        next_phase="done",
         requires_human=False,
         decision_rationale="All good",
     )
@@ -191,7 +191,7 @@ def test_list_runs(in_memory_db):
         snapshot = RunSnapshot(
             run_id=f"run-{i:03d}",
             iteration=i,
-            phase=Phase.DONE if i % 2 == 0 else Phase.BLOCKED,
+            phase="done" if i % 2 == 0 else "blocked",
         )
         db.insert_run(snapshot)
 
@@ -207,7 +207,7 @@ def test_list_runs(in_memory_db):
 def test_list_iterations(in_memory_db):
     """Test listing iterations for a run."""
     db = in_memory_db
-    snapshot = RunSnapshot(run_id="test-iters", iteration=0, phase=Phase.PLAN)
+    snapshot = RunSnapshot(run_id="test-iters", iteration=0, phase="plan")
     db.insert_run(snapshot)
 
     # Insert multiple iterations
@@ -215,7 +215,7 @@ def test_list_iterations(in_memory_db):
         db.insert_iteration(
             run_id="test-iters",
             iteration=i + 1,
-            phase=Phase.PLAN,
+            phase="plan",
             prompt=f"Prompt {i}",
             response_content=f"Response {i}",
         )
@@ -229,14 +229,14 @@ def test_list_iterations(in_memory_db):
 def test_get_run_statistics(in_memory_db):
     """Test aggregated statistics for a run."""
     db = in_memory_db
-    snapshot = RunSnapshot(run_id="test-stats", iteration=0, phase=Phase.PLAN)
+    snapshot = RunSnapshot(run_id="test-stats", iteration=0, phase="plan")
     db.insert_run(snapshot)
 
     # Insert iterations with various metadata
     db.insert_iteration(
         run_id="test-stats",
         iteration=1,
-        phase=Phase.PLAN,
+        phase="plan",
         prompt="Plan",
         response_content="Plan response",
         usage_metadata={"input_tokens": 100, "output_tokens": 50, "cached_input_tokens": 10},
@@ -245,7 +245,7 @@ def test_get_run_statistics(in_memory_db):
     db.insert_iteration(
         run_id="test-stats",
         iteration=1,
-        phase=Phase.IMPLEMENT,
+        phase="implement",
         prompt="Implement",
         response_content="Implemented",
         usage_metadata={"input_tokens": 200, "output_tokens": 100},
@@ -254,7 +254,7 @@ def test_get_run_statistics(in_memory_db):
     db.insert_iteration(
         run_id="test-stats",
         iteration=1,
-        phase=Phase.REVIEW,
+        phase="review",
         prompt="Review",
         response_content="Approved",
         verdict=ReviewVerdict.APPROVE,
@@ -276,7 +276,7 @@ def test_search_runs_by_phase(in_memory_db):
     db = in_memory_db
 
     # Insert runs with different phases (unique IDs)
-    phases = [Phase.DONE, Phase.BLOCKED, Phase.DONE]
+    phases = ["done", "blocked", "done"]
     for i, phase in enumerate(phases):
         snapshot = RunSnapshot(run_id=f"search-{phase.value}-{i}", iteration=0, phase=phase)
         db.insert_run(snapshot)
@@ -297,7 +297,7 @@ def test_search_runs_by_id_prefix(in_memory_db):
     # Insert runs with different prefixes (unique IDs)
     prefixes = ["prod", "test", "prod"]
     for i, prefix in enumerate(prefixes):
-        snapshot = RunSnapshot(run_id=f"{prefix}-run-{i:03d}", iteration=0, phase=Phase.DONE)
+        snapshot = RunSnapshot(run_id=f"{prefix}-run-{i:03d}", iteration=0, phase="done")
         db.insert_run(snapshot)
 
     # Search by prefix
@@ -335,7 +335,7 @@ def test_insert_state(in_memory_db):
     db = in_memory_db
 
     # Insert run first
-    snapshot = RunSnapshot(run_id="test-run-001", iteration=0, phase=Phase.PLAN)
+    snapshot = RunSnapshot(run_id="test-run-001", iteration=0, phase="plan")
     db.insert_run(snapshot)
 
     # Insert state
@@ -362,7 +362,7 @@ def test_list_states(in_memory_db):
     db = in_memory_db
 
     # Insert run
-    snapshot = RunSnapshot(run_id="test-run-002", iteration=0, phase=Phase.PLAN)
+    snapshot = RunSnapshot(run_id="test-run-002", iteration=0, phase="plan")
     db.insert_run(snapshot)
 
     # Insert multiple states
@@ -392,7 +392,7 @@ def test_active_state(in_memory_db):
     db = in_memory_db
 
     # Insert run
-    snapshot = RunSnapshot(run_id="test-run-003", iteration=0, phase=Phase.PLAN)
+    snapshot = RunSnapshot(run_id="test-run-003", iteration=0, phase="plan")
     db.insert_run(snapshot)
 
     # Insert state
@@ -416,7 +416,7 @@ def test_state_with_parent(in_memory_db):
     db = in_memory_db
 
     # Insert run
-    snapshot = RunSnapshot(run_id="test-run-004", iteration=0, phase=Phase.PLAN)
+    snapshot = RunSnapshot(run_id="test-run-004", iteration=0, phase="plan")
     db.insert_run(snapshot)
 
     # Insert parent state
@@ -444,7 +444,7 @@ def test_state_with_metadata(in_memory_db):
     db = in_memory_db
 
     # Insert run
-    snapshot = RunSnapshot(run_id="test-run-005", iteration=0, phase=Phase.PLAN)
+    snapshot = RunSnapshot(run_id="test-run-005", iteration=0, phase="plan")
     db.insert_run(snapshot)
 
     # Insert state with metadata
@@ -471,7 +471,7 @@ def test_get_latest_state(in_memory_db):
     db = in_memory_db
 
     # Insert run
-    snapshot = RunSnapshot(run_id="test-run-006", iteration=0, phase=Phase.PLAN)
+    snapshot = RunSnapshot(run_id="test-run-006", iteration=0, phase="plan")
     db.insert_run(snapshot)
 
     # Insert states
@@ -506,7 +506,7 @@ def test_insert_message(in_memory_db):
     db = in_memory_db
 
     # Insert run first
-    snapshot = RunSnapshot(run_id="test-run-001", iteration=0, phase=Phase.PLAN)
+    snapshot = RunSnapshot(run_id="test-run-001", iteration=0, phase="plan")
     db.insert_run(snapshot)
 
     # Insert message
@@ -530,7 +530,7 @@ def test_list_messages_filter_by_channel(in_memory_db):
     """Test filtering messages by channel."""
     db = in_memory_db
 
-    snapshot = RunSnapshot(run_id="test-run-002", iteration=0, phase=Phase.PLAN)
+    snapshot = RunSnapshot(run_id="test-run-002", iteration=0, phase="plan")
     db.insert_run(snapshot)
 
     # Insert messages for different channels
@@ -552,7 +552,7 @@ def test_list_messages_filter_by_phase(in_memory_db):
     """Test filtering messages by phase."""
     db = in_memory_db
 
-    snapshot = RunSnapshot(run_id="test-run-003", iteration=0, phase=Phase.PLAN)
+    snapshot = RunSnapshot(run_id="test-run-003", iteration=0, phase="plan")
     db.insert_run(snapshot)
 
     # Insert messages from different phases
@@ -569,7 +569,7 @@ def test_get_latest_channel_message(in_memory_db):
     """Test getting the latest message for a channel."""
     db = in_memory_db
 
-    snapshot = RunSnapshot(run_id="test-run-004", iteration=0, phase=Phase.PLAN)
+    snapshot = RunSnapshot(run_id="test-run-004", iteration=0, phase="plan")
     db.insert_run(snapshot)
 
     # Insert multiple messages for same channel
@@ -589,7 +589,7 @@ def test_get_state_messages(in_memory_db):
     """Test getting messages for a specific state."""
     db = in_memory_db
 
-    snapshot = RunSnapshot(run_id="test-run-005", iteration=0, phase=Phase.PLAN)
+    snapshot = RunSnapshot(run_id="test-run-005", iteration=0, phase="plan")
     db.insert_run(snapshot)
 
     # Insert state
@@ -624,7 +624,7 @@ def test_message_json_payload(in_memory_db):
     """Test storing and retrieving JSON payloads."""
     db = in_memory_db
 
-    snapshot = RunSnapshot(run_id="test-run-006", iteration=0, phase=Phase.PLAN)
+    snapshot = RunSnapshot(run_id="test-run-006", iteration=0, phase="plan")
     db.insert_run(snapshot)
 
     # Insert message with dict payload
