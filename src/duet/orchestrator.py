@@ -377,62 +377,73 @@ class Orchestrator:
             phase_start_time = dt.datetime.now(dt.timezone.utc)
             self.logger.log_iteration_start(snapshot.run_id, iteration, current_phase)
 
-            # ──── Compose Request ────
-            request = self._compose_request(current_phase, snapshot)
-            adapter = self._select_adapter(current_phase)
-            adapter_name = adapter.__class__.__name__
-            self.logger.log_adapter_call(snapshot.run_id, iteration, current_phase, adapter_name)
+            # ──── Check for Step-Based Facet Execution ────
+            phase_def = self.workflow_graph.phases.get(current_phase)
+            use_facet_runner = phase_def and len(phase_def.steps) > 0
 
-            # ──── Streaming Display Setup  ────
-            from .models import StreamMode
-            stream_mode = self.config.logging.stream_mode
-            # Handle quiet flag (maps to stream_mode="off")
-            if self.config.logging.quiet:
-                stream_mode = StreamMode.OFF
+            if use_facet_runner:
+                # Sprint DSL-4: Execute facet script step-by-step
+                response = self._execute_facet_script(current_phase, snapshot, phase_def)
+                if response is None:
+                    # Human approval or error - already handled
+                    break
+            else:
+                # Traditional adapter-based execution
+                request = self._compose_request(current_phase, snapshot)
+                adapter = self._select_adapter(current_phase)
+                adapter_name = adapter.__class__.__name__
+                self.logger.log_adapter_call(snapshot.run_id, iteration, current_phase, adapter_name)
 
-            streaming_display = None if stream_mode == StreamMode.OFF else EnhancedStreamingDisplay(
-                console=self.console,
-                phase=current_phase,
-                iteration=iteration,
-                mode=stream_mode.value,  # Pass string value to display
-            )
+                # ──── Streaming Display Setup  ────
+                from .models import StreamMode
+                stream_mode = self.config.logging.stream_mode
+                # Handle quiet flag (maps to stream_mode="off")
+                if self.config.logging.quiet:
+                    stream_mode = StreamMode.OFF
 
-            # ──── Create Event Handler for Streaming ────
-            event_handler = self._create_event_handler(
-                snapshot.run_id, iteration, current_phase, display=streaming_display
-            )
-
-            # ──── Edge Case: Adapter Failure ────
-            try:
-                # Use Rich Live display if not in quiet mode
-                if streaming_display:
-                    with Live(
-                        streaming_display.render(),
-                        console=self.console,
-                        refresh_per_second=4,
-                        transient=True,  # Remove display after completion
-                    ) as live:
-                        # Create wrapper that updates live display
-                        def live_event_handler(event: StreamEvent) -> None:
-                            event_handler(event)  # Persist + add to display
-                            live.update(streaming_display.render())  # Refresh display
-
-                        response = adapter.stream(request, on_event=live_event_handler)
-                else:
-                    response = adapter.stream(request, on_event=event_handler)
-            except Exception as exc:
-                snapshot.phase = "blocked"
-                snapshot.notes = f"Adapter failure during {current_phase}: {exc}"
-                self.logger.log_error(
-                    snapshot.run_id, iteration, current_phase, "adapter_failure", str(exc)
+                streaming_display = None if stream_mode == StreamMode.OFF else EnhancedStreamingDisplay(
+                    console=self.console,
+                    phase=current_phase,
+                    iteration=iteration,
+                    mode=stream_mode.value,  # Pass string value to display
                 )
-                self._persist_interaction(
-                    snapshot.run_id,
-                    current_phase,
-                    request,
-                    AssistantResponse(content="", metadata={"error": str(exc)}),
+
+                # ──── Create Event Handler for Streaming ────
+                event_handler = self._create_event_handler(
+                    snapshot.run_id, iteration, current_phase, display=streaming_display
                 )
-                break
+
+                # ──── Edge Case: Adapter Failure ────
+                try:
+                    # Use Rich Live display if not in quiet mode
+                    if streaming_display:
+                        with Live(
+                            streaming_display.render(),
+                            console=self.console,
+                            refresh_per_second=4,
+                            transient=True,  # Remove display after completion
+                        ) as live:
+                            # Create wrapper that updates live display
+                            def live_event_handler(event: StreamEvent) -> None:
+                                event_handler(event)  # Persist + add to display
+                                live.update(streaming_display.render())  # Refresh display
+
+                            response = adapter.stream(request, on_event=live_event_handler)
+                    else:
+                        response = adapter.stream(request, on_event=event_handler)
+                except Exception as exc:
+                    snapshot.phase = "blocked"
+                    snapshot.notes = f"Adapter failure during {current_phase}: {exc}"
+                    self.logger.log_error(
+                        snapshot.run_id, iteration, current_phase, "adapter_failure", str(exc)
+                    )
+                    self._persist_interaction(
+                        snapshot.run_id,
+                        current_phase,
+                        request,
+                        AssistantResponse(content="", metadata={"error": str(exc)}),
+                    )
+                    break
 
             # ──── Extract Verdict from Metadata (if phase publishes verdict channel) ────
             phase_def = self.workflow_graph.phases.get(current_phase)
@@ -948,6 +959,79 @@ class Orchestrator:
 
     def _derive_run_id(self) -> str:
         return dt.datetime.now(dt.timezone.utc).strftime("run-%Y%m%d-%H%M%S")
+
+    def _execute_facet_script(
+        self,
+        phase: str,
+        snapshot: RunSnapshot,
+        phase_def,
+    ) -> Optional[AssistantResponse]:
+        """
+        Execute phase as facet script (Sprint DSL-4).
+
+        Uses FacetRunner to execute ordered steps, handles results, and
+        returns compatible AssistantResponse for orchestrator loop.
+
+        Args:
+            phase: Phase name
+            snapshot: Current run snapshot
+            phase_def: Phase definition with steps
+
+        Returns:
+            AssistantResponse if execution completed, None if paused/blocked
+        """
+        from .facet_runner import FacetRunner
+
+        # Initialize facet runner
+        runner = FacetRunner(console=self.console)
+
+        # Get current channel state
+        channel_state = self.workflow_executor.get_current_channels() if self.workflow_executor else {}
+
+        # Execute facet
+        self.console.log(f"[cyan]Executing facet script:[/] {len(phase_def.steps)} steps")
+        facet_result = runner.execute_facet(
+            phase=phase_def,
+            channel_state=channel_state,
+            run_id=snapshot.run_id,
+            iteration=snapshot.iteration,
+            workspace_root=str(self.config.storage.workspace_root),
+            adapter=self._select_adapter(phase),
+        )
+
+        # Handle facet execution failure
+        if not facet_result.success:
+            snapshot.phase = "blocked"
+            snapshot.notes = facet_result.error or "Facet execution failed"
+            self.console.log(f"[red]Facet execution failed:[/] {facet_result.error}")
+            return None
+
+        # Handle human approval pause
+        if facet_result.human_approval_needed:
+            snapshot.phase = "blocked"
+            snapshot.notes = f"Human approval required: {facet_result.approval_reason}"
+            self.console.log(f"[yellow]Human approval needed:[/] {facet_result.approval_reason}")
+            return None
+
+        # Apply staged channel writes
+        if self.workflow_executor:
+            for channel_name, value in facet_result.channel_writes.items():
+                self.workflow_executor.channel_store.set(channel_name, value)
+                self.console.log(f"[dim]Channel write:[/] {channel_name}")
+
+        # Build AssistantResponse from facet result
+        # For now, use a synthetic response (real agent integration coming)
+        response = AssistantResponse(
+            content=f"Facet '{phase}' executed {len(facet_result.step_logs)} steps",
+            metadata={
+                "facet_execution": True,
+                "steps_executed": len(facet_result.step_logs),
+                "channel_writes": list(facet_result.channel_writes.keys()),
+                "step_logs": facet_result.step_logs,
+            },
+        )
+
+        return response
 
     # ──────────────────────────────────────────────────────────────────────────
     # Single-Phase Execution
