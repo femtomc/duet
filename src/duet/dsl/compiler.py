@@ -131,22 +131,32 @@ class WorkflowGraph:
         return visited
 
     def get_channel_consumers(self, channel_name: str) -> List[str]:
-        """Get list of phases that consume a channel (by channel name)."""
+        """
+        Get list of phases that consume a channel (by channel name).
+
+        Sprint DSL-3: Uses phase.get_reads() to support both step-based facets
+        and old-style consumes.
+        """
         consumers = []
         for phase_name, phase in self.phases.items():
-            # phase.consumes is now List[Channel], check names
-            for channel in phase.consumes:
+            # Use get_reads() to support both steps and old consumes
+            for channel in phase.get_reads():
                 if channel.name == channel_name:
                     consumers.append(phase_name)
                     break
         return consumers
 
     def get_channel_publishers(self, channel_name: str) -> List[str]:
-        """Get list of phases that publish to a channel (by channel name)."""
+        """
+        Get list of phases that publish to a channel (by channel name).
+
+        Sprint DSL-3: Uses phase.get_writes() to support both step-based facets
+        and old-style publishes.
+        """
         publishers = []
         for phase_name, phase in self.phases.items():
-            # phase.publishes is now List[Channel], check names
-            for channel in phase.publishes:
+            # Use get_writes() to support both steps and old publishes
+            for channel in phase.get_writes():
                 if channel.name == channel_name:
                     publishers.append(phase_name)
                     break
@@ -277,18 +287,19 @@ class WorkflowCompiler:
                     f"Phase '{phase.name}' references unknown agent: '{phase.agent}'"
                 )
 
-            # Validate phase -> channel references (consumes/publishes are Channel objects)
-            for channel in phase.consumes:
+            # Validate phase -> channel references (use get_reads/get_writes for step support)
+            # This works for both step-based facets and old-style consumes/publishes
+            for channel in phase.get_reads():
                 if channel not in all_channels:
                     self.errors.append(
-                        f"Phase '{phase.name}' consumes unknown channel: '{channel.name}' "
+                        f"Phase '{phase.name}' reads unknown channel: '{channel.name}' "
                         f"(channel not in workflow.channels list)"
                     )
 
-            for channel in phase.publishes:
+            for channel in phase.get_writes():
                 if channel not in all_channels:
                     self.errors.append(
-                        f"Phase '{phase.name}' publishes to unknown channel: '{channel.name}' "
+                        f"Phase '{phase.name}' writes to unknown channel: '{channel.name}' "
                         f"(channel not in workflow.channels list)"
                     )
 
