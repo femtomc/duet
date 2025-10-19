@@ -359,7 +359,8 @@ Be concise but comprehensive. This will help the orchestrator understand the cod
 """
 
         try:
-            # Use CodexAdapter for streaming discovery            from .adapters import CodexAdapter
+            # Use CodexAdapter for streaming discovery
+            from .adapters import CodexAdapter
             from .adapters.base import StreamEvent
             from .models import AssistantRequest
             from rich.live import Live
@@ -429,7 +430,7 @@ Be concise but comprehensive. This will help the orchestrator understand the cod
                 return Panel(content, border_style="cyan", expand=False)
 
             def on_event(event: StreamEvent) -> None:
-                """Handle streaming events during discovery (Sprint 7: canonical events)."""
+                """Handle streaming events during discovery."""
                 nonlocal event_count, reasoning_count, agent_message_snippet, token_count, reasoning_snippet, last_command, command_output
                 event_count += 1
 
