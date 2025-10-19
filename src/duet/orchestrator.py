@@ -766,7 +766,7 @@ class Orchestrator:
             return  # No channel store available
 
         # Get the phase definition from the workflow graph to find published channels
-        phase_def = self.workflow_graph.get_phase(phase.value)
+        phase_def = self.workflow_graph.phases.get(phase.value)
         if not phase_def or not phase_def.publishes:
             return  # No channels declared for this phase
 
