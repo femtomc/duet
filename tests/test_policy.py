@@ -364,10 +364,9 @@ def test_no_git_changes_blocks_run():
     with tempfile.TemporaryDirectory() as tmpdir_workspace:
         with tempfile.TemporaryDirectory() as tmpdir_artifacts:
             workspace = Path(tmpdir_workspace)
-            create_test_workflow(workspace)  # required
             artifacts = Path(tmpdir_artifacts)
 
-            # Initialize git repo with no changes
+            # Initialize git repo FIRST
             import subprocess
 
             subprocess.run(["git", "init"], cwd=workspace, check=True)
@@ -377,6 +376,10 @@ def test_no_git_changes_blocks_run():
             subprocess.run(
                 ["git", "config", "user.name", "Test"], cwd=workspace, check=True
             )
+
+            # Create workflow, .gitignore, and README, then commit everything
+            create_test_workflow(workspace)
+            (workspace / ".gitignore").write_text("__pycache__/\n*.pyc\n.duet/duet.db\n.duet/runs/\n.duet/logs/\n")
             (workspace / "README.md").write_text("initial")
             subprocess.run(["git", "add", "."], cwd=workspace, check=True)
             subprocess.run(
@@ -397,14 +400,14 @@ def test_no_git_changes_blocks_run():
             artifact_store = ArtifactStore(artifacts, Console())
             orchestrator = Orchestrator(config, artifact_store, Console())
 
-            # Run completes (echo adapter auto-approves for reviewer role)
-            # Note: Git change detection runs but echo adapter workflow completes anyway
+            # Run orchestration - should block when IMPLEMENT produces no changes
             snapshot = orchestrator.run(run_id="test-no-changes")
 
-            # With echo adapter, workflow completes even without git changes
-            # TODO: Add explicit test with mocked adapter that doesn't make changes
-            assert snapshot.run_id == "test-no-changes"
-            assert snapshot.iteration >= 1
+            # Verify orchestration blocked due to missing git changes
+            assert snapshot.phase == "blocked"
+            assert "git changes" in snapshot.notes.lower()
+            # Verify it blocked during implement phase (iteration 2)
+            assert snapshot.iteration == 2
 
 
 # ──────────────────────────────────────────────────────────────────────────────

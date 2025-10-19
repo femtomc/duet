@@ -927,24 +927,32 @@ class Orchestrator:
         Uses the phase's agent assignment from the workflow, then builds
         an adapter from the agent's configuration merged with duet.yaml overrides.
 
-        Fallback: Use legacy codex/claude mapping if workflow doesn't specify agent.
+        Raises:
+            RuntimeError: If phase or agent not found in workflow (fail fast)
         """
         # Get phase definition from workflow
         phase_def = self.workflow_graph.phases.get(phase)
-        if not phase_def or not phase_def.agent:
-            # Fallback to legacy mapping
-            if phase in ("plan", "review"):
-                return self.codex_adapter
-            if phase == "implement":
-                return self.claude_adapter
-            return self.codex_adapter
+        if not phase_def:
+            raise RuntimeError(
+                f"Phase '{phase}' not found in workflow definition. "
+                f"Available phases: {', '.join(sorted(self.workflow_graph.phases.keys()))}"
+            )
+
+        if not phase_def.agent:
+            raise RuntimeError(
+                f"Phase '{phase}' has no agent assigned. "
+                f"Update .duet/workflow.py to specify an agent for this phase."
+            )
 
         # Get agent from workflow
         agent_name = phase_def.agent
         agent_def = self.workflow_graph.agents.get(agent_name)
         if not agent_def:
-            self.console.log(f"[yellow]Warning: Agent '{agent_name}' not found in workflow, using fallback[/]")
-            return self.codex_adapter
+            raise RuntimeError(
+                f"Agent '{agent_name}' (required by phase '{phase}') not found in workflow. "
+                f"Available agents: {', '.join(sorted(self.workflow_graph.agents.keys()))}\n"
+                f"Update .duet/workflow.py to define this agent."
+            )
 
         # Build adapter from DSL agent config
         adapter_config = agent_def.to_adapter_config()
