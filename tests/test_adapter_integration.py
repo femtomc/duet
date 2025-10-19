@@ -38,11 +38,57 @@ def mock_popen_jsonl(stdout_lines: list[str], returncode: int = 0):
     return mock_process
 
 
+def create_default_workflow(workspace: Path):
+    """Create a default workflow.py for testing with echo adapters."""
+    duet_dir = workspace / ".duet"
+    duet_dir.mkdir(parents=True, exist_ok=True)
+
+    workflow_content = """
+from duet.dsl import Agent, Channel, Phase, Transition, When, Workflow
+
+workflow = Workflow(
+    agents=[
+        Agent(name="planner", provider="echo", model="echo-v1"),
+        Agent(name="implementer", provider="echo", model="echo-v1"),
+        Agent(name="reviewer", provider="echo", model="echo-v1"),
+    ],
+    channels=[
+        Channel(name="task", schema="text"),
+        Channel(name="plan", schema="text"),
+        Channel(name="code", schema="git_diff"),
+        Channel(name="verdict", schema="verdict"),
+        Channel(name="feedback", schema="text"),
+    ],
+    phases=[
+        Phase(name="plan", agent="planner", consumes=["task", "feedback"], publishes=["plan"],
+              metadata={"role_hint": "planner"}),
+        Phase(name="implement", agent="implementer", consumes=["plan"], publishes=["code"],
+              metadata={"role_hint": "implementer"}),
+        Phase(name="review", agent="reviewer", consumes=["plan", "code"], publishes=["verdict", "feedback"],
+              metadata={"role_hint": "reviewer", "replan_transition": True}),
+        Phase(name="done", agent="reviewer", is_terminal=True),
+        Phase(name="blocked", agent="reviewer", is_terminal=True),
+    ],
+    transitions=[
+        Transition(from_phase="plan", to_phase="implement"),
+        Transition(from_phase="implement", to_phase="review"),
+        Transition(from_phase="review", to_phase="done", when=When.channel_has("verdict", "approve")),
+        Transition(from_phase="review", to_phase="plan", when=When.channel_has("verdict", "changes_requested")),
+        Transition(from_phase="review", to_phase="blocked", when=When.channel_has("verdict", "blocked")),
+    ],
+    task_channel="task",
+)
+"""
+    (duet_dir / "workflow.py").write_text(workflow_content)
+
+
 @pytest.fixture
 def temp_workspace():
     """Create a temporary workspace for testing."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        yield Path(tmpdir)
+        workspace = Path(tmpdir)
+        create_default_workflow(workspace)
+        yield workspace
 
 
 @pytest.fixture
@@ -224,9 +270,7 @@ def test_adapter_error_handling_in_orchestration(temp_workspace, temp_artifacts_
         snapshot = orchestrator.run(run_id="test-error-handling")
 
     # Verify orchestration was blocked due to adapter error
-    from duet.models import Phase
-
-    assert snapshot.phase == Phase.BLOCKED
+    assert snapshot.phase == "blocked"
     assert "Adapter failure" in snapshot.notes or "error" in snapshot.notes.lower()
 
 
