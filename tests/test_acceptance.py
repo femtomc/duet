@@ -26,33 +26,59 @@ def create_test_workflow(workspace: Path) -> None:
     workflow_file.write_text("""
 from duet.dsl import Agent, Channel, Phase, Transition, When, Workflow
 
+# Define channels
+task = Channel(name="task")
+plan_ch = Channel(name="plan")
+code = Channel(name="code")
+verdict = Channel(name="verdict")
+feedback = Channel(name="feedback")
+
+# Define phases
+plan = Phase(
+    name="plan",
+    agent="planner",
+    consumes=[task, feedback],
+    publishes=[plan_ch],
+    metadata={"role_hint": "planner"},
+)
+
+implement = Phase(
+    name="implement",
+    agent="implementer",
+    consumes=[plan_ch],
+    publishes=[code],
+    metadata={"role_hint": "implementer"},
+)
+
+review = Phase(
+    name="review",
+    agent="reviewer",
+    consumes=[plan_ch, code],
+    publishes=[verdict, feedback],
+    metadata={"role_hint": "reviewer", "replan_transition": True},
+)
+
+done = Phase(name="done", agent="reviewer", is_terminal=True)
+blocked = Phase(name="blocked", agent="reviewer", is_terminal=True)
+
+# Define workflow
 workflow = Workflow(
     agents=[
         Agent(name="planner", provider="echo", model="echo-v1"),
         Agent(name="implementer", provider="echo", model="echo-v1"),
         Agent(name="reviewer", provider="echo", model="echo-v1"),
     ],
-    channels=[
-        Channel(name="task"),
-        Channel(name="plan"),
-        Channel(name="code"),
-        Channel(name="verdict"),
-        Channel(name="feedback"),
-    ],
-    phases=[
-        Phase(name="plan", agent="planner", consumes=["task"], publishes=["plan"]),
-        Phase(name="implement", agent="implementer", consumes=["plan"], publishes=["code"]),
-        Phase(name="review", agent="reviewer", consumes=["plan", "code"], publishes=["verdict", "feedback"]),
-        Phase(name="done", agent="reviewer", is_terminal=True),
-        Phase(name="blocked", agent="reviewer", is_terminal=True),
-    ],
+    channels=[task, plan_ch, code, verdict, feedback],
+    phases=[plan, implement, review, done, blocked],
     transitions=[
-        Transition(from_phase="plan", to_phase="implement"),
-        Transition(from_phase="implement", to_phase="review"),
-        Transition(from_phase="review", to_phase="done", when=When.channel_has("verdict", "approve")),
-        Transition(from_phase="review", to_phase="plan", when=When.channel_has("verdict", "changes_requested")),
-        Transition(from_phase="review", to_phase="blocked", when=When.channel_has("verdict", "blocked")),
+        Transition(from_phase=plan, to_phase=implement),
+        Transition(from_phase=implement, to_phase=review),
+        Transition(from_phase=review, to_phase=done, when=When.channel_has(verdict, "approve")),
+        Transition(from_phase=review, to_phase=plan, when=When.channel_has(verdict, "changes_requested")),
+        Transition(from_phase=review, to_phase=blocked, when=When.channel_has(verdict, "blocked")),
     ],
+    initial_phase=plan,
+    task_channel=task,
 )
 """)
 

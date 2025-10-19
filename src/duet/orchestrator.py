@@ -436,7 +436,8 @@ class Orchestrator:
 
             # ──── Extract Verdict from Metadata (if phase publishes verdict channel) ────
             phase_def = self.workflow_graph.phases.get(current_phase)
-            if phase_def and "verdict" in phase_def.publishes and "verdict" in response.metadata:
+            publishes_verdict = phase_def and any(ch.name == "verdict" for ch in phase_def.publishes)
+            if publishes_verdict and "verdict" in response.metadata:
                 verdict_str = response.metadata["verdict"]
                 if isinstance(verdict_str, str):
                     # Normalize verdict string (handle case variations)
@@ -841,16 +842,18 @@ class Orchestrator:
         if not phase_def or not phase_def.publishes:
             return  # No channels declared for this phase
 
-        published_channels = phase_def.publishes
+        published_channels = phase_def.publishes  # List[Channel] now
 
         # Strategy: Map response to declared channels
-        for channel_name in published_channels:
+        for channel in published_channels:
+            channel_name = channel.name  # Extract name from Channel object
+
             # Special handling for verdict channel (from ReviewVerdict enum or metadata)
             if channel_name == "verdict":
                 if response.verdict:
-                    self.workflow_executor.channel_store.set("verdict", response.verdict.value)
+                    self.workflow_executor.channel_store.set(channel_name, response.verdict.value)
                 elif "verdict" in response.metadata:
-                    self.workflow_executor.channel_store.set("verdict", response.metadata["verdict"])
+                    self.workflow_executor.channel_store.set(channel_name, response.metadata["verdict"])
                 continue
 
             # Check if metadata has this channel as a key (explicit mapping)
@@ -860,7 +863,7 @@ class Orchestrator:
 
             # Fallback: Use response content for the first non-verdict channel
             # (Assumes content is the primary output)
-            if channel_name == published_channels[0] or (
+            if channel == published_channels[0] or (
                 len(published_channels) == 1 and channel_name != "verdict"
             ):
                 self.workflow_executor.channel_store.set(channel_name, response.content)
@@ -1199,26 +1202,25 @@ class Orchestrator:
         request = self._compose_request(current_phase, snapshot)
         phase_def = self.workflow_graph.phases.get(current_phase)
         if feedback and phase_def:
-            # Find a feedback channel in phase consumes
+            # Find a feedback channel in phase consumes (phase_def.consumes is List[Channel])
             # Look for: 1) channel named "feedback", 2) channel with schema "text" consumed by phase
-            feedback_channel = None
-            for channel_name in phase_def.consumes:
-                if channel_name == "feedback":
-                    feedback_channel = channel_name
+            feedback_channel_name = None
+            for channel in phase_def.consumes:
+                if channel.name == "feedback":
+                    feedback_channel_name = channel.name
                     break
                 # Fallback: use any text channel that might accept feedback
-                channel_def = self.workflow_graph.channels.get(channel_name)
-                if channel_def and channel_def.schema == "text" and not feedback_channel:
-                    feedback_channel = channel_name
+                if channel.schema == "text" and not feedback_channel_name:
+                    feedback_channel_name = channel.name
 
-            if feedback_channel:
+            if feedback_channel_name:
                 # Inject user feedback into request for phases that consume it
                 request.prompt += f"\n\n──── User Feedback ────\n{feedback}\n"
                 request.context["user_feedback"] = feedback
                 # Seed the feedback channel
                 if self.workflow_executor:
-                    self.workflow_executor.seed_channel(feedback_channel, feedback)
-                    self.console.log(f"[dim]Seeded '{feedback_channel}' channel with user feedback[/]")
+                    self.workflow_executor.seed_channel(feedback_channel_name, feedback)
+                    self.console.log(f"[dim]Seeded '{feedback_channel_name}' channel with user feedback[/]")
 
         adapter = self._select_adapter(current_phase)
         adapter_name = adapter.__class__.__name__
@@ -1281,7 +1283,8 @@ class Orchestrator:
 
         # Extract verdict if phase publishes verdict channel
         phase_def = self.workflow_graph.phases.get(current_phase)
-        if phase_def and "verdict" in phase_def.publishes and "verdict" in response.metadata:
+        publishes_verdict = phase_def and any(ch.name == "verdict" for ch in phase_def.publishes)
+        if publishes_verdict and "verdict" in response.metadata:
             verdict_str = response.metadata["verdict"]
             if isinstance(verdict_str, str):
                 verdict_lower = verdict_str.lower().strip()

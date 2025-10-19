@@ -46,37 +46,59 @@ def create_default_workflow(workspace: Path):
     workflow_content = """
 from duet.dsl import Agent, Channel, Phase, Transition, When, Workflow
 
+# Define channels
+task = Channel(name="task", schema="text")
+plan_ch = Channel(name="plan", schema="text")
+code = Channel(name="code", schema="git_diff")
+verdict = Channel(name="verdict", schema="verdict")
+feedback = Channel(name="feedback", schema="text")
+
+# Define phases
+plan = Phase(
+    name="plan",
+    agent="planner",
+    consumes=[task, feedback],
+    publishes=[plan_ch],
+    metadata={"role_hint": "planner"},
+)
+
+implement = Phase(
+    name="implement",
+    agent="implementer",
+    consumes=[plan_ch],
+    publishes=[code],
+    metadata={"role_hint": "implementer"},
+)
+
+review = Phase(
+    name="review",
+    agent="reviewer",
+    consumes=[plan_ch, code],
+    publishes=[verdict, feedback],
+    metadata={"role_hint": "reviewer", "replan_transition": True},
+)
+
+done = Phase(name="done", agent="reviewer", is_terminal=True)
+blocked = Phase(name="blocked", agent="reviewer", is_terminal=True)
+
+# Define workflow
 workflow = Workflow(
     agents=[
         Agent(name="planner", provider="echo", model="echo-v1"),
         Agent(name="implementer", provider="echo", model="echo-v1"),
         Agent(name="reviewer", provider="echo", model="echo-v1"),
     ],
-    channels=[
-        Channel(name="task", schema="text"),
-        Channel(name="plan", schema="text"),
-        Channel(name="code", schema="git_diff"),
-        Channel(name="verdict", schema="verdict"),
-        Channel(name="feedback", schema="text"),
-    ],
-    phases=[
-        Phase(name="plan", agent="planner", consumes=["task", "feedback"], publishes=["plan"],
-              metadata={"role_hint": "planner"}),
-        Phase(name="implement", agent="implementer", consumes=["plan"], publishes=["code"],
-              metadata={"role_hint": "implementer"}),
-        Phase(name="review", agent="reviewer", consumes=["plan", "code"], publishes=["verdict", "feedback"],
-              metadata={"role_hint": "reviewer", "replan_transition": True}),
-        Phase(name="done", agent="reviewer", is_terminal=True),
-        Phase(name="blocked", agent="reviewer", is_terminal=True),
-    ],
+    channels=[task, plan_ch, code, verdict, feedback],
+    phases=[plan, implement, review, done, blocked],
     transitions=[
-        Transition(from_phase="plan", to_phase="implement"),
-        Transition(from_phase="implement", to_phase="review"),
-        Transition(from_phase="review", to_phase="done", when=When.channel_has("verdict", "approve")),
-        Transition(from_phase="review", to_phase="plan", when=When.channel_has("verdict", "changes_requested")),
-        Transition(from_phase="review", to_phase="blocked", when=When.channel_has("verdict", "blocked")),
+        Transition(from_phase=plan, to_phase=implement),
+        Transition(from_phase=implement, to_phase=review),
+        Transition(from_phase=review, to_phase=done, when=When.channel_has(verdict, "approve")),
+        Transition(from_phase=review, to_phase=plan, when=When.channel_has(verdict, "changes_requested")),
+        Transition(from_phase=review, to_phase=blocked, when=When.channel_has(verdict, "blocked")),
     ],
-    task_channel="task",
+    initial_phase=plan,
+    task_channel=task,
 )
 """
     (duet_dir / "workflow.py").write_text(workflow_content)

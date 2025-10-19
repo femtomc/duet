@@ -120,7 +120,10 @@ class GuardEvaluator:
         # Evaluate guards in priority order
         guard_results = {}
         for transition in transitions:
-            guard_desc = f"{transition.from_phase} → {transition.to_phase} (priority={transition.priority})"
+            # Extract names from Phase objects for logging
+            from_name = transition.from_phase.name
+            to_name = transition.to_phase.name
+            guard_desc = f"{from_name} → {to_name} (priority={transition.priority})"
 
             try:
                 result = transition.when.evaluate(guard_context)
@@ -133,7 +136,7 @@ class GuardEvaluator:
                     )
                     return GuardEvaluationResult(
                         transition=transition,
-                        next_phase=transition.to_phase,
+                        next_phase=transition.to_phase.name,  # Extract name from Phase object
                         rationale=f"Guard passed: {guard_desc}",
                         guard_results=guard_results,
                     )
@@ -249,8 +252,9 @@ class WorkflowExecutor:
                 error=f"Unknown phase: {phase_name}",
             )
 
-        # Update context with consumed channels
-        for channel_name in phase_def.consumes:
+        # Update context with consumed channels (phase_def.consumes is List[Channel])
+        for channel in phase_def.consumes:
+            channel_name = channel.name  # Extract name from Channel object
             value = self.channel_store.get(channel_name)
             context.channel_payloads[channel_name] = value
 
