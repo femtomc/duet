@@ -328,7 +328,8 @@ workflow = Workflow(
             gitkeep.write_text("", encoding="utf-8")
             self.console.log(f"[green]Created:[/] {self._display_path(gitkeep)}")
 
-        # Placeholder SQLite database        db_path = self.config_path / "duet.db"
+        # Placeholder SQLite database
+        db_path = self.config_path / "duet.db"
         if not db_path.exists():
             # Touch the file to reserve the path
             db_path.write_bytes(b"")
