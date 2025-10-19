@@ -3,18 +3,22 @@
 
   # Duet
 
-  **Programmable agents with a time machine**
+  **Programmable agents in a time machine**
 </div>
 
 This is a programmable agentic orchestration tool -- it's a kind of swiss army watch for defining structured interactions with agents. 
 
-Many agentic IDEs (Codex, Claude Code, Kiro) bake in opinions about the _interaction model_ through which the user engages with their agents -- Duet is designed to be programmable enough to _recover_ those interaction models as programs (for example: the "spec-driven development" interaction model from a system like Kiro is a Duet program).
+Many agentic IDEs (Codex, Claude Code, Kiro) bake in opinions about the _interaction model_ through which the user engages with their agents. This is not a bad thing: a stable UI and interaction model can be useful and reliable!
+
+But _this project_ is not concerned with stability -- it's concerned with trying to have a bit of fun with these wacky, stochastic, not-at-all stable _ghosts_ of human language intelligence: being useful is an accident.
+
+With that spirit in mind, the goal here is a _programmable interaction system_. If one wishes, they can _recover_ the interaction models of the systems mentioned above as _programs_ within Duet (for example: the "spec-driven development" interaction model from a system like Kiro is a Duet program).
 
 These interaction models take the form of _workflow programs_ (in a lightweight Python DSL) which are executed by a graph-driven workflow executor with channel-based message passing.
 
-Duet's backend takes care of a bunch of other things that you'd probably find yourself wanting: the ability to jump backwards and forwards in the history of the workflow (persistence), the ability to query and inspect _everything_, etc.
+A workflow program defines a type of conversation space -- not fully unstructured or spontaneous (unless you want it to be) -- a space through which multiple agents can interact to "do stuff".
 
-In short, a programmable agentic CLI gizmo.
+Duet's backend takes care of a bunch of other things that you'd probably find yourself wanting here: the ability to jump backwards and forwards in the history of the conversation (persistence), the ability to query and inspect _everything_, etc.
 
 ## How does it work?
 
