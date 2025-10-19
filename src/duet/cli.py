@@ -214,8 +214,8 @@ def status(
 
         # Show channel updates (latest per channel)
         try:
-            # Get list of unique channels by querying recent messages (limited)
-            recent_messages = db.list_messages(run_id, limit=100)
+            # Get unique channels from recent messages (optimized: limit query)
+            recent_messages = db.list_messages(run_id, limit=50)
             if recent_messages:
                 console.print(f"\n[bold]Channel Updates:[/]")
                 channel_table = Table()
@@ -224,9 +224,9 @@ def status(
                 channel_table.add_column("Phase", style="magenta")
                 channel_table.add_column("Updated", style="dim")
 
-                # Get latest message per channel (from recent messages)
+                # Since messages are DESC ordered, iterate normally to get latest first
                 channels_seen = set()
-                for msg in reversed(recent_messages):  # Reverse to get latest first
+                for msg in recent_messages:  # Already DESC ordered
                     if msg["channel"] not in channels_seen:
                         channels_seen.add(msg["channel"])
                         payload_preview = str(msg["payload"])[:80]
@@ -243,43 +243,10 @@ def status(
             console.log(f"[dim]Channel history unavailable: {exc}[/]")
 
     else:
-        # Fallback to filesystem-based status (legacy)
-        snapshot = artifact_store.load_checkpoint(run_id)
-        if not snapshot:
-            console.print(f"[red]No checkpoint found for run: {run_id}[/]")
-            console.print(f"[dim]Searched in: {artifact_store.run_dir(run_id)}[/]")
-            raise typer.Exit(1)
-
-        # Display status table
-        table = Table(title=f"Run Status: {run_id}")
-        table.add_column("Field", style="bold cyan")
-        table.add_column("Value")
-
-        table.add_row("Run ID", snapshot.run_id)
-        table.add_row("Phase", f"[bold]{snapshot.phase.value.upper()}[/]")
-        table.add_row("Iteration", str(snapshot.iteration))
-        table.add_row("Created At", snapshot.created_at.strftime("%Y-%m-%d %H:%M:%S UTC"))
-
-        started = snapshot.metadata.get("started_at", "N/A")
-        completed = snapshot.metadata.get("completed_at", "N/A")
-        table.add_row("Started", started)
-        table.add_row("Completed", completed if completed != "N/A" else "[dim]In Progress[/]")
-
-        if snapshot.notes:
-            table.add_row("Notes", snapshot.notes)
-
-        console.print(table)
-
-        # Show iteration summary
-        iterations = artifact_store.list_iterations(run_id)
-        if iterations:
-            console.print(f"\n[bold]Iterations:[/] {len(iterations)} recorded")
-            for iter_file in iterations[-3:]:  # Show last 3 iterations
-                record = artifact_store.load_iteration(run_id, iter_file)
-                console.print(
-                    f"  • Iter {record['iteration']} ({record['phase']}): "
-                    f"{record.get('decision', {}).get('rationale', 'No decision recorded')}"
-                )
+        # Database required for status
+        console.print(f"[red]Database not found at: {db_path}[/]")
+        console.print("[yellow]Run 'duet init' to initialize database[/]")
+        raise typer.Exit(1)
 
 
 @app.command()

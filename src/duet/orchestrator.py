@@ -104,19 +104,20 @@ class Orchestrator:
         if self.db:
             self.console.log("[dim]Database persistence enabled[/]")
 
-        # Load workflow (DSL-based execution)
-        self.workflow_graph = None
-        self.workflow_executor = None
-        try:
-            from .workflow_loader import load_workflow
-            self.workflow_graph = load_workflow(workspace_root=config.storage.workspace_root)
+        # Load workflow (DSL-based execution - required)
+        from .workflow_loader import load_workflow, WorkflowLoadError
 
-            from .executor import WorkflowExecutor
-            self.workflow_executor = WorkflowExecutor(self.workflow_graph, console=self.console)
-            self.console.log(f"[dim]Loaded workflow:[/] {len(self.workflow_graph.phases)} phases")
-        except Exception as exc:
-            # Workflow loading optional for now (backward compatibility)
-            self.console.log(f"[dim]Workflow not loaded (using legacy mode): {exc}[/]")
+        try:
+            self.workflow_graph = load_workflow(workspace_root=config.storage.workspace_root)
+        except WorkflowLoadError as exc:
+            raise RuntimeError(
+                f"Failed to load workflow definition:\n{exc}\n\n"
+                f"Run 'duet init' to create .duet/workflow.py"
+            ) from exc
+
+        from .executor import WorkflowExecutor
+        self.workflow_executor = WorkflowExecutor(self.workflow_graph, console=self.console)
+        self.console.log(f"[dim]Loaded workflow:[/] {len(self.workflow_graph.phases)} phases")
 
     def _build_adapter(self, assistant_cfg):
         """
@@ -295,7 +296,7 @@ class Orchestrator:
             # ──── Streaming Display Setup  ────
             from .models import StreamMode
             stream_mode = self.config.logging.stream_mode
-            # Handle legacy quiet flag (maps to stream_mode="off")
+            # Handle quiet flag (maps to stream_mode="off")
             if self.config.logging.quiet:
                 stream_mode = StreamMode.OFF
 
@@ -513,7 +514,7 @@ class Orchestrator:
                 response=response,
                 decision=decision,
             )
-            # Keep legacy interactions for backward compatibility during transition
+            # Keep JSON interaction artifacts for debugging
             self._persist_interaction(snapshot.run_id, current_phase, request, response)
 
             # ──── Database: Insert Iteration Record ────
@@ -694,7 +695,7 @@ class Orchestrator:
             response: Assistant response with content/metadata
         """
         if not self.workflow_executor:
-            return  # No channel store in legacy mode
+            return  # No channel store available
 
         # Map phase to published channels
         if phase == Phase.PLAN:
@@ -795,7 +796,8 @@ class Orchestrator:
         return dt.datetime.now(dt.timezone.utc).strftime("run-%Y%m%d-%H%M%S")
 
     # ──────────────────────────────────────────────────────────────────────────
-    # Single-Phase Execution     # ──────────────────────────────────────────────────────────────────────────
+    # Single-Phase Execution
+    # ──────────────────────────────────────────────────────────────────────────
 
     def run_next_phase(
         self,
@@ -803,7 +805,7 @@ class Orchestrator:
         feedback: Optional[str] = None,
     ) -> dict:
         """
-        Execute the next phase for a stateful run (Sprint 8).
+        Execute the next phase for a stateful run.
 
         Args:
             run_id: Run identifier (creates new run if None)
@@ -860,11 +862,18 @@ class Orchestrator:
                     self.db.update_active_state(run_id, state_id)
                     active_state = self.db.get_state(state_id)
 
-            # Restore channel snapshot if available             if self.workflow_executor and active_state.get("metadata"):
+            # Restore channel snapshot if available
+            if self.workflow_executor and active_state.get("metadata"):
                 channel_snapshot = active_state["metadata"].get("channel_snapshot")
                 if channel_snapshot:
                     self.workflow_executor.restore_channels(channel_snapshot)
                     self.console.log(f"[dim]Restored channel snapshot:[/] {len(channel_snapshot)} channels")
+                else:
+                    # Fallback: replay from message history
+                    state_messages = self.db.get_state_messages(active_state["state_id"])
+                    if state_messages:
+                        self.workflow_executor.replay_from_messages(state_messages)
+                        self.console.log(f"[dim]Replayed {len(state_messages)} messages to restore channels[/]")
 
             snapshot = RunSnapshot(
                 run_id=run_id,
