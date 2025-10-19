@@ -72,30 +72,47 @@ class FacetRunner:
         iteration: int,
         workspace_root: str,
         adapter=None,  # AssistantAdapter for AgentStep execution
+        dataspace=None,  # Optional Dataspace for fact-based execution
     ) -> FacetExecutionResult:
         """
         Execute a facet script (phase with steps).
 
         Args:
             phase: Phase with step-based script
-            channel_state: Current channel values (global dataspace state)
+            channel_state: Current channel values (legacy - will be replaced by dataspace)
             run_id: Current run identifier
             iteration: Current iteration number
             workspace_root: Workspace directory path
             adapter: Optional adapter for AgentStep execution
+            dataspace: Optional Dataspace for fact-based execution
 
         Returns:
             FacetExecutionResult with context, writes, and execution info
         """
         # Initialize facet context
         reads = phase.get_reads()
-        channel_reads = {ch.name: channel_state.get(ch.name) for ch in reads}
+
+        # Read from dataspace if available, otherwise from channel_state
+        if dataspace:
+            # Query dataspace for channel facts (simplified - will be pattern-based later)
+            fact_reads = {}
+            for ch in reads:
+                # For now, get fact by channel name (transition to pattern queries)
+                facts = [f for f in dataspace.facts.values() if hasattr(f, 'channel') and f.channel == ch.name]
+                if facts:
+                    fact_reads[ch.name] = facts[-1]  # Latest fact
+                else:
+                    # Fallback to raw channel lookup (migration path)
+                    fact_reads[ch.name] = dataspace.get_fact(f"channel_{ch.name}")
+        else:
+            # Legacy: use channel_state dict
+            fact_reads = {ch.name: channel_state.get(ch.name) for ch in reads}
 
         context = FacetContext(
             phase_name=phase.name,
             run_id=run_id,
             iteration=iteration,
-            channel_reads=channel_reads,
+            fact_reads=fact_reads,
             workspace_root=workspace_root,
         )
 

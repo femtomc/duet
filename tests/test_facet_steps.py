@@ -22,7 +22,7 @@ def test_read_step_execution():
         phase_name="test",
         run_id="run-1",
         iteration=1,
-        channel_reads={"task": "Build feature X", "feedback": "Add tests"},
+        fact_reads={"task": "Build feature X", "feedback": "Add tests"},
     )
 
     result = step.execute(context)
@@ -42,7 +42,7 @@ def test_read_step_with_custom_keys():
         phase_name="test",
         run_id="run-1",
         iteration=1,
-        channel_reads={"task": "value1", "feedback": "value2"},
+        fact_reads={"task": "value1", "feedback": "value2"},
     )
 
     result = step.execute(context)

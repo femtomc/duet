@@ -27,26 +27,28 @@ class FacetContext:
     Local execution context for a facet script.
 
     Tracks intermediate results as steps execute, separate from global
-    channel/dataspace state. Steps read from channels, accumulate results
-    in context, then write back to channels explicitly.
+    dataspace. Steps query dataspace for facts, accumulate results
+    in local context, then assert facts back to dataspace.
 
     Attributes:
         phase_name: Name of the phase executing
         run_id: Current run identifier
         iteration: Current iteration number
         local_state: Dict storing step results (key -> value)
-        channel_reads: Values read from channels at start
+        fact_reads: Facts read from dataspace at start (fact snapshots)
         workspace_root: Workspace directory path
         metadata: Additional context metadata
+        handles: Handles for facts asserted by this facet (for retraction)
     """
 
     phase_name: str
     run_id: str
     iteration: int
     local_state: Dict[str, Any] = field(default_factory=dict)
-    channel_reads: Dict[str, Any] = field(default_factory=dict)
+    fact_reads: Dict[str, Any] = field(default_factory=dict)  # channel_name -> fact/value
     workspace_root: str = ""
     metadata: Dict[str, Any] = field(default_factory=dict)
+    handles: List[Any] = field(default_factory=list)  # List[Handle] for retraction
 
     def get(self, key: str, default: Any = None) -> Any:
         """Get value from local state."""
@@ -56,9 +58,24 @@ class FacetContext:
         """Set value in local state."""
         self.local_state[key] = value
 
+    def get_fact(self, channel_name: str, default: Any = None) -> Any:
+        """Get fact/value read from dataspace."""
+        return self.fact_reads.get(channel_name, default)
+
+    def add_handle(self, handle: Any) -> None:
+        """Track a handle for later retraction."""
+        self.handles.append(handle)
+
+    # Backward compat alias
     def get_channel_value(self, channel_name: str, default: Any = None) -> Any:
-        """Get value read from a channel."""
-        return self.channel_reads.get(channel_name, default)
+        """Alias for get_fact (backward compat)."""
+        return self.get_fact(channel_name, default)
+
+    # Backward compat alias
+    @property
+    def channel_reads(self) -> Dict[str, Any]:
+        """Alias for fact_reads (backward compat)."""
+        return self.fact_reads
 
 
 # ──────────────────────────────────────────────────────────────────────────────
