@@ -97,12 +97,11 @@ class FacetRunner:
         for ch in reads:
             # Query dataspace for latest ChannelFact for this channel
             pattern = FactPattern(fact_type=ChannelFact, constraints={"channel_name": ch.name})
-            facts = dataspace.query(pattern)
+            facts = dataspace.query(pattern, latest_only=True)
 
             if facts:
                 # Use latest fact's value
-                latest_fact = max(facts, key=lambda f: f.iteration)
-                fact_reads[ch.name] = latest_fact.value
+                fact_reads[ch.name] = facts[0].value
             else:
                 # No fact yet - channel empty
                 fact_reads[ch.name] = None

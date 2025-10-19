@@ -258,15 +258,16 @@ class Dataspace:
         for fact in self.query(pattern):
             callback(fact)
 
-    def query(self, pattern: FactPattern) -> List[Fact]:
+    def query(self, pattern: FactPattern, latest_only: bool = False) -> List[Fact]:
         """
         Query for facts matching a pattern.
 
         Args:
             pattern: Pattern to match
+            latest_only: If True and pattern has channel_name, return only latest by iteration
 
         Returns:
-            List of matching facts
+            List of matching facts (optionally filtered to latest)
         """
         # Optimize by type
         candidates = self.facts_by_type.get(pattern.fact_type, set())
@@ -277,11 +278,41 @@ class Dataspace:
             if fact and pattern.matches(fact):
                 matches.append(fact)
 
+        # Filter to latest by iteration if requested (for ChannelFact queries)
+        if latest_only and matches and hasattr(matches[0], 'iteration'):
+            # Group by channel_name if available, return latest per channel
+            if hasattr(matches[0], 'channel_name'):
+                by_channel = {}
+                for fact in matches:
+                    ch_name = fact.channel_name
+                    if ch_name not in by_channel or fact.iteration > by_channel[ch_name].iteration:
+                        by_channel[ch_name] = fact
+                return list(by_channel.values())
+            else:
+                # Just return latest by iteration
+                return [max(matches, key=lambda f: f.iteration)]
+
         return matches
 
     def get_fact(self, fact_id: str) -> Optional[Fact]:
         """Get a fact by ID."""
         return self.facts.get(fact_id)
+
+    def check_approval(self, request_id: str) -> Optional[ApprovalGrant]:
+        """
+        Check if an approval request has been granted.
+
+        Convenience method for approval conversation pattern.
+
+        Args:
+            request_id: ID of ApprovalRequest fact
+
+        Returns:
+            ApprovalGrant fact if found, None otherwise
+        """
+        pattern = FactPattern(fact_type=ApprovalGrant, constraints={"request_id": request_id})
+        grants = self.query(pattern)
+        return grants[0] if grants else None
 
     def clear(self) -> None:
         """Clear all facts and subscriptions."""
