@@ -3,7 +3,7 @@
 
   # Duet
 
-  **Programmable orchestration for Codex ↔ Claude Code**
+  **Programmable agentic time machine for Codex ↔ Claude Code**
 </div>
 
 Duet coordinates planning, implementation, and review across Codex and Claude Code.  
@@ -116,7 +116,8 @@ Message persistence makes the workspace replayable, auditable, and ready for ana
 | `duet cont RUN_ID [--max-phases N]` | Continue phases until done or blocked |
 | `duet back STATE_ID [--force]` | Restore workspace/database to a prior checkpoint |
 | `duet status RUN_ID` | Inspect run status, active state, latest channel values |
-| `duet inspect RUN_ID` | Detailed iteration, event, and channel history |
+| `duet inspect RUN_ID [--channel NAME]` | Detailed iteration, event, and channel history |
+| `duet messages RUN_ID [--channel NAME]` | Query channel message history with filters |
 | `duet migrate [--force]` | Apply schema upgrades to existing `.duet/duet.db` |
 
 All commands accept `--config PATH` to point at a specific `duet.yaml`.
