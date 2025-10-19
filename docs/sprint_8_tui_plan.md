@@ -111,7 +111,7 @@ class RunSnapshot:
 
 # Orchestrator checks pause flag
 def run(self, run_id: Optional[str] = None) -> RunSnapshot:
-    while current_phase != Phase.DONE:
+    while current_phase != "done":
         # Check for pause signal
         if self._check_pause_requested(snapshot.run_id):
             snapshot.paused = True

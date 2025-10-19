@@ -35,7 +35,7 @@ class ApprovalNotifier:
         approval_content = f"""DUET ORCHESTRATION - APPROVAL REQUIRED
 
 Run ID: {snapshot.run_id}
-Phase: {snapshot.phase.value.upper()}
+Phase: {snapshot.phase.upper()}
 Iteration: {snapshot.iteration}
 Reason: {reason}
 
@@ -71,7 +71,7 @@ To abandon this run:
             Panel(
                 f"[bold yellow]⚠ HUMAN APPROVAL REQUIRED[/]\n\n"
                 f"[bold]Run ID:[/] {snapshot.run_id}\n"
-                f"[bold]Phase:[/] {snapshot.phase.value.upper()}\n"
+                f"[bold]Phase:[/] {snapshot.phase.upper()}\n"
                 f"[bold]Iteration:[/] {snapshot.iteration}\n"
                 f"[bold]Reason:[/] {reason}\n\n"
                 f"[dim]The orchestration has paused for human review.[/]\n\n"

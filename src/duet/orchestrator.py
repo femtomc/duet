@@ -377,77 +377,21 @@ class Orchestrator:
             phase_start_time = dt.datetime.now(dt.timezone.utc)
             self.logger.log_iteration_start(snapshot.run_id, iteration, current_phase)
 
-            # ──── Check for Step-Based Facet Execution ────
+            # ──── Execute Facet Script ────
             phase_def = self.workflow_graph.phases.get(current_phase)
-            use_facet_runner = phase_def and len(phase_def.steps) > 0
+            if not phase_def:
+                snapshot.phase = "blocked"
+                snapshot.notes = f"Phase '{current_phase}' not found in workflow"
+                break
 
-            if use_facet_runner:
-                # Sprint DSL-4: Execute facet script step-by-step
-                response = self._execute_facet_script(current_phase, snapshot, phase_def)
-                if response is None:
-                    # Human approval or error - already handled
-                    break
-            else:
-                # Traditional adapter-based execution
-                request = self._compose_request(current_phase, snapshot)
-                adapter = self._select_adapter(current_phase)
-                adapter_name = adapter.__class__.__name__
-                self.logger.log_adapter_call(snapshot.run_id, iteration, current_phase, adapter_name)
+            # All phases must use step-based execution now
+            response = self._execute_facet_script(current_phase, snapshot, phase_def)
+            if response is None:
+                # Human approval or error - already handled
+                break
 
-                # ──── Streaming Display Setup  ────
-                from .models import StreamMode
-                stream_mode = self.config.logging.stream_mode
-                # Handle quiet flag (maps to stream_mode="off")
-                if self.config.logging.quiet:
-                    stream_mode = StreamMode.OFF
-
-                streaming_display = None if stream_mode == StreamMode.OFF else EnhancedStreamingDisplay(
-                    console=self.console,
-                    phase=current_phase,
-                    iteration=iteration,
-                    mode=stream_mode.value,  # Pass string value to display
-                )
-
-                # ──── Create Event Handler for Streaming ────
-                event_handler = self._create_event_handler(
-                    snapshot.run_id, iteration, current_phase, display=streaming_display
-                )
-
-                # ──── Edge Case: Adapter Failure ────
-                try:
-                    # Use Rich Live display if not in quiet mode
-                    if streaming_display:
-                        with Live(
-                            streaming_display.render(),
-                            console=self.console,
-                            refresh_per_second=4,
-                            transient=True,  # Remove display after completion
-                        ) as live:
-                            # Create wrapper that updates live display
-                            def live_event_handler(event: StreamEvent) -> None:
-                                event_handler(event)  # Persist + add to display
-                                live.update(streaming_display.render())  # Refresh display
-
-                            response = adapter.stream(request, on_event=live_event_handler)
-                    else:
-                        response = adapter.stream(request, on_event=event_handler)
-                except Exception as exc:
-                    snapshot.phase = "blocked"
-                    snapshot.notes = f"Adapter failure during {current_phase}: {exc}"
-                    self.logger.log_error(
-                        snapshot.run_id, iteration, current_phase, "adapter_failure", str(exc)
-                    )
-                    self._persist_interaction(
-                        snapshot.run_id,
-                        current_phase,
-                        request,
-                        AssistantResponse(content="", metadata={"error": str(exc)}),
-                    )
-                    break
-
-            # ──── Extract Verdict from Metadata (if phase publishes verdict channel) ────
-            phase_def = self.workflow_graph.phases.get(current_phase)
-            publishes_verdict = phase_def and any(ch.name == "verdict" for ch in phase_def.publishes)
+            # ──── Extract Verdict from Metadata (if phase writes verdict channel) ────
+            publishes_verdict = phase_def and any(ch.name == "verdict" for ch in phase_def.get_writes())
             if publishes_verdict and "verdict" in response.metadata:
                 verdict_str = response.metadata["verdict"]
                 if isinstance(verdict_str, str):
@@ -609,16 +553,22 @@ class Orchestrator:
             self.console.log(f"[blue]Decision:[/] {decision.rationale}")
 
             # ──── Persist Complete Iteration Record ────
+            # Build dummy request for persistence compatibility
+            dummy_request = AssistantRequest(
+                role=phase_def.agent,
+                prompt=f"Facet execution: {current_phase}",
+                context={"facet": True},
+            )
             self.artifacts.persist_iteration(
                 run_id=snapshot.run_id,
                 iteration=iteration,
                 phase=current_phase,
-                request=request,
+                request=dummy_request,
                 response=response,
                 decision=decision,
             )
             # Keep JSON interaction artifacts for debugging
-            self._persist_interaction(snapshot.run_id, current_phase, request, response)
+            self._persist_interaction(snapshot.run_id, current_phase, dummy_request, response)
 
             # ──── Database: Insert Iteration Record ────
             if self.db:
@@ -793,10 +743,12 @@ class Orchestrator:
 
         # Get the phase definition from the workflow graph to find published channels
         phase_def = self.workflow_graph.phases.get(phase)
-        if not phase_def or not phase_def.publishes:
-            return  # No channels declared for this phase
+        if not phase_def:
+            return
 
-        published_channels = phase_def.publishes  # List[Channel] now
+        published_channels = phase_def.get_writes()
+        if not published_channels:
+            return  # No channels declared for this phase
 
         # Strategy: Map response to declared channels
         for channel in published_channels:
@@ -1244,10 +1196,10 @@ class Orchestrator:
         request = self._compose_request(current_phase, snapshot)
         phase_def = self.workflow_graph.phases.get(current_phase)
         if feedback and phase_def:
-            # Find a feedback channel in phase consumes (phase_def.consumes is List[Channel])
+            # Find a feedback channel in phase reads
             # Look for: 1) channel named "feedback", 2) channel with schema "text" consumed by phase
             feedback_channel_name = None
-            for channel in phase_def.consumes:
+            for channel in phase_def.get_reads():
                 if channel.name == "feedback":
                     feedback_channel_name = channel.name
                     break
@@ -1323,9 +1275,9 @@ class Orchestrator:
                 "message": f"Phase failed: {exc}",
             }
 
-        # Extract verdict if phase publishes verdict channel
+        # Extract verdict if phase writes verdict channel
         phase_def = self.workflow_graph.phases.get(current_phase)
-        publishes_verdict = phase_def and any(ch.name == "verdict" for ch in phase_def.publishes)
+        publishes_verdict = phase_def and any(ch.name == "verdict" for ch in phase_def.get_writes())
         if publishes_verdict and "verdict" in response.metadata:
             verdict_str = response.metadata["verdict"]
             if isinstance(verdict_str, str):

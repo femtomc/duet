@@ -157,7 +157,7 @@ class EnhancedStreamingDisplay:
         lines = []
 
         # Header
-        lines.append(f"[bold cyan]{self.phase.value.upper()}[/] | Iteration {self.iteration} | {elapsed}s elapsed")
+        lines.append(f"[bold cyan]{self.phase.upper()}[/] | Iteration {self.iteration} | {elapsed}s elapsed")
         lines.append("")
 
         # Current status (derived from recent events)
@@ -256,7 +256,7 @@ duet run --quiet                 # Equivalent to stream_mode: off
 display = EnhancedStreamingDisplay(console, phase, iteration, mode=config.logging.stream_mode)
 
 # In init.py
-display = EnhancedStreamingDisplay(console, Phase.PLAN, 0, mode="detailed")  # Always detailed for init
+display = EnhancedStreamingDisplay(console, "plan", 0, mode="detailed")  # Always detailed for init
 
 # Both use same rendering logic
 with Live(display.render(), ...) as live:
@@ -303,7 +303,7 @@ def replay_events(
         console.print("[yellow]No events to replay[/]")
         return
 
-    display = EnhancedStreamingDisplay(console, Phase.PLAN, 0, mode="detailed")
+    display = EnhancedStreamingDisplay(console, "plan", 0, mode="detailed")
 
     with Live(display.render(), console=console, refresh_per_second=4) as live:
         for i, event in enumerate(events):
@@ -610,7 +610,7 @@ def test_stream_accumulator_builds_text():
 
 def test_enhanced_display_renders_detailed_mode():
     """Test EnhancedStreamingDisplay renders all sections."""
-    display = EnhancedStreamingDisplay(Console(), Phase.PLAN, 1, mode="detailed")
+    display = EnhancedStreamingDisplay(Console(), "plan", 1, mode="detailed")
 
     event = {
         "event_type": "reasoning",

@@ -252,8 +252,8 @@ class WorkflowExecutor:
                 error=f"Unknown phase: {phase_name}",
             )
 
-        # Update context with consumed channels (phase_def.consumes is List[Channel])
-        for channel in phase_def.consumes:
+        # Update context with consumed channels
+        for channel in phase_def.get_reads():
             channel_name = channel.name  # Extract name from Channel object
             value = self.channel_store.get(channel_name)
             context.channel_payloads[channel_name] = value
@@ -299,7 +299,7 @@ class WorkflowExecutor:
 
         # Extract channel outputs (published channels)
         channel_updates = self._extract_channel_outputs(
-            response, phase_def.publishes
+            response, phase_def.get_writes()
         )
 
         # Update channel store with published values

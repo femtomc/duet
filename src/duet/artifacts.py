@@ -5,11 +5,12 @@ from __future__ import annotations
 import datetime as dt
 import json
 from pathlib import Path
+from collections import Counter
 from typing import Any, Dict
 
 from rich.console import Console
 
-from .models import AssistantRequest, AssistantResponse, Phase, RunSnapshot, TransitionDecision
+from .models import AssistantRequest, AssistantResponse, RunSnapshot, TransitionDecision
 
 
 class ArtifactStore:
@@ -44,7 +45,7 @@ class ArtifactStore:
         self,
         run_id: str,
         iteration: int,
-        phase: Phase,
+        phase: str,
         request: AssistantRequest,
         response: AssistantResponse,
         decision: TransitionDecision | None = None,
@@ -70,7 +71,7 @@ class ArtifactStore:
         record = {
             "timestamp": timestamp_iso,
             "iteration": iteration,
-            "phase": phase.value,
+            "phase": phase,
             "request": request.model_dump(),
             "response": response.model_dump(),
         }
@@ -81,7 +82,7 @@ class ArtifactStore:
         if summary:
             record["summary"] = summary
 
-        filename = f"iterations/iter-{iteration:03d}-{phase.value}-{timestamp_safe}.json"
+        filename = f"iterations/iter-{iteration:03d}-{phase}-{timestamp_safe}.json"
         self.write_json(run_id, filename, record)
 
     def list_iterations(self, run_id: str) -> list[Path]:
@@ -121,13 +122,12 @@ class ArtifactStore:
         iterations = self.list_iterations(run_id)
 
         iteration_summaries = []
-        phase_counts = {"plan": 0, "implement": 0, "review": 0}
+        phase_counts: Counter[str] = Counter()
 
         for iter_file in iterations:
             record = self.load_iteration(run_id, iter_file)
             phase = record.get("phase", "unknown")
-            if phase in phase_counts:
-                phase_counts[phase] += 1
+            phase_counts.update([phase])
 
             summary = {
                 "iteration": record.get("iteration"),
@@ -146,8 +146,8 @@ class ArtifactStore:
             "iterations": iteration_summaries,
             "statistics": {
                 "total_iterations": len(iterations),
-                "phase_counts": phase_counts,
-                "final_phase": checkpoint.phase.value if checkpoint else "unknown",
+                "phase_counts": dict(phase_counts),
+                "final_phase": checkpoint.phase if checkpoint else "unknown",
                 "final_iteration": checkpoint.iteration if checkpoint else 0,
             },
         }

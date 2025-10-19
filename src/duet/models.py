@@ -10,14 +10,6 @@ from typing import Any, Dict, Optional
 from pydantic import BaseModel, Field
 
 
-class Phase(str, Enum):
-    PLAN = "plan"
-    IMPLEMENT = "implement"
-    REVIEW = "review"
-    DONE = "done"
-    BLOCKED = "blocked"
-
-
 class ReviewVerdict(str, Enum):
     """Review outcome from Codex reviewer."""
 
@@ -75,7 +67,7 @@ class AssistantResponse(BaseModel):
 class TransitionDecision(BaseModel):
     """Represents the orchestrator's decision after evaluating a response."""
 
-    next_phase: Phase
+    next_phase: Optional[str] = None
     rationale: str
     requires_human: bool = False
 
@@ -86,6 +78,6 @@ class RunSnapshot(BaseModel):
     run_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     created_at: dt.datetime = Field(default_factory=lambda: dt.datetime.now(dt.timezone.utc))
     iteration: int = 0
-    phase: Phase = Phase.PLAN
+    phase: str = "plan"
     notes: Optional[str] = None
     metadata: Dict[str, Any] = Field(default_factory=dict)

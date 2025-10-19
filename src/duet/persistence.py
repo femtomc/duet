@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .models import Phase, ReviewVerdict, RunSnapshot
+from .models import ReviewVerdict, RunSnapshot
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -284,7 +284,7 @@ class DuetDatabase:
                     snapshot.run_id,
                     snapshot.created_at.isoformat(),
                     snapshot.metadata.get("started_at"),
-                    snapshot.phase.value,
+                    snapshot.phase,
                     snapshot.iteration,
                     snapshot.notes,
                     snapshot.metadata.get("original_branch"),
@@ -310,7 +310,7 @@ class DuetDatabase:
                 WHERE run_id = ?
                 """,
                 (
-                    snapshot.phase.value,
+                    snapshot.phase,
                     snapshot.iteration,
                     snapshot.notes,
                     snapshot.metadata.get("completed_at"),
@@ -339,12 +339,12 @@ class DuetDatabase:
         self,
         run_id: str,
         iteration: int,
-        phase: Phase,
+        phase: str,
         prompt: str,
         response_content: str,
         verdict: Optional[ReviewVerdict] = None,
         concluded: bool = False,
-        next_phase: Optional[Phase] = None,
+        next_phase: Optional[str] = None,
         requires_human: bool = False,
         decision_rationale: Optional[str] = None,
         git_metadata: Optional[Dict[str, Any]] = None,
@@ -370,13 +370,13 @@ class DuetDatabase:
                 (
                     run_id,
                     iteration,
-                    phase.value,
+                    phase,
                     dt.datetime.now(dt.timezone.utc).isoformat(),
                     prompt,
                     response_content,
                     verdict.value if verdict else None,
                     concluded,
-                    next_phase.value if next_phase else None,
+                    next_phase,
                     requires_human,
                     decision_rationale,
                     git_meta.get("files_changed"),

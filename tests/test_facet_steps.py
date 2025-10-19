@@ -205,19 +205,6 @@ def test_facet_script_with_human_approval():
     assert isinstance(review.steps[2], AgentStep)
 
 
-def test_backward_compat_consume_publish():
-    """Test that old consume/publish API still works alongside steps."""
-    task = Channel(name="task")
-    plan_ch = Channel(name="plan")
-
-    # Old API still works
-    phase = Phase(name="plan", agent="planner", consumes=[task], publishes=[plan_ch])
-
-    assert len(phase.consumes) == 1
-    assert len(phase.publishes) == 1
-    assert len(phase.steps) == 0  # No steps added via old API
-
-
 def test_step_result_factory_methods():
     """Test StepResult convenience constructors."""
     # Success
@@ -316,21 +303,6 @@ def test_phase_get_writes_from_steps():
     assert len(writes) == 2
     assert plan_ch in writes
     assert status in writes
-
-
-def test_phase_fallback_to_consumes_publishes():
-    """Test that phases without steps fall back to old consumes/publishes."""
-    task = Channel(name="task")
-    plan_ch = Channel(name="plan")
-
-    # Old-style phase definition
-    phase = Phase(name="plan", agent="planner", consumes=[task], publishes=[plan_ch])
-
-    reads = phase.get_reads()
-    writes = phase.get_writes()
-
-    assert reads == [task]
-    assert writes == [plan_ch]
 
 
 def test_step_ordering_validation():

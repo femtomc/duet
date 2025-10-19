@@ -9,7 +9,7 @@ from rich.console import Console
 from rich.panel import Panel
 
 from .adapters.base import StreamEvent
-from .models import CanonicalEventType, Phase
+from .models import CanonicalEventType
 
 
 class StreamAccumulator:
@@ -123,7 +123,7 @@ class EnhancedStreamingDisplay:
     def __init__(
         self,
         console: Console,
-        phase: Phase,
+        phase: str,
         iteration: int,
         mode: str = "detailed",
         max_events: int = 50,
@@ -173,7 +173,7 @@ class EnhancedStreamingDisplay:
         metrics = self.accumulator.get_metrics()
 
         content = (
-            f"[bold]{self.phase.value.upper()}[/] | "
+            f"[bold]{self.phase.upper()}[/] | "
             f"Iteration {self.iteration} | "
             f"Events: {metrics['event_count']} | "
             f"{elapsed}s"
@@ -188,7 +188,7 @@ class EnhancedStreamingDisplay:
 
         # Header
         lines.append(
-            f"[bold cyan]{self.phase.value.upper()}[/] | "
+            f"[bold cyan]{self.phase.upper()}[/] | "
             f"Iteration {self.iteration} | "
             f"[dim]{elapsed}s elapsed[/]"
         )

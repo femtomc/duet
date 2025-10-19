@@ -10,7 +10,7 @@ from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
 from .artifacts import ArtifactStore
-from .models import Phase, ReviewVerdict, RunSnapshot
+from .models import ReviewVerdict, RunSnapshot
 from .persistence import DuetDatabase
 
 
@@ -120,7 +120,7 @@ class ArtifactMigrator:
 
             # Parse next phase
             next_phase_str = decision_data.get("next_phase")
-            next_phase = Phase(next_phase_str) if next_phase_str else None
+            next_phase = next_phase_str if next_phase_str else None
 
             # Extract git metadata
             git_meta = response_meta.get("git_changes", {})
@@ -141,7 +141,7 @@ class ArtifactMigrator:
             self.db.insert_iteration(
                 run_id=run_id,
                 iteration=record.get("iteration", 0),
-                phase=Phase(record.get("phase", "plan")),
+                phase=record.get("phase", "plan"),
                 prompt=request_data.get("prompt", ""),
                 response_content=response_data.get("content", ""),
                 verdict=verdict,

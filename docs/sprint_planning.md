@@ -46,6 +46,16 @@ This document captures the working roadmap for Duet. It is intentionally living 
   - Tooling and documentation for opt-in high-performance runtime.
   - Ensure compatibility with existing CLI/DSL experience.
 
+### DSL Modernisation Roadmap
+
+| Sprint | Focus | Outcomes |
+|--------|-------|----------|
+| **DSL‑1 – Object References** | Introduce stable IDs for phases/channels and allow guards/transitions to consume object references while keeping string support for compatibility. | Compiler/runtime accept references; regression tests cover mixed string/object usage. |
+| **DSL‑2 – Fluent Phase & Tool API** | Add fluent builders on `Phase` (`with_agent`, `with_tool`, `with_human`, …) and formalise deterministic `Tool` interface. | Phases configured via chaining; compiler persists attached tools/policies; examples updated. |
+| **DSL‑3 – Workflow Combinators** | Provide composable dataflow helpers (`and_then`, `if_else`, `branch`, `loop`) to generate transitions automatically. | High-level workflows authored without manual transition lists; integration tests validate graph conversion. |
+| **DSL‑4 – Policy Registry Integration** | Centralise approvals/git/replan rules in a policy registry; orchestrator executes tools and enforces policies from registry data. | Legacy metadata translated with warnings; runtime no longer relies on hard-coded phase names. |
+| **DSL‑5 – Documentation & Migration** | Refresh docs/templates, supply migration guidance, expand smoke tests, and schedule removal of deprecated APIs. | New DSL showcased; backward compatibility plan communicated; deprecation path documented. |
+
 ## Backlog Ideas
 
 - Notification & chat integrations (Slack, email, ticketing).

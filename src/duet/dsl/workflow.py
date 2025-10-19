@@ -398,13 +398,9 @@ class Phase(BaseElement):
     name: str
     agent: str
     id: Optional[str] = None
-    # TODO(DSL-cleanup): Remove deprecated fields once all workflows migrated to steps
-    consumes: List[Channel] = field(default_factory=list)  # Deprecated - use get_reads()
-    publishes: List[Channel] = field(default_factory=list)  # Deprecated - use get_writes()
     description: str = ""
     is_terminal: bool = False
     metadata: Dict[str, Any] = field(default_factory=dict)
-    tools: List[Any] = field(default_factory=list)  # Deprecated - use ToolStep in steps
     steps: List[Any] = field(default_factory=list)  # List[PhaseStep] - facet script
 
     def __post_init__(self):
@@ -413,58 +409,10 @@ class Phase(BaseElement):
         if not self.agent:
             raise ValueError("Phase agent cannot be empty")
 
-        # Validate consumes/publishes are Channel objects
-        for channel in self.consumes:
-            if not isinstance(channel, Channel):
-                raise TypeError(
-                    f"Phase.consumes must contain Channel objects, got {type(channel)} in phase '{self.name}'.\n"
-                    f"Migration: Define channels as variables, then reference them:\n"
-                    f"  task = Channel(name='task')\n"
-                    f"  Phase(name='{self.name}', consumes=[task], ...)"
-                )
-        for channel in self.publishes:
-            if not isinstance(channel, Channel):
-                raise TypeError(
-                    f"Phase.publishes must contain Channel objects, got {type(channel)} in phase '{self.name}'.\n"
-                    f"Migration: Define channels as variables, then reference them:\n"
-                    f"  plan = Channel(name='plan')\n"
-                    f"  Phase(name='{self.name}', publishes=[plan], ...)"
-                )
-
         # Generate ID if not provided (from BaseElement)
         BaseElement.__post_init__(self)
-        # Note: consumes/publishes can be empty for simple phases
 
     # ──── Fluent Builder API (Sprint DSL-2) ────
-
-    def with_agent(self, agent: str) -> Phase:
-        """
-        Set the agent for this phase (fluent API).
-
-        Returns a new Phase instance with the agent set (copy-on-write).
-        """
-        from dataclasses import replace
-        return replace(self, agent=agent)
-
-    def consume(self, *channels: Channel) -> Phase:
-        """
-        Add channels to consume list (fluent API).
-
-        Returns a new Phase instance with channels added (copy-on-write).
-        """
-        from dataclasses import replace
-        new_consumes = list(self.consumes) + list(channels)
-        return replace(self, consumes=new_consumes)
-
-    def publish(self, *channels: Channel) -> Phase:
-        """
-        Add channels to publish list (fluent API).
-
-        Returns a new Phase instance with channels added (copy-on-write).
-        """
-        from dataclasses import replace
-        new_publishes = list(self.publishes) + list(channels)
-        return replace(self, publishes=new_publishes)
 
     def describe(self, text: str) -> Phase:
         """
@@ -500,29 +448,23 @@ class Phase(BaseElement):
         """
         Require human approval before proceeding from this phase (fluent API).
 
-        Sprint DSL-2+: Attaches ApprovalTool. Tool execution coming in next sprint.
+        Adds HumanStep to facet script.
 
-        Returns a new Phase instance with ApprovalTool attached.
+        Returns a new Phase instance with HumanStep added.
         """
-        # Import here to avoid circular dependency
-        from .tools import ApprovalTool
-
-        tool = ApprovalTool(approval_message=reason)
-        return self.with_tool(tool)
+        return self.human(reason)
 
     def requires_git(self) -> Phase:
         """
         Require git changes from this phase (fluent API).
 
-        Sprint DSL-2+: Attaches GitChangeTool. Tool execution coming in next sprint.
+        Adds GitChangeTool as ToolStep to facet script.
 
-        Returns a new Phase instance with GitChangeTool attached.
+        Returns a new Phase instance with GitChangeTool added.
         """
-        # Import here to avoid circular dependency
         from .tools import GitChangeTool
 
-        tool = GitChangeTool(require_changes=True)
-        return self.with_tool(tool)
+        return self.tool(GitChangeTool(require_changes=True))
 
     def counts_as_replan(self, loop_to: Optional[Phase] = None) -> Phase:
         """
@@ -539,25 +481,6 @@ class Phase(BaseElement):
         # No-op: replan tracking will be reimplemented as conversations
         return self
 
-    # ──── Tool Attachment (Sprint DSL-2, deprecated in DSL-3) ────
-
-    def with_tool(self, tool: Any) -> Phase:  # Type: Tool - avoid circular import
-        """
-        Attach a tool to this phase (fluent API).
-
-        Sprint DSL-3: Deprecated. Use .tool(tool, outputs=[...]) instead to add
-        ToolStep to the facet script.
-
-        Tools run at specified times (pre/post phase) and can read/write channels.
-
-        Args:
-            tool: Tool instance to attach
-
-        Returns a new Phase instance with tool added (copy-on-write).
-        """
-        from dataclasses import replace
-        new_tools = list(self.tools) + [tool]
-        return replace(self, tools=new_tools)
 
     # ──── Step-Based Fluent API (Sprint DSL-3) ────
 
@@ -741,8 +664,7 @@ class Phase(BaseElement):
         """
         Extract channels read by this phase from its step list.
 
-        Analyzes ReadStep, ToolStep.consumes, HumanStep.reads to determine
-        which channels this phase subscribes to.
+        Analyzes ReadStep, ToolStep.consumes, HumanStep.reads.
 
         Returns:
             List of Channel objects this phase reads from
@@ -750,12 +672,7 @@ class Phase(BaseElement):
         reads = []
         seen = set()
 
-        # Import step types
-        try:
-            from .steps import ReadStep, ToolStep, HumanStep
-        except ImportError:
-            # Steps not available - fall back to consumes
-            return self.consumes
+        from .steps import ReadStep, ToolStep, HumanStep
 
         for step in self.steps:
             if isinstance(step, ReadStep):
@@ -774,15 +691,13 @@ class Phase(BaseElement):
                         reads.append(channel)
                         seen.add(channel.id)
 
-        # Fallback: if no steps, use old consumes
-        return reads if reads else self.consumes
+        return reads
 
     def get_writes(self) -> List[Channel]:
         """
         Extract channels written by this phase from its step list.
 
-        Analyzes ToolStep.outputs, AgentStep.writes, WriteStep to determine
-        which channels this phase publishes to.
+        Analyzes ToolStep.outputs, AgentStep.writes, WriteStep.
 
         Returns:
             List of Channel objects this phase writes to
@@ -790,12 +705,7 @@ class Phase(BaseElement):
         writes = []
         seen = set()
 
-        # Import step types
-        try:
-            from .steps import ToolStep, AgentStep, WriteStep
-        except ImportError:
-            # Steps not available - fall back to publishes
-            return self.publishes
+        from .steps import ToolStep, AgentStep, WriteStep
 
         for step in self.steps:
             if isinstance(step, ToolStep):
@@ -813,8 +723,7 @@ class Phase(BaseElement):
                     writes.append(step.channel)
                     seen.add(step.channel.id)
 
-        # Fallback: if no steps, use old publishes
-        return writes if writes else self.publishes
+        return writes
 
     # ──── Convenience Constructors (Sprint DSL-2) ────
 

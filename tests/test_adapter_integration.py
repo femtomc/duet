@@ -53,33 +53,27 @@ code = Channel(name="code", schema="git_diff")
 verdict = Channel(name="verdict", schema="verdict")
 feedback = Channel(name="feedback", schema="text")
 
-# Define phases
-plan = Phase(
-    name="plan",
-    agent="planner",
-    consumes=[task, feedback],
-    publishes=[plan_ch],
-    metadata={"role_hint": "planner"},
+# Define phases with step-based facet syntax
+plan = (
+    Phase(name="plan", agent="planner")
+    .read(task, feedback)
+    .call_agent("planner", writes=[plan_ch], role="planner")
 )
 
-implement = Phase(
-    name="implement",
-    agent="implementer",
-    consumes=[plan_ch],
-    publishes=[code],
-    metadata={"role_hint": "implementer"},
+implement = (
+    Phase(name="implement", agent="implementer")
+    .read(plan_ch)
+    .call_agent("implementer", writes=[code], role="implementer")
 )
 
-review = Phase(
-    name="review",
-    agent="reviewer",
-    consumes=[plan_ch, code],
-    publishes=[verdict, feedback],
-    metadata={"role_hint": "reviewer", "replan_transition": True},
+review = (
+    Phase(name="review", agent="reviewer")
+    .read(plan_ch, code)
+    .call_agent("reviewer", writes=[verdict, feedback], role="reviewer")
 )
 
-done = Phase(name="done", agent="reviewer", is_terminal=True)
-blocked = Phase(name="blocked", agent="reviewer", is_terminal=True)
+done = Phase.terminal_phase("done", "reviewer")
+blocked = Phase.terminal_phase("blocked", "reviewer")
 
 # Define workflow
 workflow = Workflow(

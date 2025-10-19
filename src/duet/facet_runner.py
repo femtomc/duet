@@ -260,13 +260,14 @@ class FacetRunner:
         # Write response to declared channels
         channel_writes = {}
         if step.writes:
-            # Primary output goes to first channel
-            channel_writes[step.writes[0].name] = response.content
-
-            # Additional channels from response metadata
-            for channel in step.writes[1:]:
+            # Try to match channels to response metadata first (for structured outputs)
+            for channel in step.writes:
                 if channel.name in response.metadata:
+                    # Use metadata value if available (e.g., verdict from echo adapter)
                     channel_writes[channel.name] = response.metadata[channel.name]
+                elif channel == step.writes[0]:
+                    # Primary output: use response content
+                    channel_writes[channel.name] = response.content
 
         return StepResult(
             context_updates={"agent_response": response.content},
