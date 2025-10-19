@@ -212,6 +212,36 @@ def status(
                     f"{iteration.get('decision_rationale', 'No decision recorded')[:60]}"
                 )
 
+        # Show channel updates (latest per channel)
+        try:
+            # Get unique channels from messages
+            all_messages = db.list_messages(run_id)
+            if all_messages:
+                console.print(f"\n[bold]Channel Updates:[/]")
+                channel_table = Table()
+                channel_table.add_column("Channel", style="cyan")
+                channel_table.add_column("Latest Value", style="green")
+                channel_table.add_column("Phase", style="magenta")
+                channel_table.add_column("Updated", style="dim")
+
+                # Get latest message per channel
+                channels_seen = set()
+                for msg in reversed(all_messages):  # Reverse to get latest first
+                    if msg["channel"] not in channels_seen:
+                        channels_seen.add(msg["channel"])
+                        payload_preview = str(msg["payload"])[:80]
+                        if len(str(msg["payload"])) > 80:
+                            payload_preview += "..."
+                        channel_table.add_row(
+                            msg["channel"],
+                            payload_preview,
+                            msg["phase"] or "-",
+                            msg["created_at"][:19] if msg["created_at"] else "-",
+                        )
+                console.print(channel_table)
+        except Exception as exc:
+            console.log(f"[dim]Channel history unavailable: {exc}[/]")
+
     else:
         # Fallback to filesystem-based status (legacy)
         snapshot = artifact_store.load_checkpoint(run_id)
@@ -344,9 +374,11 @@ def inspect(
     run_id: str = typer.Argument(..., help="Run ID to inspect"),
     config: Optional[Path] = typer.Option(None, "--config", "-c", help="Config file path."),
     show_events: bool = typer.Option(True, "--show-events/--no-events", help="Display streaming events."),
+    show_channels: bool = typer.Option(True, "--show-channels/--no-channels", help="Display channel history."),
+    channel: Optional[str] = typer.Option(None, "--channel", help="Filter by specific channel name."),
     output: Optional[str] = typer.Option(None, "--output", help="Output format: json for structured export."),
 ) -> None:
-    """Display detailed per-iteration information for a run."""
+    """Display detailed per-iteration information for a run with channel history."""
     from rich.panel import Panel
     from rich.table import Table
 
@@ -369,6 +401,7 @@ def inspect(
     # Get iterations and events
     iterations = db.list_iterations(run_id)
     events = db.list_events(run_id) if show_events else []
+    messages = db.list_messages(run_id, channel=channel) if show_channels else []
 
     # JSON export mode
     if output == "json":
@@ -377,6 +410,7 @@ def inspect(
             "run": run,
             "iterations": iterations,
             "events": events if show_events else [],
+            "messages": messages if show_channels else [],
             "statistics": db.get_run_statistics(run_id),
         }
         console.print_json(data=export_data)
@@ -469,6 +503,42 @@ def inspect(
                 console.print(f"  [dim]... and {len(iter_events) - 10} more events[/]")
     elif show_events and not events:
         console.print("\n[dim]No streaming events recorded for this run[/]")
+
+    # Display channel history
+    if show_channels:
+        messages = db.list_messages(run_id, channel=channel)
+        if messages:
+            console.print(f"\n[bold]Channel History:[/] {len(messages)} messages")
+            if channel:
+                console.print(f"[dim]Filtered by channel: {channel}[/]")
+
+            channel_table = Table()
+            channel_table.add_column("Channel", style="cyan")
+            channel_table.add_column("Value", style="green")
+            channel_table.add_column("Phase", style="magenta")
+            channel_table.add_column("Iteration", justify="right")
+            channel_table.add_column("Created", style="dim")
+
+            for msg in messages[:20]:  # Show first 20 messages
+                payload_preview = str(msg["payload"])[:100]
+                if len(str(msg["payload"])) > 100:
+                    payload_preview += "..."
+
+                channel_table.add_row(
+                    msg["channel"],
+                    payload_preview,
+                    msg["phase"] or "-",
+                    str(msg["iteration"]) if msg["iteration"] else "-",
+                    msg["created_at"][:19] if msg["created_at"] else "-",
+                )
+
+            console.print(channel_table)
+
+            if len(messages) > 20:
+                console.print(f"\n[dim]... and {len(messages) - 20} more messages[/]")
+                console.print(f"[dim]Use --channel <name> to filter or --output json for full export[/]")
+        elif show_channels:
+            console.print("\n[dim]No channel messages recorded for this run[/]")
 
 
 @app.command()
@@ -781,3 +851,73 @@ def back(
     console.print(f"[green]State restored successfully![/]")
     console.print(f"[dim]Active state set to: {state_id}[/]")
     console.print(f"\n[cyan]Run 'duet next --run-id {run_id}' to continue from this state[/]")
+
+
+@app.command()
+def messages(
+    run_id: str = typer.Argument(..., help="Run ID to query messages for"),
+    channel: Optional[str] = typer.Option(None, "--channel", help="Filter by channel name"),
+    phase: Optional[str] = typer.Option(None, "--phase", help="Filter by phase"),
+    limit: int = typer.Option(50, "--limit", help="Maximum messages to display"),
+    output: Optional[str] = typer.Option(None, "--output", help="Output format: json for export"),
+    config: Optional[Path] = typer.Option(None, "--config", "-c", help="Config file path."),
+) -> None:
+    """Display channel message history for a run."""
+    from rich.table import Table
+
+    duet_config = find_config(config)
+
+    # Database required
+    db_path = Path(duet_config.storage.run_artifact_dir).parent / "duet.db"
+    if not db_path.exists():
+        console.print("[red]Database not found. Initialize with: uv run duet init[/]")
+        raise typer.Exit(1)
+
+    db = DuetDatabase(db_path)
+
+    # Get messages
+    msgs = db.list_messages(run_id, channel=channel, phase=phase, limit=limit)
+
+    if not msgs:
+        console.print(f"[yellow]No messages found for run: {run_id}[/]")
+        if channel:
+            console.print(f"[dim]Channel filter: {channel}[/]")
+        if phase:
+            console.print(f"[dim]Phase filter: {phase}[/]")
+        return
+
+    # JSON export
+    if output == "json":
+        console.print_json(data=msgs)
+        return
+
+    # Display as table
+    console.print(f"[bold]Channel Messages:[/] {run_id}")
+    if channel:
+        console.print(f"[dim]Filtered by channel: {channel}[/]")
+    if phase:
+        console.print(f"[dim]Filtered by phase: {phase}[/]")
+    console.print()
+
+    table = Table()
+    table.add_column("Channel", style="cyan")
+    table.add_column("Value", style="green")
+    table.add_column("Phase", style="magenta")
+    table.add_column("Iteration", justify="right")
+    table.add_column("Created", style="dim")
+
+    for msg in msgs:
+        payload_preview = str(msg["payload"])[:100]
+        if len(str(msg["payload"])) > 100:
+            payload_preview += "..."
+
+        table.add_row(
+            msg["channel"],
+            payload_preview,
+            msg["phase"] or "-",
+            str(msg["iteration"]) if msg["iteration"] else "-",
+            msg["created_at"][:19] if msg["created_at"] else "-",
+        )
+
+    console.print(table)
+    console.print(f"\n[dim]Showing {len(msgs)} messages{f' (limited to {limit})' if len(msgs) == limit else ''}[/]")

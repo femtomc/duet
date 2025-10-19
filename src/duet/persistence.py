@@ -897,3 +897,21 @@ class DuetDatabase:
                         pass
                 return msg_dict
             return None
+
+    def get_channel_history(
+        self, run_id: str, channel: str, limit: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Get chronological history for a specific channel in a run.
+
+        Convenience method wrapping list_messages with channel filter.
+
+        Args:
+            run_id: Run identifier
+            channel: Channel name
+            limit: Maximum messages to return
+
+        Returns:
+            List of messages in chronological order
+        """
+        return self.list_messages(run_id, channel=channel, limit=limit)
