@@ -1019,6 +1019,21 @@ class Orchestrator:
                 self.workflow_executor.channel_store.set(channel_name, value)
                 self.console.log(f"[dim]Channel write:[/] {channel_name}")
 
+        # Persist step-by-step execution logs
+        if self.db and facet_result.step_logs:
+            for step_log in facet_result.step_logs:
+                try:
+                    self.db.insert_event(
+                        run_id=snapshot.run_id,
+                        event_type=f"step_{step_log['step_type'].lower()}",
+                        payload=step_log,
+                        iteration=snapshot.iteration,
+                        phase=phase,
+                        timestamp=dt.datetime.now(dt.timezone.utc).isoformat(),
+                    )
+                except Exception as exc:
+                    self.console.log(f"[yellow]Failed to persist step log: {exc}[/]")
+
         # Build AssistantResponse from facet result
         # For now, use a synthetic response (real agent integration coming)
         response = AssistantResponse(

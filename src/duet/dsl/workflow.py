@@ -119,8 +119,10 @@ class ChannelHasGuard(Guard):
     def __init__(self, channel: Channel, value: Any):
         if not isinstance(channel, Channel):
             raise TypeError(
-                f"ChannelHasGuard requires Channel object, got {type(channel)}. "
-                f"Use Channel objects instead of strings."
+                f"ChannelHasGuard requires Channel object, got {type(channel)}.\n"
+                f"Migration: Define channel as variable:\n"
+                f"  verdict = Channel(name='verdict')\n"
+                f"  When.channel_has(verdict, '{value}')"
             )
         self.channel_name = channel.name
         self.channel_id = channel.id
@@ -415,14 +417,18 @@ class Phase(BaseElement):
         for channel in self.consumes:
             if not isinstance(channel, Channel):
                 raise TypeError(
-                    f"Phase.consumes must contain Channel objects, got {type(channel)} in phase '{self.name}'. "
-                    f"Use Channel objects instead of strings."
+                    f"Phase.consumes must contain Channel objects, got {type(channel)} in phase '{self.name}'.\n"
+                    f"Migration: Define channels as variables, then reference them:\n"
+                    f"  task = Channel(name='task')\n"
+                    f"  Phase(name='{self.name}', consumes=[task], ...)"
                 )
         for channel in self.publishes:
             if not isinstance(channel, Channel):
                 raise TypeError(
-                    f"Phase.publishes must contain Channel objects, got {type(channel)} in phase '{self.name}'. "
-                    f"Use Channel objects instead of strings."
+                    f"Phase.publishes must contain Channel objects, got {type(channel)} in phase '{self.name}'.\n"
+                    f"Migration: Define channels as variables, then reference them:\n"
+                    f"  plan = Channel(name='plan')\n"
+                    f"  Phase(name='{self.name}', publishes=[plan], ...)"
                 )
 
         # Generate ID if not provided (from BaseElement)
@@ -860,14 +866,18 @@ class Transition:
         # Strict type checking - require Phase objects
         if not isinstance(self.from_phase, Phase):
             raise TypeError(
-                f"Transition from_phase must be Phase object, got {type(self.from_phase)}. "
-                f"Use Phase objects instead of strings."
+                f"Transition from_phase must be Phase object, got {type(self.from_phase)}.\n"
+                f"Migration: Define phases as variables, then reference them:\n"
+                f"  plan = Phase(name='plan', ...)\n"
+                f"  Transition(from_phase=plan, to_phase=...)"
             )
 
         if not isinstance(self.to_phase, Phase):
             raise TypeError(
-                f"Transition to_phase must be Phase object, got {type(self.to_phase)}. "
-                f"Use Phase objects instead of strings."
+                f"Transition to_phase must be Phase object, got {type(self.to_phase)}.\n"
+                f"Migration: Define phases as variables, then reference them:\n"
+                f"  implement = Phase(name='implement', ...)\n"
+                f"  Transition(from_phase=..., to_phase=implement)"
             )
 
         if not isinstance(self.when, Guard):
