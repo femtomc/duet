@@ -109,13 +109,15 @@ def test_phase_with_read_step():
 
 def test_phase_with_tool_step():
     """Test adding ToolStep to phase via fluent API."""
+    git_status = Channel(name="git_status")
     tool = GitChangeTool()
-    phase = Phase(name="implement", agent="dev").tool(tool, outputs=["git_status"])
+    phase = Phase(name="implement", agent="dev").tool(tool, outputs=[git_status])
 
     assert len(phase.steps) == 1
     assert isinstance(phase.steps[0], ToolStep)
     assert phase.steps[0].tool is tool
-    assert phase.steps[0].outputs == ["git_status"]
+    assert len(phase.steps[0].outputs) == 1
+    assert phase.steps[0].outputs[0] is git_status
 
 
 def test_phase_with_agent_step():
@@ -165,12 +167,13 @@ def test_facet_script_chaining():
     plan_ch = Channel(name="plan")
     code = Channel(name="code")
     status = Channel(name="status")
+    git_info = Channel(name="git_info")
 
     # Build a complete facet script
     implement = (
         Phase(name="implement", agent="implementer")
         .read(task, plan_ch)
-        .tool(GitChangeTool(), outputs=["git_info"])
+        .tool(GitChangeTool(), outputs=[git_info])  # Channel object
         .call_agent("implementer", writes=[code], role="implementer")
         .write(status, value="implemented")
     )
@@ -226,3 +229,50 @@ def test_step_result_factory_methods():
     result = StepResult.fail("Something went wrong")
     assert not result.success
     assert result.error == "Something went wrong"
+
+
+def test_tool_context_only_no_channel_writes():
+    """Test that ToolStep can update context without channel writes."""
+    tool = GitChangeTool()
+    step = ToolStep(tool=tool, into_context=True)  # No outputs - context only
+
+    context = FacetContext(
+        phase_name="test",
+        run_id="run-1",
+        iteration=1,
+        workspace_root="/workspace",
+    )
+
+    result = step.execute(context)
+
+    # Tool results go to context
+    assert result.success
+    # But no channel writes since outputs=[]
+    assert len(result.channel_writes) == 0
+
+
+def test_tool_with_explicit_channel_writes():
+    """Test that ToolStep writes to channels when outputs declared."""
+    from duet.dsl.tools import BaseTool, ToolContext, ToolResult
+
+    # Custom tool that returns data
+    class DataTool(BaseTool):
+        def run(self, context: ToolContext) -> ToolResult:
+            return ToolResult(channel_updates={"processed": "data_value"}, success=True)
+
+    output_ch = Channel(name="output")
+    tool = DataTool(name="data_processor")
+    step = ToolStep(tool=tool, outputs=[output_ch])
+
+    context = FacetContext(
+        phase_name="test",
+        run_id="run-1",
+        iteration=1,
+    )
+
+    result = step.execute(context)
+
+    # Tool results in both context and channel writes
+    assert result.success
+    assert "processed" in result.context_updates
+    assert "output" in result.channel_writes

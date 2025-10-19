@@ -168,19 +168,25 @@ class ToolStep:
     Step that executes a deterministic tool.
 
     Tools read from context, perform logic, and write results back to context
-    or channels.
+    or channels explicitly via outputs parameter.
 
     Attributes:
         tool: Tool instance to execute
-        outputs: Channel names to write tool results to (optional)
+        outputs: Channels to write tool results to (explicit channel writes)
+        into_context: Whether to merge tool results into local context (default: True)
     """
 
     tool: Any  # Type: Tool - avoid circular import
-    outputs: List[str] = field(default_factory=list)
+    outputs: List[Channel] = field(default_factory=list)
+    into_context: bool = True
 
     def execute(self, context: FacetContext) -> StepResult:
         """
         Execute tool and merge results.
+
+        Tool results go into local context by default. If outputs are specified,
+        also stage channel writes. This allows tools to enrich context without
+        forcing external writes.
 
         Args:
             context: Facet execution context
@@ -207,10 +213,24 @@ class ToolStep:
         if not tool_result.success:
             return StepResult.fail(tool_result.error or "Tool execution failed")
 
-        # Merge tool results
+        # Merge results
+        context_updates = tool_result.channel_updates if self.into_context else {}
+
+        # Channel writes only if outputs explicitly declared
+        channel_writes = {}
+        if self.outputs:
+            # Map tool results to declared output channels
+            for i, channel in enumerate(self.outputs):
+                # Use first/only result, or look for channel name in results
+                if channel.name in tool_result.channel_updates:
+                    channel_writes[channel.name] = tool_result.channel_updates[channel.name]
+                elif len(tool_result.channel_updates) == 1:
+                    # Single result - write to this channel
+                    channel_writes[channel.name] = list(tool_result.channel_updates.values())[0]
+
         return StepResult(
-            context_updates=tool_result.channel_updates,
-            channel_writes=tool_result.channel_updates,  # Tools can write directly
+            context_updates=context_updates,
+            channel_writes=channel_writes,
             metadata=tool_result.metadata,
             success=True,
             notes=tool_result.notes,

@@ -576,25 +576,28 @@ class Phase(BaseElement):
         new_steps = list(self.steps) + [step]
         return replace(self, steps=new_steps)
 
-    def tool(self, tool: Any, outputs: Optional[List[str]] = None) -> Phase:
+    def tool(self, tool: Any, outputs: Optional[List[Channel]] = None, into_context: bool = True) -> Phase:
         """
         Add ToolStep to facet script (Sprint DSL-3).
 
-        Executes deterministic tool, merges results into context/channels.
+        Executes deterministic tool. Results go into local context by default.
+        If outputs specified, also writes to those channels.
 
         Args:
             tool: Tool instance to execute
-            outputs: Channel names to write tool results to
+            outputs: Channel objects to write tool results to (optional)
+            into_context: Whether to merge tool results into local context (default: True)
 
         Returns a new Phase instance with ToolStep appended.
 
         Example:
-            phase.tool(GitChangeTool(), outputs=["git_status"])
+            phase.tool(GitChangeTool())  # Context only
+            phase.tool(ValidationTool(), outputs=[status_channel])  # Context + channel write
         """
         from dataclasses import replace
         from .steps import ToolStep
 
-        step = ToolStep(tool=tool, outputs=outputs or [])
+        step = ToolStep(tool=tool, outputs=outputs or [], into_context=into_context)
         new_steps = list(self.steps) + [step]
         return replace(self, steps=new_steps)
 
