@@ -50,7 +50,7 @@ class DuetInitializer:
         Creates:
         - .duet/ directory structure
         - duet.yaml configuration
-        - ide.py workflow definition (Python DSL, Sprint 9)
+        - workflow.py workflow definition (Python DSL)
         - Context discovery (optional)
         - Scaffold files (.gitkeep, SQLite DB)
         """
@@ -77,7 +77,7 @@ class DuetInitializer:
         # Generate configuration
         self._create_config()
 
-        # Create workflow definition (Sprint 9: DSL-based)
+        # Create workflow definition (DSL-based)
         self._create_workflow_definition()
 
         # Create scaffold files
@@ -94,7 +94,7 @@ class DuetInitializer:
         self.console.print()
         self.console.print("[bold]Next steps:[/]")
         self.console.print("  1. Review configuration: cat .duet/duet.yaml")
-        self.console.print("  2. Customize workflow: edit .duet/workflow.py (Sprint 9 DSL)")
+        self.console.print("  2. Customize workflow: edit .duet/workflow.py")
         self.console.print("  3. Run orchestration: uv run duet run")
         self.console.print("  4. Or run phase-by-phase: uv run duet next")
         self.console.print()
@@ -120,7 +120,8 @@ This directory contains Duet orchestration artifacts and configuration.
 ## Structure
 
 - **duet.yaml**: Configuration file (models, workflow, guardrails)
-- **workflow.py**: Workflow definition using Python DSL- **runs/**: Orchestration run artifacts (checkpoints, iterations, summaries)
+- **workflow.py**: Workflow definition using Python DSL
+- **runs/**: Orchestration run artifacts (checkpoints, iterations, summaries)
 - **logs/**: Structured JSONL event logs
 - **context/**: Repository context and discovery outputs
 - **duet.db**: SQLite database for run metadata and state checkpoints
@@ -132,7 +133,7 @@ Edit `workflow.py` to customize your workflow:
 - Configure phases with consumes/publishes patterns
 - Set transition guards and priorities
 
-See `docs/workflow_dsl.md` for DSL reference.
+See `docs/workflow_dsl.md` for reference.
 
 ## Usage
 
@@ -202,11 +203,14 @@ storage:
 logging:
   enable_jsonl: true
   jsonl_dir: "{self.config_path / 'logs'}"
-  quiet: false  # Set to true to disable live streaming output  stream_mode: "detailed"  # Display mode: detailed | compact | off
+  quiet: false  # Set to true to disable live streaming output
+  stream_mode: "detailed"  # Display mode: detailed | compact | off
+
 # ────────────────────────────────────────────────────────────────────────────
 # Tips:
 # - To use echo adapters for testing, set provider: "echo"
-# - Customize workflow in .duet/workflow.py# - Review context discovery in .duet/context/context.md
+# - Customize workflow in .duet/workflow.py
+# - Review context discovery in .duet/context/context.md
 # - Monitor runs in .duet/runs/<run-id>/
 # - See docs/workflow_dsl.md for DSL reference
 # ────────────────────────────────────────────────────────────────────────────
@@ -216,7 +220,7 @@ logging:
         self.console.log(f"[green]Created:[/] {self._display_path(config_file)}")
 
     def _create_workflow_definition(self) -> None:
-        """Create workflow definition using Python DSL (Sprint 9)."""
+        """Create workflow definition using Python DSL."""
         # Read template from package
         try:
             # Try to read template from package resources
@@ -248,7 +252,7 @@ logging:
     def _get_inline_workflow_template(self) -> str:
         """Fallback inline workflow template if package resource missing."""
         return '''"""
-Duet Workflow Definition (Sprint 9 DSL).
+Duet Workflow Definition.
 
 This file defines the orchestration workflow for your project using Duet's
 Python DSL. Customize agents, channels, phases, and transitions to fit your
@@ -430,24 +434,28 @@ Be concise but comprehensive. This will help the orchestrator understand the cod
 
                 event_type = event["event_type"]
 
-                # Extract agent message from enriched field                if event_type == "assistant_message":
+                # Extract agent message from enriched field
+                if event_type == "assistant_message":
                     text = event.get("text_snippet", "")
                     if text:
                         agent_message_snippet = text
 
-                # Track reasoning steps and capture text                elif event_type == "reasoning":
+                # Track reasoning steps and capture text
+                elif event_type == "reasoning":
                     reasoning_count += 1
                     text = event.get("text_snippet", "")
                     if text:
                         reasoning_snippet = text
 
-                # Track tool use                elif event_type == "tool_use":
+                # Track tool use
+                elif event_type == "tool_use":
                     tool_info = event.get("tool_info", {})
                     if tool_info:
                         last_command = tool_info.get("tool_name", "unknown")
                         command_output = tool_info.get("output_preview", "")
 
-                # Extract token usage from enriched field                elif event_type == "turn_complete":
+                # Extract token usage from enriched field
+                elif event_type == "turn_complete":
                     usage = event.get("usage", {})
                     if usage:
                         token_count = usage.get("output_tokens", 0)

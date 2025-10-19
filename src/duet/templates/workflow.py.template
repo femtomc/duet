@@ -1,5 +1,5 @@
 """
-Duet Workflow Definition (Sprint 9 DSL).
+Duet Workflow Definition.
 
 This file defines the orchestration workflow for your project using Duet's
 Python DSL. Customize agents, channels, phases, and transitions to fit your

@@ -125,7 +125,7 @@ def status(
     config: Optional[Path] = typer.Option(None, "--config", "-c", help="Config file path."),
     show_states: bool = typer.Option(True, "--show-states/--no-states", help="Show state history"),
 ) -> None:
-    """Display the current status of a run (enhanced for Sprint 8 stateful workflow)."""
+    """Display the current status of a run with state history and channel updates."""
     from rich.table import Table
 
     duet_config = find_config(config)

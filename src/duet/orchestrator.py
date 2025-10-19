@@ -894,7 +894,8 @@ class Orchestrator:
             # Insert run
             self.db.insert_run(snapshot)
 
-            # Reset and seed channels for new run             if self.workflow_executor:
+            # Reset and seed channels for new run
+            if self.workflow_executor:
                 self.workflow_executor.channel_store.clear()
                 task_input = snapshot.metadata.get("task", "Implement the requested changes")
                 self.workflow_executor.seed_channel("task", task_input)
