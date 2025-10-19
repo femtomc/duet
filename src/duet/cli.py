@@ -214,9 +214,9 @@ def status(
 
         # Show channel updates (latest per channel)
         try:
-            # Get unique channels from messages
-            all_messages = db.list_messages(run_id)
-            if all_messages:
+            # Get list of unique channels by querying recent messages (limited)
+            recent_messages = db.list_messages(run_id, limit=100)
+            if recent_messages:
                 console.print(f"\n[bold]Channel Updates:[/]")
                 channel_table = Table()
                 channel_table.add_column("Channel", style="cyan")
@@ -224,9 +224,9 @@ def status(
                 channel_table.add_column("Phase", style="magenta")
                 channel_table.add_column("Updated", style="dim")
 
-                # Get latest message per channel
+                # Get latest message per channel (from recent messages)
                 channels_seen = set()
-                for msg in reversed(all_messages):  # Reverse to get latest first
+                for msg in reversed(recent_messages):  # Reverse to get latest first
                     if msg["channel"] not in channels_seen:
                         channels_seen.add(msg["channel"])
                         payload_preview = str(msg["payload"])[:80]
@@ -506,7 +506,8 @@ def inspect(
 
     # Display channel history
     if show_channels:
-        messages = db.list_messages(run_id, channel=channel)
+        # Limit messages to avoid materializing huge result sets
+        messages = db.list_messages(run_id, channel=channel, limit=100)
         if messages:
             console.print(f"\n[bold]Channel History:[/] {len(messages)} messages")
             if channel:
@@ -893,6 +894,7 @@ def messages(
 
     # Display as table
     console.print(f"[bold]Channel Messages:[/] {run_id}")
+    console.print(f"[dim]Showing newest messages first[/]")
     if channel:
         console.print(f"[dim]Filtered by channel: {channel}[/]")
     if phase:

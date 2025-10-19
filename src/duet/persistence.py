@@ -796,6 +796,8 @@ class DuetDatabase:
         """
         List messages for a run with optional filtering.
 
+        Messages are ordered newest-first (descending by created_at).
+
         Args:
             run_id: Run identifier
             channel: Filter by channel name
@@ -804,7 +806,7 @@ class DuetDatabase:
             limit: Maximum messages to return
 
         Returns:
-            List of message dictionaries with parsed payloads
+            List of message dictionaries with parsed payloads (newest first)
         """
         with self._conn() as conn:
             query = "SELECT * FROM messages WHERE run_id = ?"
@@ -822,7 +824,7 @@ class DuetDatabase:
                 query += " AND state_id = ?"
                 params.append(state_id)
 
-            query += " ORDER BY created_at ASC, id ASC"
+            query += " ORDER BY created_at DESC, id DESC"
 
             if limit:
                 query += " LIMIT ?"
