@@ -179,12 +179,20 @@ class Dataspace:
     - retract_fact(fact_id) - Remove fact from dataspace
     - subscribe(pattern, callback) - React when matching facts appear
     - query(pattern) - Find all matching facts
+
+    Turn Semantics:
+    - Subscriptions can be deferred until end of turn (atomic publication)
+    - in_turn() context manager batches fact assertions
     """
 
     def __init__(self):
         self.facts: Dict[str, Fact] = {}  # fact_id -> Fact
         self.facts_by_type: Dict[type, Set[str]] = defaultdict(set)  # type -> {fact_ids}
         self.subscriptions: List[Tuple[FactPattern, Callable]] = []
+
+        # Turn batching
+        self._in_turn: bool = False
+        self._pending_notifications: List[Tuple[Callable, Fact]] = []
 
     def assert_fact(self, fact: Fact) -> Handle:
         """
@@ -205,10 +213,15 @@ class Dataspace:
         # Create handle for retraction
         handle = Handle(fact_id=fact.fact_id)
 
-        # Trigger subscriptions (TODO: delay until end of turn)
+        # Trigger subscriptions (defer if in turn)
         for pattern, callback in self.subscriptions:
             if pattern.matches(fact):
-                callback(fact)
+                if self._in_turn:
+                    # Defer until turn end (atomic publication)
+                    self._pending_notifications.append((callback, fact))
+                else:
+                    # Immediate delivery
+                    callback(fact)
 
         return handle
 
@@ -314,8 +327,58 @@ class Dataspace:
         grants = self.query(pattern)
         return grants[0] if grants else None
 
+    def in_turn(self):
+        """
+        Context manager for turn-based execution (Syndicate-style).
+
+        Defers subscription notifications until turn end for atomic publication.
+
+        Usage:
+            with dataspace.in_turn():
+                handle1 = dataspace.assert_fact(fact1)
+                handle2 = dataspace.assert_fact(fact2)
+                # Subscriptions not triggered yet
+            # All pending notifications delivered atomically
+        """
+        return TurnContext(self)
+
+    def _begin_turn(self) -> None:
+        """Begin a turn (internal - used by TurnContext)."""
+        self._in_turn = True
+        self._pending_notifications.clear()
+
+    def _end_turn(self) -> None:
+        """End a turn and deliver pending notifications (internal)."""
+        self._in_turn = False
+
+        # Deliver all pending notifications atomically
+        for callback, fact in self._pending_notifications:
+            try:
+                callback(fact)
+            except Exception as exc:
+                # Don't let callback errors break turn delivery
+                print(f"Subscription callback error: {exc}")
+
+        self._pending_notifications.clear()
+
     def clear(self) -> None:
         """Clear all facts and subscriptions."""
         self.facts.clear()
         self.facts_by_type.clear()
         self.subscriptions.clear()
+        self._pending_notifications.clear()
+
+
+class TurnContext:
+    """Context manager for turn-based execution."""
+
+    def __init__(self, dataspace: Dataspace):
+        self.dataspace = dataspace
+
+    def __enter__(self):
+        self.dataspace._begin_turn()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.dataspace._end_turn()
+        return False  # Don't suppress exceptions
