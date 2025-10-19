@@ -396,12 +396,13 @@ class Phase(BaseElement):
     name: str
     agent: str
     id: Optional[str] = None
-    consumes: List[Channel] = field(default_factory=list)
-    publishes: List[Channel] = field(default_factory=list)
+    consumes: List[Channel] = field(default_factory=list)  # Deprecated - use steps
+    publishes: List[Channel] = field(default_factory=list)  # Deprecated - use steps
     description: str = ""
     is_terminal: bool = False
     metadata: Dict[str, Any] = field(default_factory=dict)
-    tools: List[Any] = field(default_factory=list)  # List[Tool] - avoid circular import
+    tools: List[Any] = field(default_factory=list)  # Deprecated - use steps
+    steps: List[Any] = field(default_factory=list)  # List[PhaseStep] - facet script
 
     def __post_init__(self):
         if not self.name:
@@ -531,11 +532,14 @@ class Phase(BaseElement):
         # No-op: replan tracking will be reimplemented as conversations
         return self
 
-    # ──── Tool Attachment (Sprint DSL-2) ────
+    # ──── Tool Attachment (Sprint DSL-2, deprecated in DSL-3) ────
 
     def with_tool(self, tool: Any) -> Phase:  # Type: Tool - avoid circular import
         """
         Attach a tool to this phase (fluent API).
+
+        Sprint DSL-3: Deprecated. Use .tool(tool, outputs=[...]) instead to add
+        ToolStep to the facet script.
 
         Tools run at specified times (pre/post phase) and can read/write channels.
 
@@ -547,6 +551,122 @@ class Phase(BaseElement):
         from dataclasses import replace
         new_tools = list(self.tools) + [tool]
         return replace(self, tools=new_tools)
+
+    # ──── Step-Based Fluent API (Sprint DSL-3) ────
+
+    def read(self, *channels: Channel, into: Optional[List[str]] = None) -> Phase:
+        """
+        Add ReadStep to facet script (Sprint DSL-3).
+
+        Reads channel values into local context for use by subsequent steps.
+
+        Args:
+            channels: Channels to read from
+            into: Optional context keys to store values (defaults to channel names)
+
+        Returns a new Phase instance with ReadStep appended.
+
+        Example:
+            phase.read(task, feedback, into=["task_input", "review_notes"])
+        """
+        from dataclasses import replace
+        from .steps import ReadStep
+
+        step = ReadStep(channels=list(channels), into=into)
+        new_steps = list(self.steps) + [step]
+        return replace(self, steps=new_steps)
+
+    def tool(self, tool: Any, outputs: Optional[List[str]] = None) -> Phase:
+        """
+        Add ToolStep to facet script (Sprint DSL-3).
+
+        Executes deterministic tool, merges results into context/channels.
+
+        Args:
+            tool: Tool instance to execute
+            outputs: Channel names to write tool results to
+
+        Returns a new Phase instance with ToolStep appended.
+
+        Example:
+            phase.tool(GitChangeTool(), outputs=["git_status"])
+        """
+        from dataclasses import replace
+        from .steps import ToolStep
+
+        step = ToolStep(tool=tool, outputs=outputs or [])
+        new_steps = list(self.steps) + [step]
+        return replace(self, steps=new_steps)
+
+    def call_agent(self, agent_name: str, writes: List[Channel], prompt: Optional[str] = None, role: Optional[str] = None) -> Phase:
+        """
+        Add AgentStep to facet script (Sprint DSL-3).
+
+        Invokes AI agent with context, writes response to specified channels.
+
+        Args:
+            agent_name: Name of agent to invoke
+            writes: Channels to write agent response to
+            prompt: Optional custom prompt template
+            role: Optional role hint for prompt builder
+
+        Returns a new Phase instance with AgentStep appended.
+
+        Example:
+            phase.call_agent("planner", writes=[plan_channel], role="planner")
+        """
+        from dataclasses import replace
+        from .steps import AgentStep
+
+        step = AgentStep(agent=agent_name, writes=writes, prompt_template=prompt, role=role)
+        new_steps = list(self.steps) + [step]
+        return replace(self, steps=new_steps, agent=agent_name)  # Also set phase.agent
+
+    def human(self, reason: str, reads: Optional[List[Channel]] = None, timeout: Optional[int] = None) -> Phase:
+        """
+        Add HumanStep to facet script (Sprint DSL-3).
+
+        Requires human interaction/approval. Suspends execution until human responds.
+
+        Args:
+            reason: Human-readable reason for approval
+            reads: Channels to present to human
+            timeout: Optional timeout in seconds
+
+        Returns a new Phase instance with HumanStep appended.
+
+        Example:
+            phase.human("QA approval required", reads=[plan_channel, code])
+        """
+        from dataclasses import replace
+        from .steps import HumanStep
+
+        step = HumanStep(reason=reason, reads=reads or [], timeout=timeout)
+        new_steps = list(self.steps) + [step]
+        return replace(self, steps=new_steps)
+
+    def write(self, channel: Channel, value_key: Optional[str] = None, value: Any = None) -> Phase:
+        """
+        Add WriteStep to facet script (Sprint DSL-3).
+
+        Explicitly writes value to channel (direct fact assertion).
+
+        Args:
+            channel: Channel to write to
+            value_key: Context key containing value to write
+            value: Static value to write (alternative to value_key)
+
+        Returns a new Phase instance with WriteStep appended.
+
+        Example:
+            phase.write(status_channel, value="complete")
+        """
+        from dataclasses import replace
+        from .steps import WriteStep
+
+        step = WriteStep(channel=channel, value_key=value_key, static_value=value)
+        new_steps = list(self.steps) + [step]
+        return replace(self, steps=new_steps)
 
     # ──── Convenience Constructors (Sprint DSL-2) ────
 
