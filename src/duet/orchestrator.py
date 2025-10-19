@@ -18,7 +18,7 @@ from .adapters.base import StreamEvent
 from .approval import ApprovalNotifier
 from .artifacts import ArtifactStore
 from .config import DuetConfig
-from .dataspace import Dataspace, ChannelFact
+from .dataspace import Dataspace
 from .git_operations import GitWorkspace, GitError
 from .logging import DuetLogger
 from .models import (
@@ -136,6 +136,52 @@ class Orchestrator:
         # Initialize facet scheduler
         self.scheduler = FacetScheduler(self.dataspace, console=self.console)
         self.console.log("[dim]Reactive facet scheduler initialized[/]")
+
+    def load_persisted_facts(self, run_id: str) -> int:
+        """
+        Load persisted facts from database into dataspace.
+
+        Called when resuming a run to restore approval grants and other
+        persisted facts into the in-memory dataspace.
+
+        Args:
+            run_id: Run identifier
+
+        Returns:
+            Number of facts loaded
+        """
+        if not self.db:
+            return 0
+
+        from .dataspace import ApprovalGrant, ApprovalRequest, FactRegistry
+
+        # Query all active facts from database
+        fact_records = self.db.get_facts(run_id, active_only=True)
+        loaded = 0
+
+        for record in fact_records:
+            fact_type_name = record["fact_type"]
+            payload = record["payload"]
+
+            # Get fact class from registry
+            fact_class = FactRegistry.get(fact_type_name)
+            if not fact_class:
+                self.console.log(f"[yellow]Unknown fact type {fact_type_name}, skipping[/]")
+                continue
+
+            try:
+                # Reconstruct fact from payload
+                fact = fact_class(**payload)
+                # Assert into dataspace
+                self.dataspace.assert_fact(fact)
+                loaded += 1
+            except Exception as exc:
+                self.console.log(f"[yellow]Failed to load fact {record['fact_id']}: {exc}[/]")
+
+        if loaded > 0:
+            self.console.log(f"[dim]Loaded {loaded} persisted facts from database[/]")
+
+        return loaded
 
     def _resolve_workflow_path(self) -> Optional[Path]:
         """Resolve workflow file path for hot-reload tracking."""
@@ -292,25 +338,10 @@ class Orchestrator:
         # Clear dataspace for new run
         self.dataspace.clear()
 
-        # Seed task channel using workflow configuration
-        task_channel_name = self.workflow_graph.get_task_channel()
-        if task_channel_name:
-            # Get task input from metadata
-            task_input = snapshot.metadata.get("task", "Execute workflow")
-            if not snapshot.metadata.get("task"):
-                self.console.log("[dim]No task input provided, using default[/]")
-
-            # Assert task as ChannelFact
-            self.dataspace.assert_fact(ChannelFact(
-                fact_id=f"{snapshot.run_id}_task_0",
-                channel_name=task_channel_name,
-                value=task_input,
-                iteration=0,
-                phase="seed",
-            ))
-            self.console.log(f"[dim]Seeded dataspace with task fact: '{task_channel_name}'[/]")
-        else:
-            self.console.log("[dim]No task channel configured[/]")
+        # Task seeding is now workflow-specific
+        # Workflows should define their own initial fact in steps or via custom initialization
+        self.console.log("[dim]Dataspace cleared for new run[/]")
+        self.console.log("[dim]Initial facts should be asserted by workflow or via CLI[/]")
 
         # ──── Database: Insert Run Record ────
         if self.db:
@@ -1083,6 +1114,9 @@ class Orchestrator:
                     )
                     self.db.update_active_state(run_id, state_id)
                     active_state = self.db.get_state(state_id)
+
+            # Load persisted facts into dataspace (e.g., ApprovalGrants)
+            self.load_persisted_facts(run_id)
 
             # Restore channel snapshot if available
             if self.workflow_executor and active_state.get("metadata"):

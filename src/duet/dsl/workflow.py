@@ -479,25 +479,40 @@ class Phase(BaseElement):
 
     # ──── Step-Based Fluent API (Sprint DSL-3) ────
 
-    def read(self, *channels: Channel, into: Optional[List[str]] = None) -> Phase:
+    def read_fact(
+        self,
+        fact_type: type,
+        into: Optional[str] = None,
+        constraints: Optional[Dict[str, Any]] = None,
+        latest_only: bool = True,
+    ) -> Phase:
         """
-        Add ReadStep to facet script (Sprint DSL-3).
+        Add ReadStep for typed fact to facet script.
 
-        Reads channel values into local context for use by subsequent steps.
+        Queries dataspace for facts of specified type and stores in context.
 
         Args:
-            channels: Channels to read from
-            into: Optional context keys to store values (defaults to channel names)
+            fact_type: Fact type to query (e.g., PlanDoc, TaskRequest)
+            into: Context key to store fact (defaults to lowercase fact type name)
+            constraints: Optional constraints for fact query
+            latest_only: Whether to return only latest fact by iteration (default: True)
 
-        Returns a new Phase instance with ReadStep appended.
+        Returns:
+            New Phase instance with ReadStep appended
 
         Example:
-            phase.read(task, feedback, into=["task_input", "review_notes"])
+            phase.read_fact(PlanDoc, into="plan", constraints={"task_id": "123"})
+            phase.read_fact(TaskRequest, into="task")
         """
         from dataclasses import replace
         from .steps import ReadStep
 
-        step = ReadStep(channels=list(channels), into=into)
+        step = ReadStep(
+            fact_type=fact_type,
+            into=into,
+            constraints=constraints,
+            latest_only=latest_only,
+        )
         new_steps = list(self.steps) + [step]
         return replace(self, steps=new_steps)
 
@@ -573,26 +588,42 @@ class Phase(BaseElement):
         new_steps = list(self.steps) + [step]
         return replace(self, steps=new_steps)
 
-    def write(self, channel: Channel, value_key: Optional[str] = None, value: Any = None) -> Phase:
+    def write_fact(
+        self,
+        fact_type: type,
+        values: Optional[Dict[str, Any]] = None,
+        fact_id_key: Optional[str] = None,
+        store_handle_as: Optional[str] = None,
+    ) -> Phase:
         """
-        Add WriteStep to facet script (Sprint DSL-3).
+        Add WriteStep for typed fact to facet script.
 
-        Explicitly writes value to channel (direct fact assertion).
+        Constructs and asserts a typed fact to the dataspace.
 
         Args:
-            channel: Channel to write to
-            value_key: Context key containing value to write
-            value: Static value to write (alternative to value_key)
+            fact_type: Fact type to construct and assert (e.g., ReviewVerdict)
+            values: Dict of field values (supports $context_key syntax)
+            fact_id_key: Optional context key containing fact_id
+            store_handle_as: Optional context key to store returned handle
 
-        Returns a new Phase instance with WriteStep appended.
+        Returns:
+            New Phase instance with WriteStep appended
 
         Example:
-            phase.write(status_channel, value="complete")
+            phase.write_fact(
+                ReviewVerdict,
+                values={"code_id": "$code.fact_id", "verdict": "approve"}
+            )
         """
         from dataclasses import replace
         from .steps import WriteStep
 
-        step = WriteStep(channel=channel, value_key=value_key, static_value=value)
+        step = WriteStep(
+            fact_type=fact_type,
+            values=values,
+            fact_id_key=fact_id_key,
+            store_handle_as=store_handle_as,
+        )
         new_steps = list(self.steps) + [step]
         return replace(self, steps=new_steps)
 
@@ -681,6 +712,10 @@ class Phase(BaseElement):
 
         for step in self.steps:
             if isinstance(step, ReadStep):
+                # Skip if fact_type is None (shouldn't happen with required parameter)
+                if step.fact_type is None:
+                    continue
+
                 # Create FactPattern from ReadStep's fact_type and constraints
                 pattern_key = (step.fact_type, tuple(sorted((step.constraints or {}).items())))
                 if pattern_key not in seen_types:
