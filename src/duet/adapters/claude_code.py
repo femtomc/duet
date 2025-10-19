@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import datetime
-import os
 import json
 import queue
 import subprocess
@@ -92,14 +91,6 @@ class ClaudeCodeAdapter(AssistantAdapter):
                     ]
                 )
 
-            env = os.environ.copy()
-            debug_dir = env.setdefault("CLAUDE_CODE_DEBUG_LOGS_DIR", "/tmp/claude-code-debug")
-            try:
-                os.makedirs(debug_dir, exist_ok=True)
-            except Exception:
-                # If we can't create the directory, let the CLI handle it.
-                pass
-
             # Invoke Claude CLI with Popen for streaming
             process = subprocess.Popen(
                 cmd,
@@ -107,7 +98,6 @@ class ClaudeCodeAdapter(AssistantAdapter):
                 stderr=subprocess.PIPE,
                 text=True,
                 cwd=self.workspace_root,  # Workspace context
-                env=env,
             )
 
             # Track metadata across stream

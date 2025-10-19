@@ -23,7 +23,6 @@ from .logging import DuetLogger
 from .models import (
     AssistantRequest,
     AssistantResponse,
-    Phase,
     ReviewVerdict,
     RunSnapshot,
     TransitionDecision,
@@ -71,6 +70,7 @@ class Orchestrator:
         artifact_store: ArtifactStore,
         console: Optional[Console] = None,
         db: Optional[DuetDatabase] = None,
+        workflow_path: Optional[Path] = None,
     ) -> None:
         self.config = config
         self.artifacts = artifact_store
@@ -79,6 +79,7 @@ class Orchestrator:
         self.claude_adapter = self._build_adapter(config.claude)
         self.max_iterations = config.workflow.max_iterations
         self._stop_requested = False
+        self._custom_workflow_path = workflow_path  # Store for workflow loading
         self._setup_signal_handlers()
 
         # Initialize logger
@@ -112,7 +113,10 @@ class Orchestrator:
         self._workflow_mtime = self._get_workflow_mtime()
 
         try:
-            self.workflow_graph = load_workflow(workspace_root=config.storage.workspace_root)
+            self.workflow_graph = load_workflow(
+                workflow_path=self._custom_workflow_path,
+                workspace_root=config.storage.workspace_root
+            )
         except WorkflowLoadError as exc:
             raise RuntimeError(
                 f"Failed to load workflow definition:\n{exc}\n\n"
@@ -127,7 +131,7 @@ class Orchestrator:
         """Resolve workflow file path for hot-reload tracking."""
         try:
             from .workflow_loader import _resolve_workflow_path
-            return _resolve_workflow_path(None, self.config.storage.workspace_root)
+            return _resolve_workflow_path(self._custom_workflow_path, self.config.storage.workspace_root)
         except Exception:
             return None
 
@@ -158,7 +162,10 @@ class Orchestrator:
         from .executor import WorkflowExecutor
 
         try:
-            new_graph = load_workflow(workspace_root=self.config.storage.workspace_root)
+            new_graph = load_workflow(
+                workflow_path=self._custom_workflow_path,
+                workspace_root=self.config.storage.workspace_root
+            )
             self.workflow_graph = new_graph
             self.workflow_executor = WorkflowExecutor(new_graph, console=self.console)
             self._workflow_mtime = current_mtime
@@ -208,7 +215,7 @@ class Orchestrator:
         signal.signal(signal.SIGTERM, _handle_stop)
 
     def _create_event_handler(
-        self, run_id: str, iteration: int, phase: Phase, display: Optional[StreamingDisplay] = None
+        self, run_id: str, iteration: int, phase: str, display: Optional[StreamingDisplay] = None
     ):
         """
         Create an event handler for streaming adapter events.
@@ -254,10 +261,15 @@ class Orchestrator:
         self._check_and_reload_workflow()
 
         iteration = 0
+
+        # Use workflow's initial phase instead of hardcoded PLAN
+        initial_phase_name = self.workflow_graph.initial_phase
+        initial_phase = initial_phase_name
+
         snapshot = RunSnapshot(
             run_id=run_id or self._derive_run_id(),
             iteration=iteration,
-            phase=Phase.PLAN,
+            phase=initial_phase,
             metadata={
                 "started_at": dt.datetime.now(dt.timezone.utc).isoformat(),
                 "consecutive_replans": 0,
@@ -322,26 +334,26 @@ class Orchestrator:
                 self.console.log(f"[yellow]Git branch setup failed: {exc}[/]")
                 self.console.log("[yellow]Continuing on current branch[/]")
 
-        current_phase = Phase.PLAN
+        current_phase = self.workflow_graph.initial_phase if self.workflow_graph else "plan"
         consecutive_replans = 0
         while True:
             # ──── Edge Case: Manual Stop ────
             if self._stop_requested:
-                snapshot.phase = Phase.BLOCKED
+                snapshot.phase = "blocked"
                 snapshot.notes = "Manual stop requested by user (SIGINT/SIGTERM)."
                 self.console.log("[yellow]Manual stop detected, marking run as BLOCKED[/]")
                 break
 
             # ──── Edge Case: Max Iterations ────
-            if iteration >= self.max_iterations and current_phase != Phase.DONE:
-                snapshot.phase = Phase.BLOCKED
+            if iteration >= self.max_iterations and current_phase != "done":
+                snapshot.phase = "blocked"
                 snapshot.notes = f"Max iterations ({self.max_iterations}) reached without completion."
                 self.console.log("[yellow]Max iterations reached, marking run as BLOCKED[/]")
                 break
 
             # ──── Terminal Phase Check ────
-            if current_phase == Phase.DONE:
-                snapshot.phase = Phase.DONE
+            if current_phase == "done":
+                snapshot.phase = "done"
                 snapshot.notes = "Run completed successfully."
                 self.console.log("[green]Run completed[/]")
                 break
@@ -351,13 +363,13 @@ class Orchestrator:
             snapshot.iteration = iteration
             snapshot.phase = current_phase
             phase_start_time = dt.datetime.now(dt.timezone.utc)
-            self.logger.log_iteration_start(snapshot.run_id, iteration, current_phase.value)
+            self.logger.log_iteration_start(snapshot.run_id, iteration, current_phase)
 
             # ──── Compose Request ────
             request = self._compose_request(current_phase, snapshot)
             adapter = self._select_adapter(current_phase)
             adapter_name = adapter.__class__.__name__
-            self.logger.log_adapter_call(snapshot.run_id, iteration, current_phase.value, adapter_name)
+            self.logger.log_adapter_call(snapshot.run_id, iteration, current_phase, adapter_name)
 
             # ──── Streaming Display Setup  ────
             from .models import StreamMode
@@ -397,10 +409,10 @@ class Orchestrator:
                 else:
                     response = adapter.stream(request, on_event=event_handler)
             except Exception as exc:
-                snapshot.phase = Phase.BLOCKED
-                snapshot.notes = f"Adapter failure during {current_phase.value}: {exc}"
+                snapshot.phase = "blocked"
+                snapshot.notes = f"Adapter failure during {current_phase}: {exc}"
                 self.logger.log_error(
-                    snapshot.run_id, iteration, current_phase.value, "adapter_failure", str(exc)
+                    snapshot.run_id, iteration, current_phase, "adapter_failure", str(exc)
                 )
                 self._persist_interaction(
                     snapshot.run_id,
@@ -411,7 +423,7 @@ class Orchestrator:
                 break
 
             # ──── Extract Verdict from Metadata (REVIEW phase) ────
-            if current_phase == Phase.REVIEW and "verdict" in response.metadata:
+            if current_phase == "review" and "verdict" in response.metadata:
                 verdict_str = response.metadata["verdict"]
                 if isinstance(verdict_str, str):
                     # Normalize verdict string (handle case variations)
@@ -451,8 +463,8 @@ class Orchestrator:
 
             # ──── Edge Case: Empty Response ────
             if not response.content or not response.content.strip():
-                snapshot.phase = Phase.BLOCKED
-                snapshot.notes = f"Empty response received during {current_phase.value}."
+                snapshot.phase = "blocked"
+                snapshot.notes = f"Empty response received during {current_phase}."
                 self.console.log("[yellow]Empty response detected, marking run as BLOCKED[/]")
                 self._persist_interaction(snapshot.run_id, current_phase, request, response)
                 break
@@ -461,9 +473,9 @@ class Orchestrator:
             if self.config.workflow.max_phase_runtime_seconds:
                 phase_duration = (dt.datetime.now(dt.timezone.utc) - phase_start_time).total_seconds()
                 if phase_duration > self.config.workflow.max_phase_runtime_seconds:
-                    snapshot.phase = Phase.BLOCKED
+                    snapshot.phase = "blocked"
                     snapshot.notes = (
-                        f"Phase {current_phase.value} exceeded maximum runtime "
+                        f"Phase {current_phase} exceeded maximum runtime "
                         f"({self.config.workflow.max_phase_runtime_seconds}s)"
                     )
                     self.console.log(
@@ -473,7 +485,7 @@ class Orchestrator:
                     break
 
             # ──── Implementation Validation: Detect Repository Changes ────
-            if current_phase == Phase.IMPLEMENT and self.config.workflow.require_git_changes:
+            if current_phase == "implement" and self.config.workflow.require_git_changes:
                 try:
                     if self.git.is_git_repo():
                         # Compare against baseline commit to detect new commits
@@ -510,7 +522,7 @@ class Orchestrator:
 
                         # Fail iteration if no changes detected (guardrail enforcement)
                         if not changes.has_changes:
-                            snapshot.phase = Phase.BLOCKED
+                            snapshot.phase = "blocked"
                             snapshot.notes = (
                                 "Implementation phase produced no repository changes. "
                                 "Claude must modify files, stage changes, or create commits."
@@ -555,23 +567,23 @@ class Orchestrator:
 
             # Evaluate transitions
             guard_result = self.workflow_executor.guard_evaluator.evaluate_transitions(
-                current_phase=current_phase.value,
+                current_phase=current_phase,
                 workflow_graph=self.workflow_graph,
                 guard_context=guard_context,
             )
 
             # Convert to TransitionDecision format
             if guard_result.next_phase:
-                next_phase_enum = Phase(guard_result.next_phase)
+                next_phase_name = guard_result.next_phase
                 decision = TransitionDecision(
-                    next_phase=next_phase_enum,
+                    next_phase=next_phase_name,
                     rationale=guard_result.rationale,
                     requires_human=False,  # Guards determine this
                 )
             else:
                 # No guards passed - blocked
                 decision = TransitionDecision(
-                    next_phase=Phase.BLOCKED,
+                    next_phase="blocked",
                     rationale=guard_result.rationale,
                     requires_human=True,
                 )
@@ -632,7 +644,7 @@ class Orchestrator:
 
             # ──── Edge Case: Human Approval Required ────
             if decision.requires_human and self.config.workflow.require_human_approval:
-                snapshot.phase = Phase.BLOCKED
+                snapshot.phase = "blocked"
                 snapshot.notes = "Awaiting human approval."
                 self.approver.request_approval(snapshot, decision.rationale)
                 break
@@ -642,18 +654,18 @@ class Orchestrator:
             current_phase = decision.next_phase
 
             # Track consecutive replans for guardrail enforcement
-            if prev_phase == Phase.REVIEW and current_phase == Phase.PLAN:
+            if prev_phase == "review" and current_phase == "plan":
                 consecutive_replans += 1
                 snapshot.metadata["consecutive_replans"] = consecutive_replans
                 self.console.log(
                     f"[yellow]Consecutive replans: {consecutive_replans}/{self.config.workflow.max_consecutive_replans}[/]"
                 )
-            elif current_phase == Phase.DONE:
+            elif current_phase == "done":
                 consecutive_replans = 0
                 snapshot.metadata["consecutive_replans"] = 0
 
             self.logger.log_state_transition(
-                snapshot.run_id, iteration, prev_phase.value, current_phase.value, decision.rationale
+                snapshot.run_id, iteration, prev_phase, current_phase, decision.rationale
             )
             self.artifacts.checkpoint(snapshot)
 
@@ -694,8 +706,8 @@ class Orchestrator:
 
         # Log run completion
         status_map = {
-            Phase.DONE: "completed",
-            Phase.BLOCKED: "blocked",
+            "done": "completed",
+            "blocked": "blocked",
         }
         status = status_map.get(snapshot.phase, "unknown")
         self.logger.log_run_complete(
@@ -706,7 +718,7 @@ class Orchestrator:
         self.logger.close()
         return snapshot
 
-    def _compose_request(self, phase: Phase, snapshot: RunSnapshot) -> AssistantRequest:
+    def _compose_request(self, phase: str, snapshot: RunSnapshot) -> AssistantRequest:
         """
         Create the request payload based on the active phase.
 
@@ -743,19 +755,19 @@ class Orchestrator:
         builder = get_builder(phase.value)
         return builder.build(prompt_context)
 
-    def _get_agent_for_phase(self, phase: Phase) -> str:
+    def _get_agent_for_phase(self, phase: str) -> str:
         """Get agent name for a phase (for workflow mode)."""
-        if phase == Phase.PLAN:
+        if phase == "plan":
             return "planner"
-        elif phase == Phase.REVIEW:
+        elif phase == "review":
             return "reviewer"
-        elif phase == Phase.IMPLEMENT:
+        elif phase == "implement":
             return "implementer"
         return "system"
 
     def _update_channels_from_response(
         self,
-        phase: Phase,
+        phase: str,
         response: AssistantResponse,
     ) -> None:
         """
@@ -808,7 +820,7 @@ class Orchestrator:
     def _persist_channel_messages(
         self,
         run_id: str,
-        phase: Phase,
+        phase: str,
         iteration: int,
         state_id: Optional[str] = None,
     ) -> None:
@@ -860,15 +872,15 @@ class Orchestrator:
             except Exception as exc:
                 self.console.log(f"[yellow]Failed to persist message for channel '{channel_name}': {exc}[/]")
 
-    def _select_adapter(self, phase: Phase) -> AssistantAdapter:
-        if phase in (Phase.PLAN, Phase.REVIEW):
+    def _select_adapter(self, phase: str) -> AssistantAdapter:
+        if phase in ("plan", "review"):
             return self.codex_adapter
-        if phase == Phase.IMPLEMENT:
+        if phase == "implement":
             return self.claude_adapter
         return self.codex_adapter
 
     def _persist_interaction(
-        self, run_id: str, phase: Phase, request: AssistantRequest, response: AssistantResponse
+        self, run_id: str, phase: str, request: AssistantRequest, response: AssistantResponse
     ) -> None:
         now = dt.datetime.now(dt.timezone.utc)
         timestamp_iso = now.isoformat()  # For payload
@@ -971,7 +983,7 @@ class Orchestrator:
             snapshot = RunSnapshot(
                 run_id=run_id,
                 iteration=run["iteration"],
-                phase=Phase(run["phase"]),
+                phase=run["phase"],
                 metadata={
                     "started_at": run["started_at"],
                     "consecutive_replans": run.get("consecutive_replans", 0),
@@ -986,7 +998,7 @@ class Orchestrator:
             snapshot = RunSnapshot(
                 run_id=run_id,
                 iteration=0,
-                phase=Phase.PLAN,
+                phase="plan",
                 metadata={
                     "started_at": dt.datetime.now(dt.timezone.utc).isoformat(),
                     "consecutive_replans": 0,
@@ -1047,7 +1059,7 @@ class Orchestrator:
             return {
                 "run_id": run_id,
                 "state_id": active_state["state_id"],
-                "phase": current_phase.value if current_phase else "blocked",
+                "phase": current_phase if current_phase else "blocked",
                 "phase_status": phase_status,
                 "next_action": "blocked",
                 "message": "Run is blocked, requires intervention",
@@ -1058,11 +1070,11 @@ class Orchestrator:
         snapshot.phase = current_phase
         phase_start_time = dt.datetime.now(dt.timezone.utc)
 
-        self.console.rule(f"[bold cyan]{current_phase.value.upper()}[/] (Iteration {snapshot.iteration})")
+        self.console.rule(f"[bold cyan]{current_phase.upper()}[/] (Iteration {snapshot.iteration})")
 
         # Compose request (include feedback if provided)
         request = self._compose_request(current_phase, snapshot)
-        if feedback and current_phase == Phase.PLAN:
+        if feedback and current_phase == "plan":
             # Inject user feedback into plan request
             request.prompt += f"\n\n──── User Feedback ────\n{feedback}\n"
             request.context["user_feedback"] = feedback
@@ -1113,21 +1125,21 @@ class Orchestrator:
                 run_id=run_id,
                 phase_status="blocked",
                 parent_state_id=active_state["state_id"],
-                notes=f"Phase {current_phase.value} failed: {exc}",
+                notes=f"Phase {current_phase} failed: {exc}",
             )
             self.db.update_active_state(run_id, new_state_id)
 
             return {
                 "run_id": run_id,
                 "state_id": new_state_id,
-                "phase": current_phase.value,
+                "phase": current_phase,
                 "phase_status": "blocked",
                 "next_action": "blocked",
                 "message": f"Phase failed: {exc}",
             }
 
         # Extract verdict if REVIEW phase
-        if current_phase == Phase.REVIEW and "verdict" in response.metadata:
+        if current_phase == "review" and "verdict" in response.metadata:
             verdict_str = response.metadata["verdict"]
             if isinstance(verdict_str, str):
                 verdict_lower = verdict_str.lower().strip()
@@ -1159,14 +1171,14 @@ class Orchestrator:
                 run_id=run_id,
                 phase_status="blocked",
                 parent_state_id=active_state["state_id"],
-                notes=f"Empty response in {current_phase.value}",
+                notes=f"Empty response in {current_phase}",
             )
             self.db.update_active_state(run_id, new_state_id)
 
             return {
                 "run_id": run_id,
                 "state_id": new_state_id,
-                "phase": current_phase.value,
+                "phase": current_phase,
                 "phase_status": "blocked",
                 "next_action": "blocked",
                 "message": "Empty response received",
@@ -1174,7 +1186,7 @@ class Orchestrator:
 
         if permission_required and permission_denials:
             decision = TransitionDecision(
-                next_phase=Phase.BLOCKED,
+                next_phase="blocked",
                 rationale=permission_message or "Claude Code requested permission to proceed.",
                 requires_human=True,
             )
@@ -1191,21 +1203,21 @@ class Orchestrator:
             )
 
             guard_result = self.workflow_executor.guard_evaluator.evaluate_transitions(
-                current_phase=current_phase.value,
+                current_phase=current_phase,
                 workflow_graph=self.workflow_graph,
                 guard_context=guard_context,
             )
 
             if guard_result.next_phase:
-                next_phase_enum = Phase(guard_result.next_phase)
+                next_phase_name = guard_result.next_phase
                 decision = TransitionDecision(
-                    next_phase=next_phase_enum,
+                    next_phase=next_phase_name,
                     rationale=guard_result.rationale,
                     requires_human=False,
                 )
             else:
                 decision = TransitionDecision(
-                    next_phase=Phase.BLOCKED,
+                    next_phase="blocked",
                     rationale=guard_result.rationale,
                     requires_human=True,
                 )
@@ -1296,22 +1308,22 @@ class Orchestrator:
         snapshot.iteration = snapshot.iteration
 
         # Update consecutive_replans counter when REVIEW → PLAN
-        if current_phase == Phase.REVIEW and decision.next_phase == Phase.PLAN:
+        if current_phase == "review" and decision.next_phase == "plan":
             consecutive_replans = snapshot.metadata.get("consecutive_replans", 0) + 1
             snapshot.metadata["consecutive_replans"] = consecutive_replans
-        elif decision.next_phase == Phase.DONE:
+        elif decision.next_phase == "done":
             snapshot.metadata["consecutive_replans"] = 0
 
         self.db.update_run(snapshot)
 
         # ──── Determine Next Action ────
         next_action = "continue"
-        if decision.next_phase == Phase.DONE:
+        if decision.next_phase == "done":
             next_action = "done"
-        elif decision.next_phase == Phase.BLOCKED or decision.requires_human:
+        elif decision.next_phase == "blocked" or decision.requires_human:
             next_action = "blocked"
 
-        message = f"Phase {current_phase.value} complete. {decision.rationale}"
+        message = f"Phase {current_phase} complete. {decision.rationale}"
 
         self.console.log(f"[green]State created:[/] {new_state_id}")
         self.console.log(f"[blue]{message}[/]")
@@ -1319,18 +1331,18 @@ class Orchestrator:
         return {
             "run_id": run_id,
             "state_id": new_state_id,
-            "phase": current_phase.value,
+            "phase": current_phase,
             "phase_status": new_phase_status,
             "next_action": next_action,
             "message": message,
         }
 
-    def _parse_phase_status(self, phase_status: str) -> tuple[Optional[Phase], str]:
+    def _parse_phase_status(self, phase_status: str) -> tuple[Optional[str], str]:
         """
         Parse phase status to determine phase and action.
 
         Returns:
-            Tuple of (Phase, action) where action is 'execute', 'done', or 'blocked'
+            Tuple of (phase name, action) where action is 'execute', 'done', or 'blocked'
         """
         if phase_status == "done":
             return None, "done"
@@ -1344,11 +1356,11 @@ class Orchestrator:
 
         phase_name, status = parts
         if phase_name == "plan":
-            phase = Phase.PLAN
+            phase = "plan"
         elif phase_name == "implement":
-            phase = Phase.IMPLEMENT
+            phase = "implement"
         elif phase_name == "review":
-            phase = Phase.REVIEW
+            phase = "review"
         else:
             return None, "blocked"
 
@@ -1356,37 +1368,37 @@ class Orchestrator:
             return phase, "execute"
         elif status == "complete":
             # Phase completed, need to transition to next
-            if phase == Phase.PLAN:
-                return Phase.IMPLEMENT, "execute"
-            elif phase == Phase.IMPLEMENT:
-                return Phase.REVIEW, "execute"
-            elif phase == Phase.REVIEW:
+            if phase == "plan":
+                return "implement", "execute"
+            elif phase == "implement":
+                return "review", "execute"
+            elif phase == "review":
                 # Review complete typically means done
                 return None, "done"
 
         return None, "blocked"
 
-    def _derive_phase_status(self, executed_phase: Phase, next_phase: Phase) -> str:
+    def _derive_phase_status(self, executed_phase: str, next_phase: str) -> str:
         """
         Derive phase status string from executed phase and next phase.
 
         Args:
-            executed_phase: Phase that was just executed
-            next_phase: Phase determined by decision logic
+            executed_phase: str that was just executed
+            next_phase: str determined by decision logic
 
         Returns:
             Phase status string (e.g., 'plan-complete', 'implement-ready')
         """
-        if next_phase == Phase.DONE:
+        if next_phase == "done":
             return "done"
-        if next_phase == Phase.BLOCKED:
+        if next_phase == "blocked":
             return "blocked"
 
         # Map next phase to status
         status_map = {
-            Phase.PLAN: "plan-ready",
-            Phase.IMPLEMENT: "implement-ready",
-            Phase.REVIEW: "review-ready",
+            "plan": "plan-ready",
+            "implement": "implement-ready",
+            "review": "review-ready",
         }
         return status_map.get(next_phase, "blocked")
 

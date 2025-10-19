@@ -75,6 +75,9 @@ def run(
     config: Optional[Path] = typer.Option(
         None, "--config", "-c", help="Path to duet configuration YAML."
     ),
+    workflow: Optional[Path] = typer.Option(
+        None, "--workflow", help="Workflow file path (defaults to .duet/workflow.py)"
+    ),
     run_id: Optional[str] = typer.Option(None, help="Override generated run identifier."),
     quiet: bool = typer.Option(
         False, "--quiet", "-q", help="Disable streaming console output."
@@ -112,7 +115,7 @@ def run(
         console.log("[dim]Using SQLite database for persistence[/]")
 
     try:
-        orchestrator = Orchestrator(duet_config, artifact_store, console=console, db=db)
+        orchestrator = Orchestrator(duet_config, artifact_store, console=console, db=db, workflow_path=workflow)
         orchestrator.run(run_id=run_id)
     except Exception as exc:
         # Handle adapter and orchestration errors with friendly messages
@@ -617,6 +620,9 @@ def next(
     feedback: Optional[str] = typer.Argument(None, help="User feedback to include in the next phase"),
     run_id: Optional[str] = typer.Option(None, "--run-id", help="Run ID to continue (auto-resumes most recent if not provided)"),
     config: Optional[Path] = typer.Option(None, "--config", "-c", help="Config file path."),
+    workflow: Optional[Path] = typer.Option(
+        None, "--workflow", help="Workflow file path (defaults to .duet/workflow.py)"
+    ),
     quiet: bool = typer.Option(False, "--quiet", "-q", help="Disable streaming console output."),
     stream_mode: Optional[str] = typer.Option(None, "--stream-mode", help="Streaming display mode: detailed | compact | off."),
 ) -> None:
@@ -655,7 +661,7 @@ def next(
     artifact_store = ArtifactStore(duet_config.storage.run_artifact_dir, console=console)
 
     # Create orchestrator
-    orchestrator = Orchestrator(duet_config, artifact_store, console=console, db=db)
+    orchestrator = Orchestrator(duet_config, artifact_store, console=console, db=db, workflow_path=workflow)
 
     # Auto-resume: If no run_id specified, find the most recent active run
     if not run_id:
@@ -738,6 +744,9 @@ def next(
 def cont(
     run_id: str = typer.Argument(..., help="Run ID to continue"),
     config: Optional[Path] = typer.Option(None, "--config", "-c", help="Config file path."),
+    workflow: Optional[Path] = typer.Option(
+        None, "--workflow", help="Workflow file path (defaults to .duet/workflow.py)"
+    ),
     max_phases: int = typer.Option(10, help="Maximum phases to execute before stopping"),
     quiet: bool = typer.Option(False, "--quiet", "-q", help="Disable streaming console output."),
     stream_mode: Optional[str] = typer.Option(None, "--stream-mode", help="Streaming display mode: detailed | compact | off."),
@@ -769,7 +778,7 @@ def cont(
     artifact_store = ArtifactStore(duet_config.storage.run_artifact_dir, console=console)
 
     # Create orchestrator
-    orchestrator = Orchestrator(duet_config, artifact_store, console=console, db=db)
+    orchestrator = Orchestrator(duet_config, artifact_store, console=console, db=db, workflow_path=workflow)
 
     console.print(f"[cyan]Continuing run:[/] {run_id}")
     console.print()
