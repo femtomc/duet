@@ -54,12 +54,16 @@ class ToolResult:
     Result from tool execution.
 
     Contains:
-    - Channel updates to apply
+    - Context updates (enrich local facet context, e.g. for prompt building)
+    - Channel updates (write to global dataspace/channels)
     - Metadata to merge into response
     - Optional notes/logs
     - Success/failure status
+
+    Sprint DSL-5: Separated context vs channel updates to avoid conflation.
     """
 
+    context_updates: Dict[str, Any] = field(default_factory=dict)
     channel_updates: Dict[str, Any] = field(default_factory=dict)
     metadata: Dict[str, Any] = field(default_factory=dict)
     notes: Optional[str] = None
@@ -67,9 +71,13 @@ class ToolResult:
     error: Optional[str] = None
 
     @classmethod
-    def ok(cls, **channel_updates) -> ToolResult:
-        """Create a successful result with channel updates."""
-        return cls(channel_updates=channel_updates, success=True)
+    def ok(cls, context: Optional[Dict[str, Any]] = None, channels: Optional[Dict[str, Any]] = None) -> ToolResult:
+        """Create a successful result with updates."""
+        return cls(
+            context_updates=context or {},
+            channel_updates=channels or {},
+            success=True
+        )
 
     @classmethod
     def fail(cls, error: str, notes: Optional[str] = None) -> ToolResult:
@@ -157,11 +165,19 @@ class GitChangeTool(BaseTool):
         Validate that git changes occurred.
 
         Returns:
-            ToolResult indicating success/failure based on git state
+            ToolResult with git status in context (for prompt) and channels (for dataspace)
         """
         # Stub implementation - real logic would check git status
-        # For now, always succeed (implement in future sprint)
-        return ToolResult.ok()
+        # For now, always succeed with stub data
+        git_info = {
+            "has_changes": True,  # Stub
+            "files_changed": 0,
+            "commit": None,
+        }
+        return ToolResult.ok(
+            context={"git_info": git_info},  # Local context for next steps
+            channels={},  # No channel writes unless explicitly declared
+        )
 
 
 @dataclass
@@ -184,5 +200,5 @@ class ApprovalTool(BaseTool):
             ToolResult indicating approval status
         """
         # Stub implementation - real logic would check approval state
-        # For now, always succeed (implement in future sprint)
+        # For now, always succeed with no updates
         return ToolResult.ok()

@@ -255,10 +255,13 @@ def test_tool_with_explicit_channel_writes():
     """Test that ToolStep writes to channels when outputs declared."""
     from duet.dsl.tools import BaseTool, ToolContext, ToolResult
 
-    # Custom tool that returns data
+    # Custom tool that returns data (using new API)
     class DataTool(BaseTool):
         def run(self, context: ToolContext) -> ToolResult:
-            return ToolResult(channel_updates={"processed": "data_value"}, success=True)
+            return ToolResult.ok(
+                context={"processed_internally": "context_value"},
+                channels={"output": "data_value"},  # Key by output channel name
+            )
 
     output_ch = Channel(name="output")
     tool = DataTool(name="data_processor")
@@ -272,10 +275,10 @@ def test_tool_with_explicit_channel_writes():
 
     result = step.execute(context)
 
-    # Tool results in both context and channel writes
+    # Tool results split correctly
     assert result.success
-    assert "processed" in result.context_updates
-    assert "output" in result.channel_writes
+    assert "processed_internally" in result.context_updates  # Context enrichment
+    assert "output" in result.channel_writes  # Channel write
 
 
 def test_phase_get_reads_from_steps():

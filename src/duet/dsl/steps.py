@@ -100,12 +100,14 @@ class StepResult:
     - Channel writes to apply
     - Metadata to merge
     - Success/failure status
+    - Blocked flag (for human approval pauses)
     """
 
     context_updates: Dict[str, Any] = field(default_factory=dict)
     channel_writes: Dict[str, Any] = field(default_factory=dict)
     metadata: Dict[str, Any] = field(default_factory=dict)
     success: bool = True
+    blocked: bool = False  # True for human approval pauses (not failures)
     error: Optional[str] = None
     notes: Optional[str] = None
 
@@ -118,6 +120,11 @@ class StepResult:
     def fail(cls, error: str) -> StepResult:
         """Create failed result."""
         return cls(success=False, error=error)
+
+    @classmethod
+    def pause(cls, reason: str) -> StepResult:
+        """Create paused result (human approval needed)."""
+        return cls(success=True, blocked=True, notes=reason)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -213,20 +220,23 @@ class ToolStep:
         if not tool_result.success:
             return StepResult.fail(tool_result.error or "Tool execution failed")
 
-        # Merge results
-        context_updates = tool_result.channel_updates if self.into_context else {}
+        # Tool results are now split:
+        # - context_updates: enrich local facet context (for prompt building, etc.)
+        # - channel_updates: write to global dataspace (if tool declares them)
 
-        # Channel writes only if outputs explicitly declared
+        # Merge context updates if requested
+        context_updates = tool_result.context_updates if self.into_context else {}
+
+        # Channel writes from tool's channel_updates OR explicit outputs mapping
         channel_writes = {}
         if self.outputs:
-            # Map tool results to declared output channels
-            for i, channel in enumerate(self.outputs):
-                # Use first/only result, or look for channel name in results
+            # Map tool channel_updates to declared output channels
+            for channel in self.outputs:
                 if channel.name in tool_result.channel_updates:
                     channel_writes[channel.name] = tool_result.channel_updates[channel.name]
-                elif len(tool_result.channel_updates) == 1:
-                    # Single result - write to this channel
-                    channel_writes[channel.name] = list(tool_result.channel_updates.values())[0]
+        else:
+            # No outputs declared - use tool's channel_updates directly
+            channel_writes = tool_result.channel_updates
 
         return StepResult(
             context_updates=context_updates,
@@ -301,14 +311,10 @@ class HumanStep:
             context: Facet execution context
 
         Returns:
-            StepResult indicating approval needed
+            StepResult with blocked=True (not a failure, just paused)
         """
-        # Stub: actual approval handling in orchestrator
-        return StepResult(
-            metadata={"human_step": True, "reason": self.reason},
-            notes=f"Human approval needed: {self.reason}",
-            success=False,  # Signals orchestrator to pause
-        )
+        # Use pause() to distinguish from failures
+        return StepResult.pause(f"Human approval needed: {self.reason}")
 
 
 @dataclass

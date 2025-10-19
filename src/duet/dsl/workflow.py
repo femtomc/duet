@@ -396,12 +396,13 @@ class Phase(BaseElement):
     name: str
     agent: str
     id: Optional[str] = None
-    consumes: List[Channel] = field(default_factory=list)  # Deprecated - use steps
-    publishes: List[Channel] = field(default_factory=list)  # Deprecated - use steps
+    # TODO(DSL-cleanup): Remove deprecated fields once all workflows migrated to steps
+    consumes: List[Channel] = field(default_factory=list)  # Deprecated - use get_reads()
+    publishes: List[Channel] = field(default_factory=list)  # Deprecated - use get_writes()
     description: str = ""
     is_terminal: bool = False
     metadata: Dict[str, Any] = field(default_factory=dict)
-    tools: List[Any] = field(default_factory=list)  # Deprecated - use steps
+    tools: List[Any] = field(default_factory=list)  # Deprecated - use ToolStep in steps
     steps: List[Any] = field(default_factory=list)  # List[PhaseStep] - facet script
 
     def __post_init__(self):
@@ -670,6 +671,25 @@ class Phase(BaseElement):
         step = WriteStep(channel=channel, value_key=value_key, static_value=value)
         new_steps = list(self.steps) + [step]
         return replace(self, steps=new_steps)
+
+    # ──── Step Validation (Sprint DSL-3+) ────
+
+    def validate_step_ordering(self) -> List[str]:
+        """
+        Validate that steps are in a sensible order.
+
+        TODO(step-validation): Implement ordering rules:
+        - ReadSteps should come before steps that use their data
+        - AgentStep should have reads available
+        - Multiple agents need write separation
+        - HumanStep should not block other steps unnecessarily
+
+        Returns:
+            List of validation error messages (empty if valid)
+        """
+        # TODO: Implement step ordering validation
+        # For now, return empty (no validation)
+        return []
 
     # ──── Step Introspection (Sprint DSL-3) ────
 

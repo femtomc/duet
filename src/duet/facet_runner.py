@@ -122,34 +122,29 @@ class FacetRunner:
                 else:
                     result = StepResult.fail(f"Unknown step type: {type(step)}")
 
-                # Check for special step types first (before checking success)
-                if isinstance(step, HumanStep):
-                    # Human approval needed - pause execution (treat as success)
-                    step_logs.append({
-                        "step_index": i,
-                        "step_type": step.__class__.__name__,
-                        "success": True,  # Not a failure, just paused
-                        "error": None,
-                        "notes": result.notes,
-                    })
-                    return FacetExecutionResult(
-                        context=context,
-                        channel_writes=staged_writes,
-                        human_approval_needed=True,
-                        approval_reason=step.reason,
-                        success=True,
-                        step_logs=step_logs,
-                    )
-
                 # Log step execution
                 step_logs.append({
                     "step_index": i,
                     "step_type": step.__class__.__name__,
                     "success": result.success,
+                    "blocked": result.blocked,
                     "error": result.error,
                     "notes": result.notes,
                 })
 
+                # Check for blocked state (human approval pause)
+                if result.blocked:
+                    # Not a failure, execution paused for human
+                    return FacetExecutionResult(
+                        context=context,
+                        channel_writes=staged_writes,
+                        human_approval_needed=True,
+                        approval_reason=result.notes or "Approval required",
+                        success=True,
+                        step_logs=step_logs,
+                    )
+
+                # Check for failure
                 if not result.success:
                     # Step failed - return early
                     return FacetExecutionResult(

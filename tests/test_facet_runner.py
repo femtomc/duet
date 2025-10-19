@@ -88,7 +88,7 @@ def test_facet_runner_human_step_pauses():
     # Execution paused at human step
     assert result.success  # No error, just paused
     assert result.human_approval_needed
-    assert result.approval_reason == "Approval needed before planning"
+    assert "Approval needed before planning" in result.approval_reason
     # Agent step should not have executed
     assert len(result.step_logs) == 2  # ReadStep + HumanStep only
 
@@ -189,10 +189,13 @@ def test_facet_runner_context_accumulation():
     """Test that context accumulates results across steps."""
     from duet.dsl.tools import BaseTool, ToolContext, ToolResult
 
-    # Tool that adds to context
+    # Tool that adds to context (using new API)
     class DataTool(BaseTool):
         def run(self, context: ToolContext) -> ToolResult:
-            return ToolResult(channel_updates={"computed": "result_value"}, success=True)
+            return ToolResult.ok(
+                context={"computed": "result_value"},  # Context enrichment
+                channels={},  # No channel writes
+            )
 
     task = Channel(name="task")
     output = Channel(name="output")
@@ -200,7 +203,7 @@ def test_facet_runner_context_accumulation():
     phase = (
         Phase(name="compute", agent="worker")
         .read(task)
-        .tool(DataTool(name="processor"))
+        .tool(DataTool(name="processor"))  # Context only
         .write(output, value_key="computed")  # Use tool result from context
     )
 
@@ -216,5 +219,5 @@ def test_facet_runner_context_accumulation():
     assert result.success
     # Tool result should be in context
     assert result.context.get("computed") == "result_value"
-    # And written to output channel
+    # And written to output channel via WriteStep
     assert result.channel_writes["output"] == "result_value"
