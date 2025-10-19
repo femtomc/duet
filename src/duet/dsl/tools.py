@@ -71,11 +71,17 @@ class ToolResult:
     error: Optional[str] = None
 
     @classmethod
-    def ok(cls, context: Optional[Dict[str, Any]] = None, channels: Optional[Dict[str, Any]] = None) -> ToolResult:
-        """Create a successful result with updates."""
+    def ok(cls, context_updates: Optional[Dict[str, Any]] = None, channel_updates: Optional[Dict[str, Any]] = None) -> ToolResult:
+        """
+        Create a successful result with updates.
+
+        Args:
+            context_updates: Updates to local facet context (for prompt building)
+            channel_updates: Writes to global dataspace channels
+        """
         return cls(
-            context_updates=context or {},
-            channel_updates=channels or {},
+            context_updates=context_updates or {},
+            channel_updates=channel_updates or {},
             success=True
         )
 
@@ -153,7 +159,31 @@ class GitChangeTool(BaseTool):
     """
     Tool that validates git changes were made.
 
-    Checks git status and fails if require_changes=True but no changes detected.
+    **Requirements:**
+    - Requires git repository in workspace_root
+    - Executes 'git status --porcelain' and 'git rev-parse HEAD'
+    - Safe for large repos (only checks status, doesn't diff content)
+
+    **Behavior:**
+    - If require_changes=True: Fails if working tree is clean
+    - If require_changes=False: Always succeeds, provides git info
+    - If git_available=False: Skips validation gracefully
+
+    **Context Enrichment:**
+    Adds git_info to context for use in agent prompts:
+    - has_changes: bool
+    - status_output: str (git status output)
+    - commit: str (current commit SHA)
+
+    **Usage:**
+    ```python
+    implement = (
+        Phase(name="implement", agent="dev")
+        .read(plan)
+        .call_agent("dev", writes=[code])
+        .requires_git()  # Adds GitChangeTool(require_changes=True)
+    )
+    ```
     """
 
     name: str = "git_change_validator"
@@ -170,8 +200,8 @@ class GitChangeTool(BaseTool):
         if not context.git_available:
             # No git repo - skip validation
             return ToolResult.ok(
-                context={"git_info": {"available": False}},
-                channels={},
+                context_updates={"git_info": {"available": False}},
+                channel_updates={},
             )
 
         # Check git status via subprocess
@@ -212,8 +242,8 @@ class GitChangeTool(BaseTool):
                 )
 
             return ToolResult.ok(
-                context={"git_info": git_info},
-                channels={},  # Can write to channel if outputs declared
+                context_updates={"git_info": git_info},
+                channel_updates={},  # Can write to channel if outputs declared
             )
 
         except Exception as exc:

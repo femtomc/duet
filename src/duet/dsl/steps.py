@@ -290,12 +290,22 @@ class HumanStep:
     """
     Step that requires human interaction/approval.
 
-    Suspends facet execution until human responds. In future sprints,
-    this will create conversation facts (ApprovalNeeded/ApprovalGranted).
+    **Pause Semantics:**
+    HumanStep intentionally pauses facet execution by returning
+    StepResult.pause() (blocked=True). This is NOT a failure - it signals
+    the orchestrator to suspend the workflow and wait for manual intervention.
+
+    The orchestrator will:
+    1. Mark run as blocked with approval_reason
+    2. Stop executing further steps
+    3. Wait for 'duet next' with approval/feedback
+
+    **Future:** Will create ApprovalRequest/ApprovalGrant conversation facts
+    in the dataspace for reactive approval workflows.
 
     Attributes:
         reason: Human-readable reason for approval
-        reads: Channels to present to human
+        reads: Channels to present to human for context
         timeout: Optional timeout in seconds
     """
 
@@ -305,13 +315,13 @@ class HumanStep:
 
     def execute(self, context: FacetContext) -> StepResult:
         """
-        Request human approval (stub - real implementation in orchestrator).
+        Request human approval by pausing execution.
 
         Args:
             context: Facet execution context
 
         Returns:
-            StepResult with blocked=True (not a failure, just paused)
+            StepResult with blocked=True (pause, not failure)
         """
         # Use pause() to distinguish from failures
         return StepResult.pause(f"Human approval needed: {self.reason}")

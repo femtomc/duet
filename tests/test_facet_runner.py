@@ -207,8 +207,8 @@ def test_facet_runner_context_accumulation():
     class DataTool(BaseTool):
         def run(self, context: ToolContext) -> ToolResult:
             return ToolResult.ok(
-                context={"computed": "result_value"},  # Context enrichment
-                channels={},  # No channel writes
+                context_updates={"computed": "result_value"},  # Context enrichment
+                channel_updates={},  # No channel writes
             )
 
     task = Channel(name="task")

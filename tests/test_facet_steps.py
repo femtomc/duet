@@ -246,8 +246,8 @@ def test_tool_with_explicit_channel_writes():
     class DataTool(BaseTool):
         def run(self, context: ToolContext) -> ToolResult:
             return ToolResult.ok(
-                context={"processed_internally": "context_value"},
-                channels={"output": "data_value"},  # Key by output channel name
+                context_updates={"processed_internally": "context_value"},
+                channel_updates={"output": "data_value"},
             )
 
     output_ch = Channel(name="output")
