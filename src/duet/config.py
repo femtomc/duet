@@ -30,6 +30,10 @@ class AssistantConfig(BaseModel):
     cli_path: Optional[str] = Field(
         None, description="Custom path to CLI executable (defaults to adapter name in PATH)"
     )
+    auto_approve: bool = Field(
+        False,
+        description="Allow adapter to apply changes without confirmation prompts (use with caution)",
+    )
 
 
 class WorkflowConfig(BaseModel):

@@ -430,6 +430,17 @@ class Orchestrator:
             # ──── Update Channels ────
             self._update_channels_from_response(current_phase, response)
 
+            # ──── Permission Check ────
+            permission_denials = response.metadata.get("permission_denials") if response.metadata else None
+            permission_required = response.metadata.get("permission_required") if response.metadata else False
+            if permission_required and permission_denials:
+                self.console.log(
+                    "[yellow]Claude Code requested permission; review required before continuing.[/]"
+                )
+                permission_message = "Claude Code requested permission to proceed with implementation."
+            else:
+                permission_message = None
+
             # ──── Persist Channel Messages ────
             if self.db and self.workflow_executor:
                 self._persist_channel_messages(
@@ -1130,6 +1141,15 @@ class Orchestrator:
         # ──── Update Channels ────
         self._update_channels_from_response(current_phase, response)
 
+        permission_denials = response.metadata.get("permission_denials")
+        permission_required = response.metadata.get("permission_required")
+        permission_message = None
+        if permission_required and permission_denials:
+            permission_message = "Claude Code requested permission to proceed with implementation."
+            self.console.log(
+                "[yellow]Claude Code requested permission; review required before continuing.[/]"
+            )
+
         # Check for empty response
         if not response.content or not response.content.strip():
             self.console.log("[yellow]Empty response detected[/]")
@@ -1152,40 +1172,43 @@ class Orchestrator:
                 "message": "Empty response received",
             }
 
-        # ──── Decide Next Phase ────
-        # Sprint 10: Use WorkflowExecutor guard evaluation (required)
-        if not self.workflow_executor:
-            raise RuntimeError("Workflow executor required (ensure .duet/workflow.py exists)")
-
-        # Build guard context
-        guard_context = self.workflow_executor.guard_evaluator.build_guard_context(
-            self.workflow_executor.channel_store,
-            response=response,
-            git_changes=response.metadata.get("git_changes"),
-        )
-
-        # Evaluate transitions
-        guard_result = self.workflow_executor.guard_evaluator.evaluate_transitions(
-            current_phase=current_phase.value,
-            workflow_graph=self.workflow_graph,
-            guard_context=guard_context,
-        )
-
-        # Convert to TransitionDecision format
-        if guard_result.next_phase:
-            next_phase_enum = Phase(guard_result.next_phase)
-            decision = TransitionDecision(
-                next_phase=next_phase_enum,
-                rationale=guard_result.rationale,
-                requires_human=False,
-            )
-        else:
-            # No guards passed - blocked
+        if permission_required and permission_denials:
             decision = TransitionDecision(
                 next_phase=Phase.BLOCKED,
-                rationale=guard_result.rationale,
+                rationale=permission_message or "Claude Code requested permission to proceed.",
                 requires_human=True,
             )
+            response.metadata.setdefault("notes", permission_message)
+            response.metadata["permission_denials"] = permission_denials
+        else:
+            if not self.workflow_executor:
+                raise RuntimeError("Workflow executor required (ensure .duet/workflow.py exists)")
+
+            guard_context = self.workflow_executor.guard_evaluator.build_guard_context(
+                self.workflow_executor.channel_store,
+                response=response,
+                git_changes=response.metadata.get("git_changes"),
+            )
+
+            guard_result = self.workflow_executor.guard_evaluator.evaluate_transitions(
+                current_phase=current_phase.value,
+                workflow_graph=self.workflow_graph,
+                guard_context=guard_context,
+            )
+
+            if guard_result.next_phase:
+                next_phase_enum = Phase(guard_result.next_phase)
+                decision = TransitionDecision(
+                    next_phase=next_phase_enum,
+                    rationale=guard_result.rationale,
+                    requires_human=False,
+                )
+            else:
+                decision = TransitionDecision(
+                    next_phase=Phase.BLOCKED,
+                    rationale=guard_result.rationale,
+                    requires_human=True,
+                )
 
         # ──── Persist Iteration ────
         git_meta = response.metadata.get("git_changes", {})

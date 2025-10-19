@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+import os
 import json
 import queue
 import subprocess
@@ -44,6 +45,7 @@ class ClaudeCodeAdapter(AssistantAdapter):
         self.timeout = kwargs.get("timeout", 600)  # Longer default for code operations
         self.workspace_root = kwargs.get("workspace_root", ".")
         self.cli_path = kwargs.get("cli_path", "claude")
+        self.auto_approve = bool(kwargs.get("auto_approve", False))
 
     def stream(
         self,
@@ -70,22 +72,42 @@ class ClaudeCodeAdapter(AssistantAdapter):
             ClaudeCodeError: If the CLI invocation fails or returns invalid data
         """
         try:
+            # Build command to run Claude CLI in non-interactive mode
+            cmd = [
+                self.cli_path,
+                "--print",
+                "--output-format",
+                "json",
+                "--model",
+                self.model,
+                request.prompt,
+            ]
+
+            if self.auto_approve:
+                cmd.extend(
+                    [
+                        "--permission-mode",
+                        "bypassPermissions",
+                        "--dangerously-skip-permissions",
+                    ]
+                )
+
+            env = os.environ.copy()
+            debug_dir = env.setdefault("CLAUDE_CODE_DEBUG_LOGS_DIR", "/tmp/claude-code-debug")
+            try:
+                os.makedirs(debug_dir, exist_ok=True)
+            except Exception:
+                # If we can't create the directory, let the CLI handle it.
+                pass
+
             # Invoke Claude CLI with Popen for streaming
-            # Format: claude --print --output-format json --model <model> <prompt>
             process = subprocess.Popen(
-                [
-                    self.cli_path,
-                    "--print",  # Non-interactive mode
-                    "--output-format",
-                    "json",
-                    "--model",
-                    self.model,
-                    request.prompt,  # Positional argument
-                ],
+                cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
                 cwd=self.workspace_root,  # Workspace context
+                env=env,
             )
 
             # Track metadata across stream
@@ -299,8 +321,12 @@ class ClaudeCodeAdapter(AssistantAdapter):
         Returns:
             Tuple of (canonical_event_type, enriched_fields_dict)
         """
-        enriched = {}
+        enriched: Dict[str, Any] = {}
         raw_type = event_data.get("type", "output")
+
+        # Capture permission denials if present
+        if event_data.get("permission_denials"):
+            enriched["permission_denials"] = event_data["permission_denials"]
 
         # Claude Code typically sends a "result" type with the final response
         if raw_type == "result" or "result" in event_data:
@@ -367,11 +393,11 @@ class ClaudeCodeAdapter(AssistantAdapter):
         metadata["raw_response_keys"] = list(data.keys())
 
         # Capture code-specific metadata if present
-        if "files_modified" in data:
-            metadata["files_modified"] = data["files_modified"]
-        if "commands_executed" in data:
-            metadata["commands_executed"] = data["commands_executed"]
-        if "commit_sha" in data:
-            metadata["commit_sha"] = data["commit_sha"]
+        for key in ("files_modified", "commands_executed", "commit_sha", "permission_denials"):
+            if key in data:
+                metadata[key] = data[key]
+
+        if metadata.get("permission_denials"):
+            metadata["permission_required"] = True
 
         return AssistantResponse(content=str(content), concluded=bool(concluded), metadata=metadata)

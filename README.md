@@ -60,6 +60,10 @@ duet run            # automatic loop
 | `.duet/duet.db` | SQLite database (runs, states, messages, events) |
 | `.duet/context/` | Repository discovery notes |
 
+### Adapter configuration
+
+Each assistant entry in `.duet/duet.yaml` maps to a CLI provider. Fields like `timeout` or `cli_path` let you customise invocation. For Claude Code you may set `auto_approve: true` to skip permission prompts and apply edits automatically—only enable this in trusted environments.
+
 ## Workflow at a Glance
 
 ```python
