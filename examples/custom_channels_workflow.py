@@ -20,36 +20,43 @@ from duet.dsl import Agent, Channel, Phase, Transition, When, Workflow
 
 workflow = Workflow(
     # ──── Agents ────
-    # Define agents for each phase
+    # Define agents with inline configuration (no duet.yaml needed!)
     agents=[
         Agent(
             name="planner",
-            provider="echo",  # Replace with "codex" in production
+            provider="codex",
             model="gpt-5-codex",
+            timeout=300,  # 5 minute timeout for planning
             description="Creates implementation plans",
         ),
         Agent(
             name="implementer",
-            provider="echo",  # Replace with "claude-code" in production
+            provider="claude-code",
             model="sonnet",
-            description="Implements code changes",
+            auto_approve=True,  # Autonomous execution for implementations
+            timeout=900,  # 15 minute timeout for complex changes
+            description="Implements code changes autonomously",
         ),
         Agent(
             name="tester",
-            provider="echo",  # Replace with "codex" in production
+            provider="codex",
             model="gpt-5-codex",
+            timeout=600,  # 10 minute timeout for test execution
             description="Runs tests and analyzes results",
         ),
         Agent(
             name="documenter",
-            provider="echo",  # Replace with "claude-code" in production
+            provider="claude-code",
             model="sonnet",
+            auto_approve=True,  # Autonomous doc updates
+            timeout=300,  # 5 minute timeout for docs
             description="Updates documentation",
         ),
         Agent(
             name="reviewer",
-            provider="echo",  # Replace with "codex" in production
+            provider="codex",
             model="gpt-5-codex",
+            timeout=300,  # 5 minute timeout for review
             description="Final quality review",
         ),
     ],

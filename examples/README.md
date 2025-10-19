@@ -49,31 +49,54 @@ PLAN → IMPLEMENT → TEST → [pass] → DOCUMENT → REVIEW → DONE
    duet init  # Creates .duet/workflow.py with default template
    ```
 
-2. **Define your workflow**:
-   - **Agents**: Who performs each phase (codex, claude-code, echo)
-   - **Channels**: What data flows between phases
-   - **Phases**: Steps in your workflow (consumes → publishes)
-   - **Transitions**: How to move between phases (with guards)
+2. **Define your workflow with inline agent config**:
+   ```python
+   from duet.dsl import Agent, Channel, Phase, Transition, Workflow
+
+   workflow = Workflow(
+       agents=[
+           Agent(
+               name="implementer",
+               provider="claude-code",
+               model="sonnet",
+               auto_approve=True,  # Inline config - no duet.yaml needed!
+               timeout=600,
+           ),
+       ],
+       channels=[...],
+       phases=[...],
+       transitions=[...],
+   )
+   ```
+
+   **Agent Configuration**:
+   - **provider**: "codex", "claude-code", or "echo"
+   - **model**: Model identifier
+   - **auto_approve**: Skip permission prompts (use with caution)
+   - **timeout**: Max execution time in seconds
+   - **cli_path**: Custom CLI executable path
+   - **description**: Human-readable description
 
 3. **Validate**:
    ```bash
    duet lint  # Catches errors before running
    ```
 
-4. **Test with echo adapter**:
-   ```yaml
-   # In .duet/duet.yaml:
-   codex:
-     provider: "echo"
-   claude:
-     provider: "echo"
+4. **Run**:
+   ```bash
+   duet run --workflow .duet/workflow.py    # Use specific workflow
+   duet run                                  # Use default .duet/workflow.py
    ```
 
-5. **Run**:
-   ```bash
-   duet run      # Automatic loop
-   duet next     # Step-by-step
-   ```
+### Configuration Precedence
+
+**Inline (workflow.py)** → **Override (duet.yaml)** → **Adapter defaults**
+
+- Workflow defines base capabilities (auto_approve, timeouts)
+- duet.yaml can override for security (credentials, paths)
+- Adapter defaults fill in unspecified values
+
+This allows workflows to be **self-contained and portable** while keeping secrets external.
 
 ## Tips
 

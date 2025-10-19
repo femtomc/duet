@@ -239,11 +239,13 @@ class Agent:
 
     Attributes:
         name: Unique identifier for the agent
-        provider: Provider name (codex, claude, echo)
+        provider: Provider name (codex, claude-code, echo)
         model: Model identifier
         timeout: Optional timeout in seconds
         cli_path: Optional custom CLI path
         api_key_env: Optional environment variable for API key
+        auto_approve: Skip permission prompts (Claude Code only, use with caution)
+        description: Human-readable description (optional)
     """
 
     name: str
@@ -252,6 +254,8 @@ class Agent:
     timeout: Optional[int] = None
     cli_path: Optional[str] = None
     api_key_env: Optional[str] = None
+    auto_approve: bool = False
+    description: str = ""
 
     def __post_init__(self):
         if not self.name:
@@ -260,6 +264,27 @@ class Agent:
             raise ValueError("Agent provider cannot be empty")
         if not self.model:
             raise ValueError("Agent model cannot be empty")
+
+    def to_adapter_config(self) -> dict:
+        """
+        Convert Agent to adapter configuration kwargs.
+
+        Returns a dictionary suitable for passing to adapter constructors.
+        """
+        config = {
+            "provider": self.provider,
+            "model": self.model,
+        }
+        if self.timeout is not None:
+            config["timeout"] = self.timeout
+        if self.cli_path is not None:
+            config["cli_path"] = self.cli_path
+        if self.api_key_env is not None:
+            config["api_key_env"] = self.api_key_env
+        if self.auto_approve:
+            config["auto_approve"] = self.auto_approve
+
+        return config
 
 
 @dataclass

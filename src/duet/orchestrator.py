@@ -873,11 +873,61 @@ class Orchestrator:
                 self.console.log(f"[yellow]Failed to persist message for channel '{channel_name}': {exc}[/]")
 
     def _select_adapter(self, phase: str) -> AssistantAdapter:
-        if phase in ("plan", "review"):
+        """
+        Select adapter for a phase based on workflow definition.
+
+        Uses the phase's agent assignment from the workflow, then builds
+        an adapter from the agent's configuration merged with duet.yaml overrides.
+
+        Fallback: Use legacy codex/claude mapping if workflow doesn't specify agent.
+        """
+        # Get phase definition from workflow
+        phase_def = self.workflow_graph.phases.get(phase)
+        if not phase_def or not phase_def.agent:
+            # Fallback to legacy mapping
+            if phase in ("plan", "review"):
+                return self.codex_adapter
+            if phase == "implement":
+                return self.claude_adapter
             return self.codex_adapter
-        if phase == "implement":
-            return self.claude_adapter
-        return self.codex_adapter
+
+        # Get agent from workflow
+        agent_name = phase_def.agent
+        agent_def = self.workflow_graph.agents.get(agent_name)
+        if not agent_def:
+            self.console.log(f"[yellow]Warning: Agent '{agent_name}' not found in workflow, using fallback[/]")
+            return self.codex_adapter
+
+        # Build adapter from DSL agent config
+        adapter_config = agent_def.to_adapter_config()
+
+        # Merge with duet.yaml overrides (yaml takes precedence for security-sensitive fields)
+        # This allows credentials/timeouts to be centralized while workflow specifies capabilities
+        yaml_override = None
+        if agent_def.provider == "codex":
+            yaml_override = self.config.codex
+        elif agent_def.provider in ("claude-code", "claude"):
+            yaml_override = self.config.claude
+
+        if yaml_override:
+            # YAML overrides DSL for security-sensitive fields
+            if yaml_override.api_key_env is not None:
+                adapter_config["api_key_env"] = yaml_override.api_key_env
+            if yaml_override.timeout is not None:
+                adapter_config["timeout"] = yaml_override.timeout
+            if yaml_override.cli_path is not None:
+                adapter_config["cli_path"] = yaml_override.cli_path
+            # auto_approve can be overridden by YAML for safety
+            if hasattr(yaml_override, 'auto_approve') and yaml_override.auto_approve:
+                adapter_config["auto_approve"] = yaml_override.auto_approve
+
+        # Add workspace_root
+        adapter_config["workspace_root"] = str(self.config.storage.workspace_root)
+
+        # Build adapter
+        from .adapters import REGISTRY
+        adapter = REGISTRY.resolve(adapter_config["provider"], **adapter_config)
+        return adapter
 
     def _persist_interaction(
         self, run_id: str, phase: str, request: AssistantRequest, response: AssistantResponse
