@@ -23,13 +23,13 @@ workflow = Workflow(
             name="planner",
             provider="codex",
             model="gpt-5-codex",
-            timeout=300,  # Optional: timeout in seconds
+            # timeout=300,  # Optional: uncomment to set timeout in seconds
         ),
         Agent(
             name="implementer",
             provider="claude",
             model="sonnet",
-            timeout=600,  # Longer timeout for implementation
+            # timeout=600,  # Optional: uncomment to set timeout in seconds
         ),
         Agent(
             name="reviewer",

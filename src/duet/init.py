@@ -173,13 +173,13 @@ See https://github.com/femtomc/duet for full documentation.
 codex:
   provider: "codex"
   model: "{self.model_codex}"
-  timeout: 300
+  # timeout: 300  # Optional: uncomment to set timeout in seconds
 
 # ──── Claude Code Configuration (Implementation) ────
 claude:
   provider: "claude-code"
   model: "{self.model_claude}"
-  timeout: 600
+  # timeout: 600  # Optional: uncomment to set timeout in seconds
 
 # ──── Workflow Settings ────
 workflow:
@@ -265,8 +265,8 @@ from duet.dsl import Agent, Channel, Phase, Transition, When, Workflow
 
 workflow = Workflow(
     agents=[
-        Agent(name="planner", provider="codex", model="gpt-5-codex", timeout=300),
-        Agent(name="implementer", provider="claude", model="sonnet", timeout=600),
+        Agent(name="planner", provider="codex", model="gpt-5-codex"),
+        Agent(name="implementer", provider="claude", model="sonnet"),
         Agent(name="reviewer", provider="codex", model="gpt-5-codex"),
     ],
     channels=[
@@ -366,7 +366,7 @@ Be concise but comprehensive. This will help the orchestrator understand the cod
             from rich.live import Live
             from rich.panel import Panel
 
-            adapter = CodexAdapter(model=self.model_codex, timeout=120)
+            adapter = CodexAdapter(model=self.model_codex)
             request = AssistantRequest(
                 role="discovery",
                 prompt=discovery_prompt,
