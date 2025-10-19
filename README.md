@@ -10,7 +10,9 @@ This is a programmable agentic orchestration tool -- it's a kind of swiss army w
 
 Many agentic IDEs (Codex, Claude Code, Kiro) bake in opinions about the _interaction model_ through which the user engages with their agents -- Duet is designed to be programmable enough to _recover_ those interaction models as programs (for example: the "spec-driven development" interaction model from a system like Kiro is a Duet program).
 
-These interaction models take the form of _workflow programs_ (in a lightweight Python DSL) and are executed by a graph-driven workflow executor with channel-based message passing. Duet's backend takes care of a bunch of other things that you'd probably find yourself wanting: the ability to jump backwards and forwards in the history of the workflow, the ability to query and inspect _everything_, etc.
+These interaction models take the form of _workflow programs_ (in a lightweight Python DSL) which are executed by a graph-driven workflow executor with channel-based message passing.
+
+Duet's backend takes care of a bunch of other things that you'd probably find yourself wanting: the ability to jump backwards and forwards in the history of the workflow (persistence), the ability to query and inspect _everything_, etc.
 
 In short, it's a programmable agentic CLI IDE.
 
