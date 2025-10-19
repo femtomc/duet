@@ -22,7 +22,6 @@ from .dsl.steps import (
     WriteStep,
 )
 from .dsl.workflow import Phase
-from .dataspace import ChannelFact, FactPattern
 from .models import AssistantRequest, AssistantResponse
 
 
@@ -90,27 +89,11 @@ class FacetRunner:
         Returns:
             FacetExecutionResult with context, writes, and execution info
         """
-        # Initialize facet context by querying dataspace for channel facts
-        reads = phase.get_reads()
-        fact_reads = {}
-
-        for ch in reads:
-            # Query dataspace for latest ChannelFact for this channel
-            pattern = FactPattern(fact_type=ChannelFact, constraints={"channel_name": ch.name})
-            facts = dataspace.query(pattern, latest_only=True)
-
-            if facts:
-                # Use latest fact's value
-                fact_reads[ch.name] = facts[0].value
-            else:
-                # No fact yet - channel empty
-                fact_reads[ch.name] = None
-
+        # Initialize facet context (facts loaded on-demand by ReadStep)
         context = FacetContext(
             phase_name=phase.name,
             run_id=run_id,
             iteration=iteration,
-            fact_reads=fact_reads,
             workspace_root=workspace_root,
         )
 
@@ -187,22 +170,10 @@ class FacetRunner:
                     step_logs=step_logs,
                 )
 
-        # All steps completed successfully - assert staged writes as facts
-        for channel_name, value in staged_writes.items():
-            fact_id = f"{run_id}_{channel_name}_{iteration}"
-            fact = ChannelFact(
-                fact_id=fact_id,
-                channel_name=channel_name,
-                value=value,
-                iteration=iteration,
-                phase=phase.name,
-            )
-            handle = dataspace.assert_fact(fact)
-            context.add_handle(handle)
-
+        # All steps completed successfully
         return FacetExecutionResult(
             context=context,
-            channel_writes=staged_writes,  # Keep for compat (TODO: remove)
+            channel_writes={},  # Empty - facts asserted directly by WriteStep
             success=True,
             step_logs=step_logs,
         )

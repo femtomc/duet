@@ -77,17 +77,15 @@ class Guard:
     """
     Base class for transition guards (predicates).
 
-    Guards determine whether a transition should fire based on runtime state.
-    Modern guards query the dataspace for facts; legacy guards use context dict.
+    Guards determine whether a transition should fire by querying the dataspace.
     """
 
-    def evaluate(self, context: Dict[str, Any], dataspace=None) -> bool:
+    def evaluate(self, dataspace) -> bool:
         """
         Evaluate the guard predicate.
 
         Args:
-            context: Runtime context (response, metadata, git changes, etc.) - legacy
-            dataspace: Dataspace for querying facts (new API)
+            dataspace: Dataspace for querying facts (required)
 
         Returns:
             True if the guard condition is met
@@ -98,7 +96,7 @@ class Guard:
 class AlwaysGuard(Guard):
     """Guard that always evaluates to True."""
 
-    def evaluate(self, context: Dict[str, Any], dataspace=None) -> bool:
+    def evaluate(self, dataspace) -> bool:
         return True
 
     def __repr__(self) -> str:
@@ -106,129 +104,13 @@ class AlwaysGuard(Guard):
 
 
 class NeverGuard(Guard):
-    """Guard that always evaluates to False."""
+    """Guard that never evaluates to False."""
 
-    def evaluate(self, context: Dict[str, Any], dataspace=None) -> bool:
+    def evaluate(self, dataspace) -> bool:
         return False
 
     def __repr__(self) -> str:
         return "Never()"
-
-
-class ChannelHasGuard(Guard):
-    """
-    Guard that checks if a channel has a specific value.
-
-    Uses dataspace to query ChannelFact if available (new API),
-    falls back to context dict (legacy API).
-    """
-
-    def __init__(self, channel: Channel, value: Any):
-        if not isinstance(channel, Channel):
-            raise TypeError(
-                f"ChannelHasGuard requires Channel object, got {type(channel)}.\n"
-                f"Migration: Define channel as variable:\n"
-                f"  verdict = Channel(name='verdict')\n"
-                f"  When.channel_has(verdict, '{value}')"
-            )
-        self.channel_name = channel.name
-        self.channel_id = channel.id
-        self.value = value
-
-    def evaluate(self, context: Dict[str, Any], dataspace=None) -> bool:
-        # New API: query dataspace for ChannelFact
-        if dataspace:
-            from ..dataspace import ChannelFact, FactPattern
-
-            pattern = FactPattern(
-                fact_type=ChannelFact, constraints={"channel_name": self.channel_name}
-            )
-            facts = dataspace.query(pattern, latest_only=True)
-
-            if facts:
-                return facts[0].value == self.value
-            return False
-
-        # Legacy API: use context dict
-        return context.get(self.channel_name) == self.value
-
-    def __repr__(self) -> str:
-        return f"ChannelHas({self.channel_name}={self.value})"
-
-
-class EmptyGuard(Guard):
-    """Guard that checks if a channel is empty/None."""
-
-    def __init__(self, channel: Channel):
-        if not isinstance(channel, Channel):
-            raise TypeError(
-                f"EmptyGuard requires Channel object, got {type(channel)}. "
-                f"Use Channel objects instead of strings."
-            )
-        self.channel_name = channel.name
-        self.channel_id = channel.id
-
-    def evaluate(self, context: Dict[str, Any], dataspace=None) -> bool:
-        # New API: query dataspace for ChannelFact
-        if dataspace:
-            from ..dataspace import ChannelFact, FactPattern
-
-            pattern = FactPattern(
-                fact_type=ChannelFact, constraints={"channel_name": self.channel_name}
-            )
-            facts = dataspace.query(pattern, latest_only=True)
-
-            if not facts:
-                return True
-
-            value = facts[0].value
-            if value is None:
-                return True
-            if isinstance(value, (str, list, dict)):
-                return len(value) == 0
-            return False
-
-        # Legacy API: use context dict
-        value = context.get(self.channel_name)
-        if value is None:
-            return True
-        if isinstance(value, (str, list, dict)):
-            return len(value) == 0
-        return False
-
-    def __repr__(self) -> str:
-        return f"Empty({self.channel_name})"
-
-
-class VerdictGuard(Guard):
-    """Guard that checks the review verdict."""
-
-    def __init__(self, verdict: str):
-        self.verdict = verdict.lower()
-
-    def evaluate(self, context: Dict[str, Any], dataspace=None) -> bool:
-        # Legacy only - uses context dict
-        actual = context.get("verdict", "").lower()
-        return actual == self.verdict
-
-    def __repr__(self) -> str:
-        return f"Verdict({self.verdict})"
-
-
-class GitChangesGuard(Guard):
-    """Guard that checks if git changes occurred."""
-
-    def __init__(self, required: bool = True):
-        self.required = required
-
-    def evaluate(self, context: Dict[str, Any], dataspace=None) -> bool:
-        # Legacy only - uses context dict
-        git_changes = context.get("git_changes", {})
-        has_changes = git_changes.get("has_changes", False)
-        return has_changes == self.required
-
-    def __repr__(self) -> str:
-        return f"GitChanges(required={self.required})"
 
 
 class AndGuard(Guard):
@@ -237,8 +119,8 @@ class AndGuard(Guard):
     def __init__(self, *guards: Guard):
         self.guards = guards
 
-    def evaluate(self, context: Dict[str, Any], dataspace=None) -> bool:
-        return all(g.evaluate(context, dataspace) for g in self.guards)
+    def evaluate(self, dataspace) -> bool:
+        return all(g.evaluate(dataspace) for g in self.guards)
 
     def __repr__(self) -> str:
         return f"And({', '.join(repr(g) for g in self.guards)})"
@@ -250,8 +132,8 @@ class OrGuard(Guard):
     def __init__(self, *guards: Guard):
         self.guards = guards
 
-    def evaluate(self, context: Dict[str, Any], dataspace=None) -> bool:
-        return any(g.evaluate(context, dataspace) for g in self.guards)
+    def evaluate(self, dataspace) -> bool:
+        return any(g.evaluate(dataspace) for g in self.guards)
 
     def __repr__(self) -> str:
         return f"Or({', '.join(repr(g) for g in self.guards)})"
@@ -263,8 +145,8 @@ class NotGuard(Guard):
     def __init__(self, guard: Guard):
         self.guard = guard
 
-    def evaluate(self, context: Dict[str, Any], dataspace=None) -> bool:
-        return not self.guard.evaluate(context, dataspace)
+    def evaluate(self, dataspace) -> bool:
+        return not self.guard.evaluate(dataspace)
 
     def __repr__(self) -> str:
         return f"Not({repr(self.guard)})"
@@ -274,7 +156,7 @@ class FactExistsGuard(Guard):
     """
     Guard that checks if a fact of specific type exists in dataspace.
 
-    **Typed Fact Guard (New API):**
+    **Usage:**
         When.fact_exists(ReviewVerdict, constraints={"verdict": "approve"})
     """
 
@@ -282,11 +164,7 @@ class FactExistsGuard(Guard):
         self.fact_type = fact_type
         self.constraints = constraints or {}
 
-    def evaluate(self, context: Dict[str, Any], dataspace=None) -> bool:
-        if not dataspace:
-            # Cannot evaluate without dataspace
-            return False
-
+    def evaluate(self, dataspace) -> bool:
         from ..dataspace import FactPattern
 
         pattern = FactPattern(fact_type=self.fact_type, constraints=self.constraints)
@@ -304,7 +182,7 @@ class FactMatchesGuard(Guard):
     """
     Guard that checks if a fact matches specific criteria using a predicate function.
 
-    **Advanced Fact Guard:**
+    **Usage:**
         When.fact_matches(
             ReviewVerdict,
             lambda fact: fact.verdict == "approve" and fact.feedback is not None
@@ -315,10 +193,7 @@ class FactMatchesGuard(Guard):
         self.fact_type = fact_type
         self.predicate = predicate
 
-    def evaluate(self, context: Dict[str, Any], dataspace=None) -> bool:
-        if not dataspace:
-            return False
-
+    def evaluate(self, dataspace) -> bool:
         from ..dataspace import FactPattern
 
         pattern = FactPattern(fact_type=self.fact_type)
@@ -335,7 +210,7 @@ class When:
     """
     Factory for creating guard expressions.
 
-    Provides a fluent API for building guard conditions.
+    Provides a fluent API for building guard conditions with typed facts.
     """
 
     @staticmethod
@@ -347,26 +222,6 @@ class When:
     def never() -> Guard:
         """Guard that never passes."""
         return NeverGuard()
-
-    @staticmethod
-    def channel_has(channel: str, value: Any) -> Guard:
-        """Guard that checks if channel has specific value."""
-        return ChannelHasGuard(channel, value)
-
-    @staticmethod
-    def empty(channel: str) -> Guard:
-        """Guard that checks if channel is empty."""
-        return EmptyGuard(channel)
-
-    @staticmethod
-    def verdict(verdict: str) -> Guard:
-        """Guard that checks review verdict."""
-        return VerdictGuard(verdict)
-
-    @staticmethod
-    def git_changes(required: bool = True) -> Guard:
-        """Guard that checks if git changes occurred."""
-        return GitChangesGuard(required)
 
     @staticmethod
     def all(*guards: Guard) -> Guard:
@@ -388,7 +243,7 @@ class When:
         """
         Guard that checks if a fact of specific type exists in dataspace.
 
-        **Typed Fact Guard (New API):**
+        **Usage:**
             When.fact_exists(ReviewVerdict, constraints={"verdict": "approve"})
 
         Args:
@@ -405,7 +260,7 @@ class When:
         """
         Guard that checks if a fact matches specific criteria using a predicate.
 
-        **Advanced Fact Guard:**
+        **Usage:**
             When.fact_matches(
                 ReviewVerdict,
                 lambda fact: fact.verdict == "approve" and fact.feedback is not None

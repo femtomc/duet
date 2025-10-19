@@ -202,33 +202,6 @@ class ApprovalGrant(Fact):
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
-@fact
-@dataclass
-class ChannelFact(Fact):
-    """
-    Fact representing a channel value (migration from string channels).
-
-    Wraps channel values as structured facts in the dataspace.
-    As we move to fully typed facts (PlanDoc, etc.), these will be replaced.
-
-    **DEPRECATED:** This fact type will be removed once all workflows migrate
-    to typed facts. Use domain-specific fact types (PlanDoc, CodeArtifact, etc.)
-    instead of generic channel values.
-
-    Attributes:
-        fact_id: Unique fact ID
-        channel_name: Name of channel this fact belongs to
-        value: Channel value (any type - string, dict, etc.)
-        iteration: Iteration when value was written
-        phase: Phase that wrote this value
-    """
-
-    fact_id: str
-    channel_name: str
-    value: Any
-    iteration: int = 0
-    phase: Optional[str] = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -381,7 +354,7 @@ class Dataspace:
                 FactPattern(fact_type=PlanDoc, constraints={"task_id": "123"})
             )
 
-            # Get latest by iteration
+            # Get latest by iteration (if fact has iteration field)
             latest_plan = dataspace.query(
                 FactPattern(fact_type=PlanDoc, constraints={"task_id": "123"}),
                 latest_only=True
@@ -389,10 +362,10 @@ class Dataspace:
 
         Args:
             pattern: Pattern to match (fact_type + optional constraints)
-            latest_only: If True and pattern has channel_name, return only latest by iteration
+            latest_only: If True and facts have iteration field, return only latest
 
         Returns:
-            List of matching facts (optionally filtered to latest)
+            List of matching facts (optionally filtered to latest by iteration)
         """
         # Optimize by type
         candidates = self.facts_by_type.get(pattern.fact_type, set())
@@ -403,19 +376,9 @@ class Dataspace:
             if fact and pattern.matches(fact):
                 matches.append(fact)
 
-        # Filter to latest by iteration if requested (for ChannelFact queries)
+        # Filter to latest by iteration if requested
         if latest_only and matches and hasattr(matches[0], 'iteration'):
-            # Group by channel_name if available, return latest per channel
-            if hasattr(matches[0], 'channel_name'):
-                by_channel = {}
-                for fact in matches:
-                    ch_name = fact.channel_name
-                    if ch_name not in by_channel or fact.iteration > by_channel[ch_name].iteration:
-                        by_channel[ch_name] = fact
-                return list(by_channel.values())
-            else:
-                # Just return latest by iteration
-                return [max(matches, key=lambda f: f.iteration)]
+            return [max(matches, key=lambda f: f.iteration)]
 
         return matches
 

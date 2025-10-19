@@ -82,15 +82,11 @@ from .workflow import (
     # Guard types for advanced usage
     AlwaysGuard,
     AndGuard,
-    ChannelHasGuard,
-    EmptyGuard,
     FactExistsGuard,
     FactMatchesGuard,
-    GitChangesGuard,
     NeverGuard,
     NotGuard,
     OrGuard,
-    VerdictGuard,
 )
 
 # Import fact types and utilities for user-defined facts
@@ -119,10 +115,6 @@ __all__ = [
     # Guard types
     "AlwaysGuard",
     "NeverGuard",
-    "ChannelHasGuard",
-    "EmptyGuard",
-    "VerdictGuard",
-    "GitChangesGuard",
     "AndGuard",
     "OrGuard",
     "NotGuard",

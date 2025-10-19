@@ -56,27 +56,19 @@ class FacetScheduler:
         self.waiting: Set[str] = set()  # facet_ids waiting for facts
         self.executing: Optional[str] = None
 
-    def register_facet(self, facet_id: str, phase: Phase) -> None:
+    def register_facet(self, facet_id: str, phase: Phase, input_patterns: Optional[List[FactPattern]] = None) -> None:
         """
         Register a facet with the scheduler.
-
-        Subscribes facet to input patterns based on phase.get_reads().
 
         Args:
             facet_id: Unique facet identifier
             phase: Phase defining facet script
+            input_patterns: Optional list of fact patterns facet depends on
         """
-        # Build input patterns from phase reads
-        reads = phase.get_reads()
-        patterns = [
-            FactPattern(fact_type=ChannelFact, constraints={"channel_name": ch.name})
-            for ch in reads
-        ]
-
         subscription = FacetSubscription(
             facet_id=facet_id,
             phase=phase,
-            input_patterns=patterns,
+            input_patterns=input_patterns or [],
         )
 
         self.facets[facet_id] = subscription
@@ -88,7 +80,7 @@ class FacetScheduler:
             self.waiting.add(facet_id)
 
         # Subscribe to dataspace for future facts
-        for pattern in patterns:
+        for pattern in input_patterns or []:
             self.dataspace.subscribe(pattern, lambda fact: self._on_fact_asserted(facet_id, fact))
 
     def _check_inputs_ready(self, subscription: FacetSubscription) -> bool:
@@ -224,5 +216,3 @@ class FacetScheduler:
         return resumed
 
 
-# Import after class definition to avoid circular import
-from .dataspace import ChannelFact
