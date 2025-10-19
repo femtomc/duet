@@ -287,8 +287,6 @@ def test_adapter_error_handling_in_orchestration(temp_workspace, temp_artifacts_
     from duet.adapters.echo import EchoAdapter
     from duet.models import AssistantResponse
 
-    original_stream = EchoAdapter.stream
-
     def mock_empty_response(self, request, on_event=None):
         # Return empty response to trigger error handling
         return AssistantResponse(content="", metadata={})
