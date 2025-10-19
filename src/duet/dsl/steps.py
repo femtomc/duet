@@ -330,18 +330,44 @@ class HumanStep:
     reads: List[Channel] = field(default_factory=list)
     timeout: Optional[int] = None
 
-    def execute(self, context: FacetContext) -> StepResult:
+    def execute(self, context: FacetContext, dataspace=None) -> StepResult:
         """
-        Request human approval by pausing execution.
+        Request human approval by asserting ApprovalNeeded fact.
+
+        Creates conversation: asserts ApprovalNeeded, waits for ApprovalGranted.
 
         Args:
             context: Facet execution context
+            dataspace: Dataspace for asserting approval request
 
         Returns:
-            StepResult with blocked=True (pause, not failure)
+            StepResult with blocked=True (pause for approval)
         """
-        # Use pause() to distinguish from failures
-        return StepResult.pause(f"Human approval needed: {self.reason}")
+        if dataspace:
+            # Syndicate-style conversation: assert request fact
+            from ..dataspace import ApprovalRequest
+            import uuid
+
+            request_id = f"approval_{context.run_id}_{context.iteration}_{uuid.uuid4().hex[:8]}"
+            request_fact = ApprovalRequest(
+                fact_id=request_id,
+                requester=context.phase_name,
+                reason=self.reason,
+                context={
+                    "run_id": context.run_id,
+                    "iteration": context.iteration,
+                    "phase": context.phase_name,
+                },
+            )
+
+            handle = dataspace.assert_fact(request_fact)
+            context.add_handle(handle)
+
+            # Return pause with request_id for orchestrator to track
+            return StepResult.pause(f"Awaiting approval: {request_id}")
+        else:
+            # Legacy: just pause without fact
+            return StepResult.pause(f"Human approval needed: {self.reason}")
 
 
 @dataclass

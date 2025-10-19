@@ -132,7 +132,7 @@ class FacetRunner:
                 elif isinstance(step, AgentStep):
                     result = self._execute_agent_step(step, context, adapter)
                 elif isinstance(step, HumanStep):
-                    result = self._execute_human_step(step, context)
+                    result = self._execute_human_step(step, context, dataspace)
                 elif isinstance(step, WriteStep):
                     result = self._execute_write_step(step, context)
                 else:
@@ -305,13 +305,22 @@ class FacetRunner:
             notes=f"Agent '{step.agent}' completed",
         )
 
-    def _execute_human_step(self, step: HumanStep, context: FacetContext) -> StepResult:
+    def _execute_human_step(self, step: HumanStep, context: FacetContext, dataspace) -> StepResult:
         """
-        Execute HumanStep - create approval request.
+        Execute HumanStep - assert ApprovalNeeded fact and pause.
 
-        Sprint DSL-4: Human steps pause execution and require manual intervention.
+        Creates Syndicate-style conversation by asserting ApprovalRequest fact.
+        Facet pauses until ApprovalGranted appears.
+
+        Args:
+            step: HumanStep configuration
+            context: Facet execution context
+            dataspace: Dataspace for approval conversation
+
+        Returns:
+            StepResult with blocked=True and approval request ID
         """
-        return step.execute(context)
+        return step.execute(context, dataspace)
 
     def _execute_write_step(self, step: WriteStep, context: FacetContext) -> StepResult:
         """Execute WriteStep - write value to channel."""
