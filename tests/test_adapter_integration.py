@@ -268,11 +268,11 @@ def test_orchestration_with_both_real_adapters(temp_workspace, temp_artifacts_di
 
 
 def test_adapter_error_handling_in_orchestration(temp_workspace, temp_artifacts_dir):
-    """Test that adapter errors are handled gracefully in orchestration."""
+    """Test that empty adapter responses are handled gracefully in orchestration."""
     config = DuetConfig(
-        codex=AssistantConfig(provider="codex", model="gpt-4"),
+        codex=AssistantConfig(provider="echo", model="echo-v1"),
         claude=AssistantConfig(provider="echo", model="echo-v1"),
-        workflow=WorkflowConfig(max_iterations=1, require_human_approval=False),
+        workflow=WorkflowConfig(max_iterations=5, require_human_approval=False, require_git_changes=False),
         storage=StorageConfig(
             workspace_root=temp_workspace, run_artifact_dir=temp_artifacts_dir
         ),
@@ -282,19 +282,23 @@ def test_adapter_error_handling_in_orchestration(temp_workspace, temp_artifacts_
     artifact_store = ArtifactStore(temp_artifacts_dir, console=console)
     orchestrator = Orchestrator(config, artifact_store, console=console)
 
-    # Mock CLI failure
-    mock_result = Mock()
-    mock_result.returncode = 1
-    mock_result.stdout = ""
-    mock_result.stderr = "Authentication error"
+    # Mock echo adapter to return empty response (simulates adapter failure)
+    # Patch the EchoAdapter stream method directly
+    from duet.adapters.echo import EchoAdapter
+    from duet.models import AssistantResponse
 
-    with patch("subprocess.run", return_value=mock_result):
+    original_stream = EchoAdapter.stream
+
+    def mock_empty_response(self, request, on_event=None):
+        # Return empty response to trigger error handling
+        return AssistantResponse(content="", metadata={})
+
+    with patch.object(EchoAdapter, 'stream', mock_empty_response):
         snapshot = orchestrator.run(run_id="test-error-handling")
 
-    # Verify orchestration was blocked (either adapter error or max iterations)
+    # Verify orchestration detected empty response and blocked
     assert snapshot.phase == "blocked"
-    # May hit max iterations with echo adapter instead of adapter error
-    assert any(keyword in snapshot.notes.lower() for keyword in ["adapter failure", "error", "max iterations"])
+    assert "empty response" in snapshot.notes.lower()
 
 
 def test_orchestrator_persists_streaming_events(temp_workspace, temp_artifacts_dir):
