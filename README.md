@@ -6,9 +6,9 @@
   **Programmable agents in a time machine**
 </div>
 
-Duet is a programmable agentic orchestration system. What does that even mean? Possibly a more vague description: a swiss army watch for defining and running structured interactions with agents.
+Duet is a programmable agentic orchestration system. What does that even mean? Here's a likely even more unsatisfying description: a swiss army watch for defining and executing structured interactions with agents.
 
-Here's the story ...
+To properly explain, I have to be a bit long-winded. Here's the story ...
 
 Many agentic IDEs (Codex, Claude Code, Kiro) bake in opinions about the _interaction model_ through which the user engages with their agents. This is not a bad thing: a stable UI and interaction model can be useful and reliable!
 
