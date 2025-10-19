@@ -50,8 +50,7 @@ class BaseElement:
     def __post_init__(self):
         """Generate UUID if not provided."""
         if not hasattr(self, 'id') or self.id is None:
-            # Generate stable UUID based on name for deterministic testing
-            # In production, could use uuid.uuid4() for true uniqueness
+            # Generate unique UUID for each instance
             object.__setattr__(self, 'id', str(uuid.uuid4()))
 
     def __eq__(self, other):
@@ -117,15 +116,14 @@ class NeverGuard(Guard):
 class ChannelHasGuard(Guard):
     """Guard that checks if a channel has a specific value."""
 
-    def __init__(self, channel: Union[Channel, str], value: Any):
-        # Support both Channel objects and strings (for migration)
-        if isinstance(channel, Channel):
-            self.channel_name = channel.name
-            self.channel_id = channel.id
-        else:
-            # Legacy string support
-            self.channel_name = channel
-            self.channel_id = None
+    def __init__(self, channel: Channel, value: Any):
+        if not isinstance(channel, Channel):
+            raise TypeError(
+                f"ChannelHasGuard requires Channel object, got {type(channel)}. "
+                f"Use Channel objects instead of strings."
+            )
+        self.channel_name = channel.name
+        self.channel_id = channel.id
         self.value = value
 
     def evaluate(self, context: Dict[str, Any]) -> bool:
@@ -139,15 +137,14 @@ class ChannelHasGuard(Guard):
 class EmptyGuard(Guard):
     """Guard that checks if a channel is empty/None."""
 
-    def __init__(self, channel: Union[Channel, str]):
-        # Support both Channel objects and strings (for migration)
-        if isinstance(channel, Channel):
-            self.channel_name = channel.name
-            self.channel_id = channel.id
-        else:
-            # Legacy string support
-            self.channel_name = channel
-            self.channel_id = None
+    def __init__(self, channel: Channel):
+        if not isinstance(channel, Channel):
+            raise TypeError(
+                f"EmptyGuard requires Channel object, got {type(channel)}. "
+                f"Use Channel objects instead of strings."
+            )
+        self.channel_name = channel.name
+        self.channel_id = channel.id
 
     def evaluate(self, context: Dict[str, Any]) -> bool:
         value = context.get(self.channel_name)
@@ -400,8 +397,8 @@ class Phase(BaseElement):
     name: str
     agent: str
     id: Optional[str] = None
-    consumes: List[Union[Channel, str]] = field(default_factory=list)
-    publishes: List[Union[Channel, str]] = field(default_factory=list)
+    consumes: List[Channel] = field(default_factory=list)
+    publishes: List[Channel] = field(default_factory=list)
     description: str = ""
     is_terminal: bool = False
     metadata: Dict[str, Any] = field(default_factory=dict)
@@ -411,6 +408,21 @@ class Phase(BaseElement):
             raise ValueError("Phase name cannot be empty")
         if not self.agent:
             raise ValueError("Phase agent cannot be empty")
+
+        # Validate consumes/publishes are Channel objects
+        for channel in self.consumes:
+            if not isinstance(channel, Channel):
+                raise TypeError(
+                    f"Phase.consumes must contain Channel objects, got {type(channel)} in phase '{self.name}'. "
+                    f"Use Channel objects instead of strings."
+                )
+        for channel in self.publishes:
+            if not isinstance(channel, Channel):
+                raise TypeError(
+                    f"Phase.publishes must contain Channel objects, got {type(channel)} in phase '{self.name}'. "
+                    f"Use Channel objects instead of strings."
+                )
+
         # Generate ID if not provided (from BaseElement)
         BaseElement.__post_init__(self)
         # Note: consumes/publishes can be empty for simple phases
@@ -428,30 +440,30 @@ class Transition:
         priority: Priority for conflict resolution (higher = preferred)
     """
 
-    from_phase: Union[Phase, str]  # Temporarily support both for migration
-    to_phase: Union[Phase, str]    # Temporarily support both for migration
+    from_phase: Phase
+    to_phase: Phase
     when: Guard = field(default_factory=AlwaysGuard)
     priority: int = 0
 
     def __post_init__(self):
-        # Validate that phases are provided
+        # Validate that phases are provided and are Phase objects
         if not self.from_phase:
             raise ValueError("Transition from_phase cannot be empty")
         if not self.to_phase:
             raise ValueError("Transition to_phase cannot be empty")
 
-        # Type checking - prefer Phase objects
-        if isinstance(self.from_phase, str):
-            # TODO: Remove string support in next version
-            pass
-        elif not isinstance(self.from_phase, Phase):
-            raise TypeError(f"Transition from_phase must be Phase object or string, got {type(self.from_phase)}")
+        # Strict type checking - require Phase objects
+        if not isinstance(self.from_phase, Phase):
+            raise TypeError(
+                f"Transition from_phase must be Phase object, got {type(self.from_phase)}. "
+                f"Use Phase objects instead of strings."
+            )
 
-        if isinstance(self.to_phase, str):
-            # TODO: Remove string support in next version
-            pass
-        elif not isinstance(self.to_phase, Phase):
-            raise TypeError(f"Transition to_phase must be Phase object or string, got {type(self.to_phase)}")
+        if not isinstance(self.to_phase, Phase):
+            raise TypeError(
+                f"Transition to_phase must be Phase object, got {type(self.to_phase)}. "
+                f"Use Phase objects instead of strings."
+            )
 
         if not isinstance(self.when, Guard):
             raise TypeError(f"Transition guard must be a Guard instance, got {type(self.when)}")
@@ -479,8 +491,8 @@ class Workflow:
     channels: List[Channel]
     phases: List[Phase]
     transitions: List[Transition]
-    initial_phase: Optional[Union[Phase, str]] = None  # Support both during migration
-    task_channel: Optional[Union[Channel, str]] = None  # Support both during migration
+    initial_phase: Optional[Phase] = None
+    task_channel: Optional[Channel] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
@@ -492,29 +504,22 @@ class Workflow:
             raise ValueError("Workflow must have at least one transition")
         # Note: channels can be empty for simple workflows
 
-        # Normalize initial_phase to Phase object
+        # Validate initial_phase
         if self.initial_phase is None:
             # Default to first phase
             self.initial_phase = self.phases[0]
-        elif isinstance(self.initial_phase, str):
-            # Legacy string support - convert to Phase object
-            phase_map = {p.name: p for p in self.phases}
-            if self.initial_phase not in phase_map:
-                raise ValueError(f"Initial phase '{self.initial_phase}' not found in phases")
-            self.initial_phase = phase_map[self.initial_phase]
         elif not isinstance(self.initial_phase, Phase):
-            raise TypeError(f"initial_phase must be Phase object or string, got {type(self.initial_phase)}")
+            raise TypeError(
+                f"initial_phase must be Phase object, got {type(self.initial_phase)}. "
+                f"Use Phase objects instead of strings."
+            )
 
-        # Normalize task_channel to Channel object
-        if self.task_channel is not None:
-            if isinstance(self.task_channel, str):
-                # Legacy string support - convert to Channel object
-                channel_map = {c.name: c for c in self.channels}
-                if self.task_channel not in channel_map:
-                    raise ValueError(f"Task channel '{self.task_channel}' not found in channels")
-                self.task_channel = channel_map[self.task_channel]
-            elif not isinstance(self.task_channel, Channel):
-                raise TypeError(f"task_channel must be Channel object or string, got {type(self.task_channel)}")
+        # Validate task_channel
+        if self.task_channel is not None and not isinstance(self.task_channel, Channel):
+            raise TypeError(
+                f"task_channel must be Channel object, got {type(self.task_channel)}. "
+                f"Use Channel objects instead of strings."
+            )
 
     def get_agent(self, name: str) -> Optional[Agent]:
         """Get agent by name."""

@@ -159,37 +159,45 @@ class WorkflowGraph:
         Returns:
             List of phase names in execution order
         """
-        # Simple BFS from initial phase
+        # Simple BFS from initial phase name
         visited = []
-        queue = [self.initial_phase]
+        queue = [self.initial_phase]  # initial_phase is a name string
         seen = {self.initial_phase}
 
         while queue:
             current = queue.pop(0)
             visited.append(current)
 
-            # Add connected phases
+            # Add connected phases (transitions are keyed by name)
             for transition in self.transitions.get(current, []):
-                if transition.to_phase not in seen:
-                    seen.add(transition.to_phase)
-                    queue.append(transition.to_phase)
+                # Extract to_phase name from Phase object
+                to_phase_name = transition.to_phase.name
+                if to_phase_name not in seen:
+                    seen.add(to_phase_name)
+                    queue.append(to_phase_name)
 
         return visited
 
     def get_channel_consumers(self, channel_name: str) -> List[str]:
-        """Get list of phases that consume a channel."""
+        """Get list of phases that consume a channel (by channel name)."""
         consumers = []
         for phase_name, phase in self.phases.items():
-            if channel_name in phase.consumes:
-                consumers.append(phase_name)
+            # phase.consumes is now List[Channel], check names
+            for channel in phase.consumes:
+                if channel.name == channel_name:
+                    consumers.append(phase_name)
+                    break
         return consumers
 
     def get_channel_publishers(self, channel_name: str) -> List[str]:
-        """Get list of phases that publish to a channel."""
+        """Get list of phases that publish to a channel (by channel name)."""
         publishers = []
         for phase_name, phase in self.phases.items():
-            if channel_name in phase.publishes:
-                publishers.append(phase_name)
+            # phase.publishes is now List[Channel], check names
+            for channel in phase.publishes:
+                if channel.name == channel_name:
+                    publishers.append(phase_name)
+                    break
         return publishers
 
 
@@ -243,14 +251,11 @@ class WorkflowCompiler:
         channels_by_id = {channel.id: channel for channel in workflow.channels}
         phases_by_id = {phase.id: phase for phase in workflow.phases}
 
-        # Build transitions map (keyed by phase name for now)
+        # Build transitions map (keyed by phase name)
         transitions_map: Dict[str, List[Transition]] = {}
         for transition in workflow.transitions:
-            # Normalize from_phase to name string
-            if isinstance(transition.from_phase, Phase):
-                from_phase_name = transition.from_phase.name
-            else:
-                from_phase_name = transition.from_phase
+            # Extract phase name from Phase object
+            from_phase_name = transition.from_phase.name
 
             if from_phase_name not in transitions_map:
                 transitions_map[from_phase_name] = []
@@ -261,19 +266,14 @@ class WorkflowCompiler:
             phase.name for phase in workflow.phases if phase.is_terminal
         }
 
-        # Get initial phase name (workflow.initial_phase is now Phase object or string)
-        if isinstance(workflow.initial_phase, Phase):
-            initial_phase_name = workflow.initial_phase.name
-        else:
-            initial_phase_name = workflow.initial_phase
+        # Get initial phase name (workflow.initial_phase is Phase object)
+        initial_phase_name = workflow.initial_phase.name
 
-        # Get task channel name (workflow.task_channel is now Channel object or string)
-        if isinstance(workflow.task_channel, Channel):
+        # Get task channel name (workflow.task_channel is Channel object or None)
+        if workflow.task_channel is not None:
             task_channel_name = workflow.task_channel.name
-        elif workflow.task_channel is None:
-            task_channel_name = None
         else:
-            task_channel_name = workflow.task_channel
+            task_channel_name = None
 
         return WorkflowGraph(
             agents=agents_map,
@@ -315,8 +315,8 @@ class WorkflowCompiler:
     def _validate_references(self, workflow: Workflow) -> None:
         """Validate that all agent, channel, and phase references exist."""
         agent_names = {agent.name for agent in workflow.agents}
-        channel_names = {channel.name for channel in workflow.channels}
-        phase_names = {phase.name for phase in workflow.phases}
+        all_channels = set(workflow.channels)
+        all_phases = set(workflow.phases)
 
         # Validate phase -> agent references
         for phase in workflow.phases:
@@ -325,55 +325,46 @@ class WorkflowCompiler:
                     f"Phase '{phase.name}' references unknown agent: '{phase.agent}'"
                 )
 
-            # Validate phase -> channel references (consumes/publishes)
+            # Validate phase -> channel references (consumes/publishes are Channel objects)
             for channel in phase.consumes:
-                if channel not in channel_names:
+                if channel not in all_channels:
                     self.errors.append(
-                        f"Phase '{phase.name}' consumes unknown channel: '{channel}'"
+                        f"Phase '{phase.name}' consumes unknown channel: '{channel.name}' "
+                        f"(channel not in workflow.channels list)"
                     )
 
             for channel in phase.publishes:
-                if channel not in channel_names:
+                if channel not in all_channels:
                     self.errors.append(
-                        f"Phase '{phase.name}' publishes to unknown channel: '{channel}'"
+                        f"Phase '{phase.name}' publishes to unknown channel: '{channel.name}' "
+                        f"(channel not in workflow.channels list)"
                     )
 
-        # Validate transition -> phase references
+        # Validate transition -> phase references (transitions use Phase objects)
         for transition in workflow.transitions:
-            if transition.from_phase not in phase_names:
+            if transition.from_phase not in all_phases:
                 self.errors.append(
-                    f"Transition from unknown phase: '{transition.from_phase}'"
+                    f"Transition from unknown phase: '{transition.from_phase.name}' "
+                    f"(phase not in workflow.phases list)"
                 )
-            if transition.to_phase not in phase_names:
+            if transition.to_phase not in all_phases:
                 self.errors.append(
-                    f"Transition to unknown phase: '{transition.to_phase}'"
+                    f"Transition to unknown phase: '{transition.to_phase.name}' "
+                    f"(phase not in workflow.phases list)"
                 )
 
     def _validate_transitions(self, workflow: Workflow) -> None:
         """Validate transition logic and guards."""
-        # Build phase map for lookups
-        phase_map = {p.name: p for p in workflow.phases}
-
-        # Helper to normalize phase references to Phase objects
-        def normalize_phase_ref(ref: Union[Phase, str]) -> Phase:
-            if isinstance(ref, Phase):
-                return ref
-            return phase_map.get(ref)
-
-        # Check for unreachable phases (using Phase objects)
-        initial = normalize_phase_ref(workflow.initial_phase)
-        reachable = {initial}
-        worklist = [initial]
+        # Check for unreachable phases (all references are Phase objects now)
+        reachable = {workflow.initial_phase}
+        worklist = [workflow.initial_phase]
 
         while worklist:
             current = worklist.pop()
             for transition in workflow.transitions:
-                from_phase_obj = normalize_phase_ref(transition.from_phase)
-                to_phase_obj = normalize_phase_ref(transition.to_phase)
-
-                if from_phase_obj == current and to_phase_obj not in reachable:
-                    reachable.add(to_phase_obj)
-                    worklist.append(to_phase_obj)
+                if transition.from_phase == current and transition.to_phase not in reachable:
+                    reachable.add(transition.to_phase)
+                    worklist.append(transition.to_phase)
 
         all_phases = set(workflow.phases)
         unreachable = all_phases - reachable
@@ -387,12 +378,7 @@ class WorkflowCompiler:
         terminal_phases = {p for p in workflow.phases if p.is_terminal}
         for phase in workflow.phases:
             # Check if phase has any outgoing transitions
-            has_outgoing = False
-            for t in workflow.transitions:
-                from_phase_obj = normalize_phase_ref(t.from_phase)
-                if from_phase_obj == phase:
-                    has_outgoing = True
-                    break
+            has_outgoing = any(t.from_phase == phase for t in workflow.transitions)
 
             if not has_outgoing and phase not in terminal_phases:
                 self.errors.append(
