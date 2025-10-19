@@ -153,7 +153,7 @@ class GitChangeTool(BaseTool):
     """
     Tool that validates git changes were made.
 
-    Runs post-phase to verify repository modifications.
+    Checks git status and fails if require_changes=True but no changes detected.
     """
 
     name: str = "git_change_validator"
@@ -165,19 +165,62 @@ class GitChangeTool(BaseTool):
         Validate that git changes occurred.
 
         Returns:
-            ToolResult with git status in context (for prompt) and channels (for dataspace)
+            ToolResult with git status in context, fails if no changes and required
         """
-        # Stub implementation - real logic would check git status
-        # For now, always succeed with stub data
-        git_info = {
-            "has_changes": True,  # Stub
-            "files_changed": 0,
-            "commit": None,
-        }
-        return ToolResult.ok(
-            context={"git_info": git_info},  # Local context for next steps
-            channels={},  # No channel writes unless explicitly declared
-        )
+        if not context.git_available:
+            # No git repo - skip validation
+            return ToolResult.ok(
+                context={"git_info": {"available": False}},
+                channels={},
+            )
+
+        # Check git status via subprocess
+        import subprocess
+
+        try:
+            # Check for unstaged changes
+            status_result = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=context.workspace_root,
+                capture_output=True,
+                text=True,
+            )
+
+            has_changes = bool(status_result.stdout.strip())
+
+            # Get commit info if available
+            commit_result = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=context.workspace_root,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            current_commit = commit_result.stdout.strip() if commit_result.returncode == 0 else None
+
+            git_info = {
+                "has_changes": has_changes,
+                "status_output": status_result.stdout,
+                "commit": current_commit,
+            }
+
+            # Enforce if required
+            if self.require_changes and not has_changes:
+                return ToolResult.fail(
+                    error="Git changes required but none detected",
+                    notes="Phase requires repository modifications but working tree is clean",
+                )
+
+            return ToolResult.ok(
+                context={"git_info": git_info},
+                channels={},  # Can write to channel if outputs declared
+            )
+
+        except Exception as exc:
+            return ToolResult.fail(
+                error=f"Git validation failed: {exc}",
+                notes="Could not check git status",
+            )
 
 
 @dataclass
