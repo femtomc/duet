@@ -14,7 +14,7 @@ These interaction models take the form of _workflow programs_ (in a lightweight 
 
 Duet's backend takes care of a bunch of other things that you'd probably find yourself wanting: the ability to jump backwards and forwards in the history of the workflow (persistence), the ability to query and inspect _everything_, etc.
 
-In short, it's a programmable agentic CLI IDE.
+In short, a programmable agentic CLI gizmo.
 
 ## How does it work?
 
