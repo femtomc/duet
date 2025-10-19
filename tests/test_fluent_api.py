@@ -101,29 +101,35 @@ def test_fluent_chaining():
 
 
 def test_policy_helper_with_human():
-    """Test that with_human() sets approval metadata."""
+    """Test that with_human() attaches ApprovalTool."""
     phase = Phase(name="test", agent="agent")
     new_phase = phase.with_human("Manual review needed")
 
-    assert new_phase.metadata["requires_approval"] is True
-    assert new_phase.metadata["approval_reason"] == "Manual review needed"
+    assert len(new_phase.tools) == 1
+    assert new_phase.tools[0].name == "approval_check"
+    assert new_phase.tools[0].approval_message == "Manual review needed"
 
 
 def test_policy_helper_requires_git():
-    """Test that requires_git() sets git change metadata."""
+    """Test that requires_git() attaches GitChangeTool."""
     phase = Phase(name="test", agent="agent")
     new_phase = phase.requires_git()
 
-    assert new_phase.metadata["git_changes_required"] is True
+    assert len(new_phase.tools) == 1
+    assert new_phase.tools[0].name == "git_change_validator"
+    assert new_phase.tools[0].require_changes is True
 
 
 def test_policy_helper_counts_as_replan():
-    """Test that counts_as_replan() sets replan metadata."""
+    """Test that counts_as_replan() is now a no-op (deprecated)."""
     plan = Phase(name="plan", agent="agent")
-    review = Phase(name="review", agent="agent").counts_as_replan(loop_to=plan)
+    review_before = Phase(name="review", agent="agent")
+    review_after = review_before.counts_as_replan(loop_to=plan)
 
-    assert review.metadata["replan_transition"] is True
-    assert review.metadata["replan_target"] == "plan"
+    # No-op: returns self without changes
+    assert review_before is review_after
+    # No tools attached, no metadata set
+    assert len(review_after.tools) == 0
 
 
 def test_terminal_phase_constructor():
@@ -159,7 +165,7 @@ def test_fluent_complex_workflow():
         .consume(plan_ch)
         .publish(code)
         .describe("Execute the plan")
-        .requires_git()
+        .requires_git()  # Attaches GitChangeTool
         .with_metadata(role_hint="implementer")
     )
 
@@ -168,7 +174,7 @@ def test_fluent_complex_workflow():
         .consume(plan_ch, code)
         .publish(verdict, feedback)
         .describe("Review implementation")
-        .counts_as_replan(loop_to=plan)
+        .counts_as_replan(loop_to=plan)  # No-op (deprecated)
         .with_metadata(role_hint="reviewer")
     )
 
@@ -177,9 +183,11 @@ def test_fluent_complex_workflow():
     assert len(plan.publishes) == 1
     assert plan.metadata["role_hint"] == "planner"
 
-    assert implement.metadata["git_changes_required"] is True
+    # Verify tool attachment
+    assert len(implement.tools) == 1
+    assert implement.tools[0].name == "git_change_validator"
     assert implement.metadata["role_hint"] == "implementer"
 
-    assert review.metadata["replan_transition"] is True
-    assert review.metadata["replan_target"] == "plan"
+    # Verify counts_as_replan is no-op
+    assert len(review.tools) == 0  # No tools from counts_as_replan
     assert review.metadata["role_hint"] == "reviewer"

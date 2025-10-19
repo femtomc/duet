@@ -378,6 +378,9 @@ class Phase(BaseElement):
     channels, enabling a syndicated workspace model where agents communicate
     through structured data rather than prompt templates.
 
+    Sprint DSL-2+: Moving toward facet-based reactive execution. Metadata flags
+    are being phased out in favor of explicit tool/step declarations via fluent API.
+
     Attributes:
         name: Unique phase identifier (human-readable)
         id: Stable UUID for identity (auto-generated if not provided)
@@ -386,12 +389,8 @@ class Phase(BaseElement):
         publishes: List of Channel objects this phase writes to
         description: Human-readable description of what this phase does
         is_terminal: Whether this phase ends the workflow
-        metadata: Optional metadata for runtime behavior
-                  Supported keys:
-                  - role_hint: str - Hint for prompt builder selection (e.g., "planner", "implementer", "reviewer")
-                  - requires_approval: bool - Whether this phase requires human approval before proceeding
-                  - replan_transition: bool - Whether transitions from this phase count as replans
-                  - git_changes_required: bool - Whether this phase must produce git changes
+        tools: List of Tool instances attached to this phase
+        metadata: Generic metadata dict (preserved for backward compat, no special keys enforced)
     """
 
     name: str
@@ -487,37 +486,50 @@ class Phase(BaseElement):
         new_metadata = {**self.metadata, **kwargs}
         return replace(self, metadata=new_metadata)
 
-    # ──── Policy Helpers (Sprint DSL-2) ────
+    # ──── Policy Helpers (Sprint DSL-2+) ────
 
     def with_human(self, reason: str = "Human approval required") -> Phase:
         """
         Require human approval before proceeding from this phase (fluent API).
 
-        Returns a new Phase instance with requires_approval=True in metadata.
+        Sprint DSL-2+: Attaches ApprovalTool. Tool execution coming in next sprint.
+
+        Returns a new Phase instance with ApprovalTool attached.
         """
-        return self.with_metadata(requires_approval=True, approval_reason=reason)
+        # Import here to avoid circular dependency
+        from .tools import ApprovalTool
+
+        tool = ApprovalTool(approval_message=reason)
+        return self.with_tool(tool)
 
     def requires_git(self) -> Phase:
         """
         Require git changes from this phase (fluent API).
 
-        Returns a new Phase instance with git_changes_required=True in metadata.
+        Sprint DSL-2+: Attaches GitChangeTool. Tool execution coming in next sprint.
+
+        Returns a new Phase instance with GitChangeTool attached.
         """
-        return self.with_metadata(git_changes_required=True)
+        # Import here to avoid circular dependency
+        from .tools import GitChangeTool
+
+        tool = GitChangeTool(require_changes=True)
+        return self.with_tool(tool)
 
     def counts_as_replan(self, loop_to: Optional[Phase] = None) -> Phase:
         """
         Mark transitions from this phase as replans (fluent API).
 
+        Sprint DSL-2+: Deprecated. Replan logic will be replaced by conversation
+        patterns in the dataspace model. Kept for API compatibility but has no runtime effect.
+
         Args:
             loop_to: Optional target phase that forms the replan loop
 
-        Returns a new Phase instance with replan_transition=True in metadata.
+        Returns a new Phase instance (unchanged - this is a no-op now).
         """
-        metadata_update = {"replan_transition": True}
-        if loop_to:
-            metadata_update["replan_target"] = loop_to.name
-        return self.with_metadata(**metadata_update)
+        # No-op: replan tracking will be reimplemented as conversations
+        return self
 
     # ──── Tool Attachment (Sprint DSL-2) ────
 
