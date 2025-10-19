@@ -678,18 +678,56 @@ class Phase(BaseElement):
         """
         Validate that steps are in a sensible order.
 
-        TODO(step-validation): Implement ordering rules:
-        - ReadSteps should come before steps that use their data
-        - AgentStep should have reads available
-        - Multiple agents need write separation
-        - HumanStep should not block other steps unnecessarily
+        Rules:
+        - AgentStep/ToolStep should have prior ReadStep (need inputs)
+        - Multiple AgentSteps need separation (ambiguous dataflow)
+        - WriteStep after HumanStep is suspicious (human should be last gate)
 
         Returns:
             List of validation error messages (empty if valid)
         """
-        # TODO: Implement step ordering validation
-        # For now, return empty (no validation)
-        return []
+        errors = []
+
+        try:
+            from .steps import ReadStep, ToolStep, AgentStep, HumanStep, WriteStep
+        except ImportError:
+            return errors
+
+        has_read = False
+        agent_count = 0
+        human_found = False
+
+        for i, step in enumerate(self.steps):
+            if isinstance(step, ReadStep):
+                has_read = True
+
+            elif isinstance(step, AgentStep):
+                if not has_read:
+                    errors.append(
+                        f"Step {i} (AgentStep) should have prior ReadStep to load inputs"
+                    )
+                agent_count += 1
+                if agent_count > 1:
+                    errors.append(
+                        f"Multiple AgentSteps in phase '{self.name}' - ambiguous dataflow. "
+                        f"Use separate phases or explicit WriteSteps between agents."
+                    )
+
+            elif isinstance(step, ToolStep):
+                # Tools can run without reads (e.g., git check), but warn if none
+                pass
+
+            elif isinstance(step, HumanStep):
+                human_found = True
+
+            elif isinstance(step, WriteStep):
+                if human_found:
+                    errors.append(
+                        f"WriteStep after HumanStep in phase '{self.name}' - "
+                        f"human approval should typically be the final gate"
+                    )
+
+        return errors
 
     # ──── Step Introspection (Sprint DSL-3) ────
 

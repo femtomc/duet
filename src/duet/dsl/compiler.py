@@ -287,6 +287,10 @@ class WorkflowCompiler:
                     f"Phase '{phase.name}' references unknown agent: '{phase.agent}'"
                 )
 
+            # Validate step ordering (facet script sanity checks)
+            step_errors = phase.validate_step_ordering()
+            self.errors.extend(step_errors)
+
             # Validate phase -> channel references (use get_reads/get_writes for step support)
             # This works for both step-based facets and old-style consumes/publishes
             for channel in phase.get_reads():

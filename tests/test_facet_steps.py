@@ -331,3 +331,37 @@ def test_phase_fallback_to_consumes_publishes():
 
     assert reads == [task]
     assert writes == [plan_ch]
+
+
+def test_step_ordering_validation():
+    """Test that phase validates step ordering."""
+    task = Channel(name="task")
+    plan_ch = Channel(name="plan")
+    code = Channel(name="code")
+
+    # Invalid: AgentStep without prior ReadStep
+    bad_phase = Phase(name="bad", agent="agent").call_agent("agent", writes=[plan_ch])
+    errors = bad_phase.validate_step_ordering()
+    assert len(errors) == 1
+    assert "ReadStep" in errors[0]
+
+    # Invalid: Multiple AgentSteps
+    multi_agent = (
+        Phase(name="multi", agent="agent")
+        .read(task)
+        .call_agent("agent1", writes=[plan_ch])
+        .call_agent("agent2", writes=[code])
+    )
+    errors = multi_agent.validate_step_ordering()
+    assert len(errors) == 1
+    assert "Multiple AgentSteps" in errors[0]
+
+    # Valid: Proper ordering
+    good_phase = (
+        Phase(name="good", agent="agent")
+        .read(task)
+        .tool(GitChangeTool())
+        .call_agent("agent", writes=[plan_ch])
+    )
+    errors = good_phase.validate_step_ordering()
+    assert len(errors) == 0
