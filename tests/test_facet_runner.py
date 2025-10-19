@@ -10,7 +10,21 @@ from rich.console import Console
 
 from duet.dsl import Channel, Phase
 from duet.dsl.tools import GitChangeTool
+from duet.dataspace import Dataspace, ChannelFact, FactPattern
 from duet.facet_runner import FacetRunner
+
+
+def create_dataspace_with_channels(**channels) -> Dataspace:
+    """Helper to create dataspace with ChannelFacts."""
+    ds = Dataspace()
+    for channel_name, value in channels.items():
+        ds.assert_fact(ChannelFact(
+            fact_id=f"{channel_name}_0",
+            channel_name=channel_name,
+            value=value,
+            iteration=0,
+        ))
+    return ds
 
 
 def test_facet_runner_simple_read_write():
@@ -24,18 +38,27 @@ def test_facet_runner_simple_read_write():
         .write(output, value="processed")
     )
 
+    # Create dataspace with task fact
+    ds = create_dataspace_with_channels(task="input data")
+
     runner = FacetRunner(console=Console())
     result = runner.execute_facet(
         phase=phase,
-        channel_state={"task": "input data"},
+        dataspace=ds,
         run_id="test-1",
         iteration=1,
         workspace_root="/workspace",
     )
 
     assert result.success
-    assert "task" in result.context.channel_reads
+    assert result.context.fact_reads["task"] == "input data"
     assert result.channel_writes["output"] == "processed"
+
+    # Output fact asserted to dataspace
+    output_facts = ds.query(FactPattern(fact_type=ChannelFact, constraints={"channel_name": "output"}))
+    assert len(output_facts) == 1
+    assert output_facts[0].value == "processed"
+    assert output_facts[0].iteration == 1
 
 
 def test_facet_runner_with_tool_step():

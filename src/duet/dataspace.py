@@ -110,6 +110,30 @@ class ApprovalGrant(Fact):
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass
+class ChannelFact(Fact):
+    """
+    Fact representing a channel value (migration from string channels).
+
+    Wraps channel values as structured facts in the dataspace.
+    As we move to fully typed facts (PlanDoc, etc.), these will be replaced.
+
+    Attributes:
+        fact_id: Unique fact ID
+        channel_name: Name of channel this fact belongs to
+        value: Channel value (any type - string, dict, etc.)
+        iteration: Iteration when value was written
+        phase: Phase that wrote this value
+    """
+
+    fact_id: str
+    channel_name: str
+    value: Any
+    iteration: int = 0
+    phase: Optional[str] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Fact Patterns (Subscriptions)
 # ──────────────────────────────────────────────────────────────────────────────

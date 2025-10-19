@@ -22,6 +22,7 @@ from .dsl.steps import (
     WriteStep,
 )
 from .dsl.workflow import Phase
+from .dataspace import ChannelFact, FactPattern
 from .models import AssistantRequest, AssistantResponse
 
 
@@ -67,46 +68,44 @@ class FacetRunner:
     def execute_facet(
         self,
         phase: Phase,
-        channel_state: Dict[str, Any],
+        dataspace,  # Dataspace (required - no more channel_state dict)
         run_id: str,
         iteration: int,
         workspace_root: str,
         adapter=None,  # AssistantAdapter for AgentStep execution
-        dataspace=None,  # Optional Dataspace for fact-based execution
     ) -> FacetExecutionResult:
         """
         Execute a facet script (phase with steps).
 
+        Reads from dataspace, executes steps, writes back as facts.
+
         Args:
             phase: Phase with step-based script
-            channel_state: Current channel values (legacy - will be replaced by dataspace)
+            dataspace: Dataspace for fact queries and assertions
             run_id: Current run identifier
             iteration: Current iteration number
             workspace_root: Workspace directory path
             adapter: Optional adapter for AgentStep execution
-            dataspace: Optional Dataspace for fact-based execution
 
         Returns:
             FacetExecutionResult with context, writes, and execution info
         """
-        # Initialize facet context
+        # Initialize facet context by querying dataspace for channel facts
         reads = phase.get_reads()
+        fact_reads = {}
 
-        # Read from dataspace if available, otherwise from channel_state
-        if dataspace:
-            # Query dataspace for channel facts (simplified - will be pattern-based later)
-            fact_reads = {}
-            for ch in reads:
-                # For now, get fact by channel name (transition to pattern queries)
-                facts = [f for f in dataspace.facts.values() if hasattr(f, 'channel') and f.channel == ch.name]
-                if facts:
-                    fact_reads[ch.name] = facts[-1]  # Latest fact
-                else:
-                    # Fallback to raw channel lookup (migration path)
-                    fact_reads[ch.name] = dataspace.get_fact(f"channel_{ch.name}")
-        else:
-            # Legacy: use channel_state dict
-            fact_reads = {ch.name: channel_state.get(ch.name) for ch in reads}
+        for ch in reads:
+            # Query dataspace for latest ChannelFact for this channel
+            pattern = FactPattern(fact_type=ChannelFact, constraints={"channel_name": ch.name})
+            facts = dataspace.query(pattern)
+
+            if facts:
+                # Use latest fact's value
+                latest_fact = max(facts, key=lambda f: f.iteration)
+                fact_reads[ch.name] = latest_fact.value
+            else:
+                # No fact yet - channel empty
+                fact_reads[ch.name] = None
 
         context = FacetContext(
             phase_name=phase.name,
@@ -189,10 +188,22 @@ class FacetRunner:
                     step_logs=step_logs,
                 )
 
-        # All steps completed successfully
+        # All steps completed successfully - assert staged writes as facts
+        for channel_name, value in staged_writes.items():
+            fact_id = f"{run_id}_{channel_name}_{iteration}"
+            fact = ChannelFact(
+                fact_id=fact_id,
+                channel_name=channel_name,
+                value=value,
+                iteration=iteration,
+                phase=phase.name,
+            )
+            handle = dataspace.assert_fact(fact)
+            context.add_handle(handle)
+
         return FacetExecutionResult(
             context=context,
-            channel_writes=staged_writes,
+            channel_writes=staged_writes,  # Keep for compat (TODO: remove)
             success=True,
             step_logs=step_logs,
         )
