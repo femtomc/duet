@@ -44,6 +44,7 @@ class FacetExecutionResult:
     agent_response: Optional[AssistantResponse] = None
     human_approval_needed: bool = False
     approval_reason: Optional[str] = None
+    approval_request_id: Optional[str] = None  # For scheduler tracking
     success: bool = True
     error: Optional[str] = None
     step_logs: List[Dict[str, Any]] = None
@@ -133,8 +134,11 @@ class FacetRunner:
 
                 # Check for blocked state (human approval pause)
                 if result.blocked:
+                    # Extract approval request ID from metadata
+                    request_id = result.metadata.get("approval_request_id")
+
                     # Persist ApprovalRequest to database if available
-                    if db:
+                    if db and request_id:
                         from .dataspace import ApprovalRequest, FactPattern
 
                         # Query for ApprovalRequest facts created by this execution
@@ -152,6 +156,7 @@ class FacetRunner:
                         channel_writes=staged_writes,
                         human_approval_needed=True,
                         approval_reason=result.notes or "Approval required",
+                        approval_request_id=request_id,
                         success=True,
                         step_logs=step_logs,
                     )

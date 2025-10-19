@@ -1008,6 +1008,15 @@ class Orchestrator:
             snapshot.phase = "blocked"
             snapshot.notes = f"Human approval required: {facet_result.approval_reason}"
             self.console.log(f"[yellow]Human approval needed:[/] {facet_result.approval_reason}")
+
+            # Notify scheduler to wait for approval grant
+            if facet_result.approval_request_id:
+                facet_id = f"{snapshot.run_id}_{phase}_{snapshot.iteration}"
+                self.scheduler.mark_waiting_for_approval(facet_id, facet_result.approval_request_id)
+                self.console.log(
+                    f"[dim]Scheduler listening for approval grant: {facet_result.approval_request_id}[/]"
+                )
+
             return None
 
         # Channel writes already asserted as ChannelFacts in dataspace by FacetRunner
@@ -1117,6 +1126,11 @@ class Orchestrator:
 
             # Load persisted facts into dataspace (e.g., ApprovalGrants)
             self.load_persisted_facts(run_id)
+
+            # Check if any waiting facets can resume due to grants
+            resumed = self.scheduler.check_approvals()
+            if resumed > 0:
+                self.console.log(f"[green]Resumed {resumed} facet(s) with pending approvals[/]")
 
             # Restore channel snapshot if available
             if self.workflow_executor and active_state.get("metadata"):

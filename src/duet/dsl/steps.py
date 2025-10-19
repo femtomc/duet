@@ -139,9 +139,18 @@ class StepResult:
         return cls(success=False, error=error)
 
     @classmethod
-    def pause(cls, reason: str) -> StepResult:
-        """Create paused result (human approval needed)."""
-        return cls(success=True, blocked=True, notes=reason)
+    def pause(cls, reason: str, request_id: Optional[str] = None) -> StepResult:
+        """
+        Create paused result (human approval needed).
+
+        Args:
+            reason: Human-readable reason for pause
+            request_id: Optional approval request ID for scheduler tracking
+        """
+        metadata = {}
+        if request_id:
+            metadata["approval_request_id"] = request_id
+        return cls(success=True, blocked=True, notes=reason, metadata=metadata)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -356,44 +365,46 @@ class HumanStep:
     reads: List[Channel] = field(default_factory=list)
     timeout: Optional[int] = None
 
-    def execute(self, context: FacetContext, dataspace=None) -> StepResult:
+    def execute(self, context: FacetContext, dataspace) -> StepResult:
         """
-        Request human approval by asserting ApprovalNeeded fact.
+        Request human approval by asserting ApprovalRequest fact.
 
-        Creates conversation: asserts ApprovalNeeded, waits for ApprovalGranted.
+        Creates conversation: asserts ApprovalRequest, waits for ApprovalGrant.
 
         Args:
             context: Facet execution context
-            dataspace: Dataspace for asserting approval request
+            dataspace: Dataspace for asserting approval request (required)
 
         Returns:
-            StepResult with blocked=True (pause for approval)
+            StepResult with blocked=True and request_id in metadata
         """
-        if dataspace:
-            # Syndicate-style conversation: assert request fact
-            from ..dataspace import ApprovalRequest
-            import uuid
+        if not dataspace:
+            return StepResult.fail("HumanStep requires dataspace for approval requests")
 
-            request_id = f"approval_{context.run_id}_{context.iteration}_{uuid.uuid4().hex[:8]}"
-            request_fact = ApprovalRequest(
-                fact_id=request_id,
-                requester=context.phase_name,
-                reason=self.reason,
-                context={
-                    "run_id": context.run_id,
-                    "iteration": context.iteration,
-                    "phase": context.phase_name,
-                },
-            )
+        # Syndicate-style conversation: assert request fact
+        from ..dataspace import ApprovalRequest
+        import uuid
 
-            handle = dataspace.assert_fact(request_fact)
-            context.add_handle(handle)
+        request_id = f"approval_{context.run_id}_{context.iteration}_{uuid.uuid4().hex[:8]}"
+        request_fact = ApprovalRequest(
+            fact_id=request_id,
+            requester=context.phase_name,
+            reason=self.reason,
+            context={
+                "run_id": context.run_id,
+                "iteration": context.iteration,
+                "phase": context.phase_name,
+            },
+        )
 
-            # Return pause with request_id for orchestrator to track
-            return StepResult.pause(f"Awaiting approval: {request_id}")
-        else:
-            # Legacy: just pause without fact
-            return StepResult.pause(f"Human approval needed: {self.reason}")
+        handle = dataspace.assert_fact(request_fact)
+        context.add_handle(handle)
+
+        # Return pause with request_id in metadata for scheduler tracking
+        return StepResult.pause(
+            reason=f"Awaiting approval: {request_id}",
+            request_id=request_id
+        )
 
 
 @dataclass
