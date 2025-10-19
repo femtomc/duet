@@ -659,34 +659,40 @@ class Phase(BaseElement):
         """
         Extract channels read by this phase from its step list.
 
-        Analyzes ReadStep, ToolStep.consumes, HumanStep.reads.
+        DEPRECATED: Use get_fact_reads() for typed fact dependencies.
 
         Returns:
-            List of Channel objects this phase reads from
+            Empty list (legacy channel-based reads removed)
         """
-        reads = []
-        seen = set()
+        return []
 
-        from .steps import ReadStep, ToolStep, HumanStep
+    def get_fact_reads(self) -> List:
+        """
+        Extract fact pattern dependencies from ReadSteps.
+
+        Returns:
+            List of FactPattern objects this phase depends on
+        """
+        from ..dataspace import FactPattern
+        from .steps import ReadStep
+
+        patterns = []
+        seen_types = set()
 
         for step in self.steps:
             if isinstance(step, ReadStep):
-                for channel in step.channels:
-                    if channel.id not in seen:
-                        reads.append(channel)
-                        seen.add(channel.id)
-            elif isinstance(step, ToolStep) and hasattr(step.tool, 'consumes'):
-                for channel in step.tool.consumes:
-                    if channel.id not in seen:
-                        reads.append(channel)
-                        seen.add(channel.id)
-            elif isinstance(step, HumanStep):
-                for channel in step.reads:
-                    if channel.id not in seen:
-                        reads.append(channel)
-                        seen.add(channel.id)
+                # Create FactPattern from ReadStep's fact_type and constraints
+                pattern_key = (step.fact_type, tuple(sorted((step.constraints or {}).items())))
+                if pattern_key not in seen_types:
+                    patterns.append(
+                        FactPattern(
+                            fact_type=step.fact_type,
+                            constraints=step.constraints or {}
+                        )
+                    )
+                    seen_types.add(pattern_key)
 
-        return reads
+        return patterns
 
     def get_writes(self) -> List[Channel]:
         """

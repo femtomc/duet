@@ -17,7 +17,7 @@ from .models import ReviewVerdict, RunSnapshot
 # ──────────────────────────────────────────────────────────────────────────────
 
 # Schema version for migrations
-SCHEMA_VERSION = 3  # Added messages table for channel payload history
+SCHEMA_VERSION = 4  # Added facts table for typed fact persistence
 
 SCHEMA_DDL = """
 -- Schema version tracking
@@ -123,6 +123,18 @@ CREATE TABLE IF NOT EXISTS messages (
     FOREIGN KEY (state_id) REFERENCES run_states(state_id)
 );
 
+-- Facts for typed fact persistence (ApprovalRequest, ApprovalGrant, etc.)
+CREATE TABLE IF NOT EXISTS facts (
+    fact_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    fact_type TEXT NOT NULL,  -- Fact class name (e.g., "ApprovalRequest")
+    payload TEXT NOT NULL,  -- JSON-encoded fact data
+    created_at TEXT NOT NULL,
+    retracted_at TEXT,  -- Timestamp when fact was retracted (NULL if active)
+
+    FOREIGN KEY (run_id) REFERENCES runs(run_id)
+);
+
 -- Indexes for common queries
 CREATE INDEX IF NOT EXISTS idx_runs_created_at ON runs(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_runs_phase ON runs(phase);
@@ -140,6 +152,10 @@ CREATE INDEX IF NOT EXISTS idx_messages_state_id ON messages(state_id);
 CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages(channel);
 CREATE INDEX IF NOT EXISTS idx_messages_run_channel ON messages(run_id, channel);
 CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_facts_run_id ON facts(run_id);
+CREATE INDEX IF NOT EXISTS idx_facts_fact_type ON facts(fact_type);
+CREATE INDEX IF NOT EXISTS idx_facts_run_type ON facts(run_id, fact_type);
+CREATE INDEX IF NOT EXISTS idx_facts_retracted ON facts(retracted_at);
 """
 
 
@@ -917,3 +933,99 @@ class DuetDatabase:
             List of messages in chronological order
         """
         return self.list_messages(run_id, channel=channel, limit=limit)
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Fact Persistence (Typed Facts)
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def save_fact(self, run_id: str, fact) -> None:
+        """
+        Persist a fact to the database.
+
+        Args:
+            run_id: Run identifier
+            fact: Fact instance to persist (must be JSON-serializable)
+        """
+        from dataclasses import asdict, is_dataclass
+
+        fact_type = type(fact).__name__
+
+        # Convert fact to dict for JSON serialization
+        if is_dataclass(fact):
+            payload = asdict(fact)
+        else:
+            payload = {"fact_id": fact.fact_id}
+
+        with self.transaction() as cur:
+            cur.execute(
+                """
+                INSERT OR REPLACE INTO facts (fact_id, run_id, fact_type, payload, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    fact.fact_id,
+                    run_id,
+                    fact_type,
+                    json.dumps(payload),
+                    self.now(),
+                ),
+            )
+
+    def get_facts(
+        self, run_id: str, fact_type: Optional[str] = None, active_only: bool = True
+    ) -> List[Dict[str, Any]]:
+        """
+        Query facts from database.
+
+        Args:
+            run_id: Run identifier
+            fact_type: Optional fact type filter (e.g., "ApprovalRequest")
+            active_only: If True, only return facts that haven't been retracted
+
+        Returns:
+            List of fact dicts with fact_id, fact_type, payload, created_at, retracted_at
+        """
+        query = """
+            SELECT fact_id, run_id, fact_type, payload, created_at, retracted_at
+            FROM facts
+            WHERE run_id = ?
+        """
+        params = [run_id]
+
+        if fact_type:
+            query += " AND fact_type = ?"
+            params.append(fact_type)
+
+        if active_only:
+            query += " AND retracted_at IS NULL"
+
+        query += " ORDER BY created_at ASC"
+
+        with self.transaction() as cur:
+            cur.execute(query, params)
+            rows = cur.fetchall()
+
+        return [
+            {
+                "fact_id": row["fact_id"],
+                "run_id": row["run_id"],
+                "fact_type": row["fact_type"],
+                "payload": json.loads(row["payload"]),
+                "created_at": row["created_at"],
+                "retracted_at": row["retracted_at"],
+            }
+            for row in rows
+        ]
+
+    def retract_fact(self, fact_id: str) -> None:
+        """
+        Mark a fact as retracted.
+
+        Args:
+            fact_id: Fact identifier to retract
+        """
+        with self.transaction() as cur:
+            cur.execute(
+                "UPDATE facts SET retracted_at = ? WHERE fact_id = ?",
+                (self.now(), fact_id),
+            )

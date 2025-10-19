@@ -55,20 +55,27 @@ class FacetScheduler:
         self.ready_queue: deque = deque()  # Facets ready to execute
         self.waiting: Set[str] = set()  # facet_ids waiting for facts
         self.executing: Optional[str] = None
+        self.approval_requests: Dict[str, str] = {}  # facet_id -> request_id mapping
 
     def register_facet(self, facet_id: str, phase: Phase, input_patterns: Optional[List[FactPattern]] = None) -> None:
         """
         Register a facet with the scheduler.
 
+        Extracts fact dependencies from phase's ReadSteps if not provided.
+
         Args:
             facet_id: Unique facet identifier
             phase: Phase defining facet script
-            input_patterns: Optional list of fact patterns facet depends on
+            input_patterns: Optional list of fact patterns (auto-extracted from ReadSteps if None)
         """
+        # Auto-extract fact dependencies from ReadSteps if not provided
+        if input_patterns is None:
+            input_patterns = phase.get_fact_reads()
+
         subscription = FacetSubscription(
             facet_id=facet_id,
             phase=phase,
-            input_patterns=input_patterns or [],
+            input_patterns=input_patterns,
         )
 
         self.facets[facet_id] = subscription
@@ -80,7 +87,7 @@ class FacetScheduler:
             self.waiting.add(facet_id)
 
         # Subscribe to dataspace for future facts
-        for pattern in input_patterns or []:
+        for pattern in input_patterns:
             self.dataspace.subscribe(pattern, lambda fact: self._on_fact_asserted(facet_id, fact))
 
     def _check_inputs_ready(self, subscription: FacetSubscription) -> bool:
@@ -159,6 +166,9 @@ class FacetScheduler:
         if self.executing == facet_id:
             self.executing = None
 
+        # Track approval request mapping
+        self.approval_requests[facet_id] = request_id
+
         # Subscribe to ApprovalGrant for this request
         pattern = FactPattern(
             fact_type=ApprovalGrant, constraints={"request_id": request_id}
@@ -169,6 +179,9 @@ class FacetScheduler:
             if facet_id in self.waiting:
                 self.waiting.remove(facet_id)
                 self.ready_queue.append(facet_id)
+                # Remove from approval tracking
+                if facet_id in self.approval_requests:
+                    del self.approval_requests[facet_id]
                 self.console.log(
                     f"[green]Facet {facet_id} approved! Moving to ready queue[/]"
                 )
@@ -180,12 +193,13 @@ class FacetScheduler:
         Check for pending approvals and resume waiting facets.
 
         Queries dataspace for ApprovalGrant facts and moves corresponding
-        waiting facets to the ready queue.
+        waiting facets to the ready queue. This is a force-check for grants
+        that may have been asserted before subscriptions were set up.
 
         Returns:
             Number of facets resumed
         """
-        from .dataspace import ApprovalGrant, ApprovalRequest, FactPattern
+        from .dataspace import ApprovalGrant, FactPattern
 
         resumed = 0
 
@@ -193,26 +207,23 @@ class FacetScheduler:
         grant_pattern = FactPattern(fact_type=ApprovalGrant)
         grants = self.dataspace.query(grant_pattern)
 
-        # Query all approval requests
-        request_pattern = FactPattern(fact_type=ApprovalRequest)
-        requests = self.dataspace.query(request_pattern)
-
         # Build map of request_id -> grant
-        granted_requests = {grant.request_id for grant in grants}
+        granted_requests = {grant.request_id: grant for grant in grants}
 
-        # Check if any waiting facets have grants
+        # Check each waiting facet for matching grants
         for facet_id in list(self.waiting):
-            # Check if this facet is waiting for an approval that's been granted
-            # This is a simplified check - in a full implementation, we'd track
-            # which request_id each facet is waiting for
-            subscription = self.facets.get(facet_id)
-            if subscription:
-                # Check if facet's context has an approval request
-                # For now, assume any waiting facet with a grant can resume
-                # This will be improved when facets track their request IDs
-                pass
+            # Check if this facet is waiting for an approval
+            request_id = self.approval_requests.get(facet_id)
+            if request_id and request_id in granted_requests:
+                # Grant found - move to ready queue
+                self.waiting.remove(facet_id)
+                self.ready_queue.append(facet_id)
+                del self.approval_requests[facet_id]
+                resumed += 1
+                self.console.log(
+                    f"[green]Facet {facet_id} approved (request {request_id})! Moving to ready queue[/]"
+                )
 
-        # For now, return 0 - full implementation requires facets to track request IDs
         return resumed
 
 

@@ -1009,8 +1009,6 @@ def approve(
     """
     import uuid
 
-    from .dataspace import ApprovalGrant, ApprovalRequest, Dataspace, FactPattern
-
     duet_config = find_config(config)
 
     # Database required
@@ -1037,57 +1035,59 @@ def approve(
     console.print(f"[dim]Approval reason:[/] {run.get('approval_reason', 'N/A')}")
     console.print()
 
-    # Initialize dataspace and load pending approval requests
-    dataspace = Dataspace()
+    # Query persisted ApprovalRequest facts from database
+    approval_facts = db.get_facts(run_id, fact_type="ApprovalRequest", active_only=True)
 
-    # Query for pending ApprovalRequest facts for this run
-    pattern = FactPattern(fact_type=ApprovalRequest, constraints={})
-    approval_requests = dataspace.query(pattern)
-
-    # Filter to requests for this run (check context)
-    run_requests = [
-        req for req in approval_requests if req.context.get("run_id") == run_id
-    ]
-
-    if not run_requests:
+    if not approval_facts:
         console.print(
-            f"[yellow]No pending approval requests found in dataspace for run {run_id}[/]"
+            f"[yellow]No pending approval requests found for run {run_id}[/]"
         )
-        console.print(f"[dim]The approval request may have expired or been retracted[/]")
+        console.print(f"[dim]The approval request may have been completed or expired[/]")
         # Continue anyway - update run status
     else:
-        console.print(f"[dim]Found {len(run_requests)} pending approval request(s)[/]")
-        for req in run_requests:
-            console.print(f"  • [cyan]{req.fact_id}[/] from {req.requester}: {req.reason}")
+        console.print(f"[dim]Found {len(approval_facts)} pending approval request(s)[/]")
+        for fact_data in approval_facts:
+            payload = fact_data["payload"]
+            console.print(
+                f"  • [cyan]{payload['fact_id']}[/] from {payload.get('requester', 'unknown')}: {payload.get('reason', 'N/A')}"
+            )
 
     # Create ApprovalGrant fact
     # Use the first pending request ID if available, or generate a generic grant
-    if run_requests:
-        request_id = run_requests[0].fact_id
+    if approval_facts:
+        request_id = approval_facts[0]["payload"]["fact_id"]
     else:
-        # No pending requests in dataspace - grant approval generically
+        # No pending requests - grant approval generically
         request_id = f"approval_request_{run_id}"
 
     grant_id = f"approval_grant_{uuid.uuid4().hex[:8]}"
-    grant = ApprovalGrant(
-        fact_id=grant_id,
-        request_id=request_id,
-        approver=approver,
-        notes=notes,
-        metadata={
+    grant_payload = {
+        "fact_id": grant_id,
+        "request_id": request_id,
+        "approver": approver,
+        "notes": notes,
+        "metadata": {
             "run_id": run_id,
             "granted_at": str(db.now()),
         },
-    )
+    }
 
-    # Assert grant into dataspace
-    handle = dataspace.assert_fact(grant)
+    # Save ApprovalGrant to database (so orchestrator can find it)
+    from .dataspace import ApprovalGrant
+
+    grant = ApprovalGrant(**grant_payload)
+    db.save_fact(run_id, grant)
+
     console.print()
     console.print(f"[green]✓ Approval granted![/]")
     console.print(f"[dim]Grant ID: {grant_id}[/]")
     console.print(f"[dim]Request ID: {request_id}[/]")
     if notes:
         console.print(f"[dim]Notes: {notes}[/]")
+
+    # Retract the approval request (it's been handled)
+    if approval_facts:
+        db.retract_fact(approval_facts[0]["fact_id"])
 
     # Update run status in database
     db.update_run_status(run_id, "active")

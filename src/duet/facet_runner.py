@@ -72,6 +72,7 @@ class FacetRunner:
         iteration: int,
         workspace_root: str,
         adapter=None,  # AssistantAdapter for AgentStep execution
+        db=None,  # DuetDatabase for persisting facts
     ) -> FacetExecutionResult:
         """
         Execute a facet script (phase with steps).
@@ -132,6 +133,19 @@ class FacetRunner:
 
                 # Check for blocked state (human approval pause)
                 if result.blocked:
+                    # Persist ApprovalRequest to database if available
+                    if db:
+                        from .dataspace import ApprovalRequest, FactPattern
+
+                        # Query for ApprovalRequest facts created by this execution
+                        pattern = FactPattern(fact_type=ApprovalRequest)
+                        requests = dataspace.query(pattern)
+
+                        # Persist all approval requests for this run
+                        for req in requests:
+                            if req.context.get("run_id") == run_id:
+                                db.save_fact(run_id, req)
+
                     # Not a failure, execution paused for human
                     return FacetExecutionResult(
                         context=context,

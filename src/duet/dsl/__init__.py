@@ -1,53 +1,18 @@
 """
-Duet Workflow DSL.
+Duet Workflow DSL with Typed Facts.
 
-A Python DSL for defining orchestration workflows programmatically.
-Replaces the legacy .duet/prompts/*.md template system with a type-safe,
-composable workflow definition language.
+A Python DSL for defining orchestration workflows with type-safe fact-based dataflow.
+Uses Syndicate-inspired reactive execution with structured facts instead of string channels.
 
-Example Workflow:
-    from duet.dsl import Workflow, Agent, Channel, Phase, Transition, When
-
-    workflow = Workflow(
-        agents=[
-            Agent(name="planner", provider="codex", model="gpt-5-codex"),
-            Agent(name="implementer", provider="claude", model="sonnet"),
-            Agent(name="reviewer", provider="codex", model="gpt-5-codex"),
-        ],
-        channels=[
-            Channel(name="task", description="Input task specification"),
-            Channel(name="plan", description="Implementation plan from planner"),
-            Channel(name="code", description="Implementation artifacts"),
-            Channel(name="verdict", description="Review outcome"),
-        ],
-        phases=[
-            Phase(name="plan", agent="planner",
-                  consumes=["task"], publishes=["plan"],
-                  description="Draft implementation plan"),
-            Phase(name="implement", agent="implementer",
-                  consumes=["plan"], publishes=["code"],
-                  description="Execute plan and make changes"),
-            Phase(name="review", agent="reviewer",
-                  consumes=["plan", "code"], publishes=["verdict"],
-                  description="Review the implementation"),
-            Phase(name="done", agent="reviewer",
-                  description="Task complete", is_terminal=True),
-        ],
-        transitions=[
-            Transition(from_phase="plan", to_phase="implement"),
-            Transition(from_phase="implement", to_phase="review"),
-            Transition(from_phase="review", to_phase="done",
-                       when=When.channel_has("verdict", "approve")),
-            Transition(from_phase="review", to_phase="plan",
-                       when=When.channel_has("verdict", "changes_requested")),
-        ],
-    )
-
-Custom Fact Types (Typed Facts):
+Example Workflow with Typed Facts:
     from dataclasses import dataclass
-    from duet.dsl import Fact, fact, FactPattern
+    from duet.dsl import (
+        Workflow, Agent, Phase, Transition, When,
+        Fact, fact, PlanDoc, CodeArtifact, ReviewVerdict
+    )
+    from duet.dsl.steps import ReadStep, WriteStep, AgentStep
 
-    # Define your own fact types
+    # Define custom fact type
     @fact
     @dataclass
     class TaskRequest(Fact):
@@ -55,7 +20,82 @@ Custom Fact Types (Typed Facts):
         task_description: str
         priority: int = 1
 
-    # Use in workflows with dataspace
+    workflow = Workflow(
+        agents=[
+            Agent(name="planner", provider="codex", model="gpt-5-codex"),
+            Agent(name="implementer", provider="claude", model="sonnet"),
+            Agent(name="reviewer", provider="codex", model="gpt-5-codex"),
+        ],
+        phases=[
+            Phase(
+                name="plan",
+                agent="planner",
+                steps=[
+                    ReadStep(fact_type=TaskRequest, into="task"),
+                    AgentStep(agent="planner", writes=[]),
+                    WriteStep(
+                        fact_type=PlanDoc,
+                        values={
+                            "task_id": "$task.fact_id",
+                            "content": "$agent_response"
+                        }
+                    ),
+                ],
+                description="Draft implementation plan"
+            ),
+            Phase(
+                name="implement",
+                agent="implementer",
+                steps=[
+                    ReadStep(fact_type=PlanDoc, into="plan"),
+                    AgentStep(agent="implementer", writes=[]),
+                    WriteStep(
+                        fact_type=CodeArtifact,
+                        values={
+                            "plan_id": "$plan.fact_id",
+                            "summary": "$agent_response"
+                        }
+                    ),
+                ],
+                description="Execute plan and make changes"
+            ),
+            Phase(
+                name="review",
+                agent="reviewer",
+                steps=[
+                    ReadStep(fact_type=CodeArtifact, into="code"),
+                    AgentStep(agent="reviewer", writes=[]),
+                    WriteStep(
+                        fact_type=ReviewVerdict,
+                        values={
+                            "code_id": "$code.fact_id",
+                            "verdict": "$verdict",
+                            "feedback": "$feedback"
+                        }
+                    ),
+                ],
+                description="Review the implementation"
+            ),
+            Phase(name="done", agent="reviewer", steps=[], is_terminal=True),
+        ],
+        transitions=[
+            Transition(from_phase="plan", to_phase="implement"),
+            Transition(from_phase="implement", to_phase="review"),
+            Transition(
+                from_phase="review",
+                to_phase="done",
+                when=When.fact_exists(ReviewVerdict, constraints={"verdict": "approve"})
+            ),
+            Transition(
+                from_phase="review",
+                to_phase="plan",
+                when=When.fact_exists(ReviewVerdict, constraints={"verdict": "changes_requested"})
+            ),
+        ],
+    )
+
+Using Facts Directly:
+    from duet.dsl import FactPattern
     from duet.dataspace import Dataspace
 
     ds = Dataspace()
