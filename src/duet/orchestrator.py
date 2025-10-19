@@ -18,6 +18,7 @@ from .adapters.base import StreamEvent
 from .approval import ApprovalNotifier
 from .artifacts import ArtifactStore
 from .config import DuetConfig
+from .dataspace import Dataspace, ChannelFact
 from .git_operations import GitWorkspace, GitError
 from .logging import DuetLogger
 from .models import (
@@ -28,6 +29,7 @@ from .models import (
     TransitionDecision,
 )
 from .persistence import DuetDatabase, PersistenceError
+from .scheduler import FacetScheduler
 from .streaming import EnhancedStreamingDisplay
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -126,6 +128,14 @@ class Orchestrator:
         from .executor import WorkflowExecutor
         self.workflow_executor = WorkflowExecutor(self.workflow_graph, console=self.console)
         self.console.log(f"[dim]Loaded workflow:[/] {len(self.workflow_graph.phases)} phases")
+
+        # Initialize dataspace for fact-based execution
+        self.dataspace = Dataspace()
+        self.console.log("[dim]Dataspace initialized for reactive execution[/]")
+
+        # Initialize facet scheduler
+        self.scheduler = FacetScheduler(self.dataspace, console=self.console)
+        self.console.log("[dim]Reactive facet scheduler initialized[/]")
 
     def _resolve_workflow_path(self) -> Optional[Path]:
         """Resolve workflow file path for hot-reload tracking."""
@@ -278,25 +288,29 @@ class Orchestrator:
         self.console.rule(f"Starting Duet run {snapshot.run_id}")
         self.artifacts.checkpoint(snapshot)
 
-        # ──── Reset and Seed Channels ────
-        if self.workflow_executor:
-            # Clear any previous run's channel state
-            self.workflow_executor.channel_store.clear()
+        # ──── Seed Dataspace with Task Fact ────
+        # Clear dataspace for new run
+        self.dataspace.clear()
 
-            # Seed task channel using workflow configuration
-            task_channel_name = self.workflow_graph.get_task_channel()
-            if task_channel_name:
-                # Get task input from metadata (use minimal default if not provided for testing)
-                task_input = snapshot.metadata.get("task")
-                if not task_input:
-                    # Fallback for tests/backwards compatibility
-                    task_input = "Execute workflow"
-                    self.console.log("[dim]No task input provided, using default[/]")
+        # Seed task channel using workflow configuration
+        task_channel_name = self.workflow_graph.get_task_channel()
+        if task_channel_name:
+            # Get task input from metadata
+            task_input = snapshot.metadata.get("task", "Execute workflow")
+            if not snapshot.metadata.get("task"):
+                self.console.log("[dim]No task input provided, using default[/]")
 
-                self.workflow_executor.seed_channel(task_channel_name, task_input)
-                self.console.log(f"[dim]Initialized channels, seeded '{task_channel_name}'[/]")
-            else:
-                self.console.log("[dim]No task channel configured (workflow may not need one)[/]")
+            # Assert task as ChannelFact
+            self.dataspace.assert_fact(ChannelFact(
+                fact_id=f"{snapshot.run_id}_task_0",
+                channel_name=task_channel_name,
+                value=task_input,
+                iteration=0,
+                phase="seed",
+            ))
+            self.console.log(f"[dim]Seeded dataspace with task fact: '{task_channel_name}'[/]")
+        else:
+            self.console.log("[dim]No task channel configured[/]")
 
         # ──── Database: Insert Run Record ────
         if self.db:
@@ -937,19 +951,19 @@ class Orchestrator:
         # Initialize facet runner
         runner = FacetRunner(console=self.console)
 
-        # Get current channel state
-        channel_state = self.workflow_executor.get_current_channels() if self.workflow_executor else {}
-
-        # Execute facet
+        # Execute facet with dataspace (turn-based atomic publication)
         self.console.log(f"[cyan]Executing facet script:[/] {len(phase_def.steps)} steps")
-        facet_result = runner.execute_facet(
-            phase=phase_def,
-            channel_state=channel_state,
-            run_id=snapshot.run_id,
-            iteration=snapshot.iteration,
-            workspace_root=str(self.config.storage.workspace_root),
-            adapter=self._select_adapter(phase),
-        )
+
+        with self.dataspace.in_turn():
+            facet_result = runner.execute_facet(
+                phase=phase_def,
+                dataspace=self.dataspace,
+                run_id=snapshot.run_id,
+                iteration=snapshot.iteration,
+                workspace_root=str(self.config.storage.workspace_root),
+                adapter=self._select_adapter(phase),
+            )
+        # Subscriptions triggered atomically after turn
 
         # Handle facet execution failure
         if not facet_result.success:
@@ -965,11 +979,8 @@ class Orchestrator:
             self.console.log(f"[yellow]Human approval needed:[/] {facet_result.approval_reason}")
             return None
 
-        # Apply staged channel writes
-        if self.workflow_executor:
-            for channel_name, value in facet_result.channel_writes.items():
-                self.workflow_executor.channel_store.set(channel_name, value)
-                self.console.log(f"[dim]Channel write:[/] {channel_name}")
+        # Channel writes already asserted as ChannelFacts in dataspace by FacetRunner
+        # No need to apply separately
 
         # Persist step-by-step execution logs
         if self.db and facet_result.step_logs:
