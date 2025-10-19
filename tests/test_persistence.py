@@ -278,7 +278,7 @@ def test_search_runs_by_phase(in_memory_db):
     # Insert runs with different phases (unique IDs)
     phases = ["done", "blocked", "done"]
     for i, phase in enumerate(phases):
-        snapshot = RunSnapshot(run_id=f"search-{phase.value}-{i}", iteration=0, phase=phase)
+        snapshot = RunSnapshot(run_id=f"search-{phase}-{i}", iteration=0, phase=phase)
         db.insert_run(snapshot)
 
     # Search for DONE
