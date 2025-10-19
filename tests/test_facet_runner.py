@@ -39,7 +39,10 @@ def test_facet_runner_simple_read_write():
 
 
 def test_facet_runner_with_tool_step():
-    """Test facet runner executing tool step."""
+    """Test facet runner executing tool step and agent."""
+    from unittest.mock import Mock
+    from duet.models import AssistantResponse
+
     task = Channel(name="task")
     plan_ch = Channel(name="plan")
 
@@ -50,6 +53,13 @@ def test_facet_runner_with_tool_step():
         .call_agent("planner", writes=[plan_ch])
     )
 
+    # Mock adapter
+    mock_adapter = Mock()
+    mock_adapter.stream = Mock(return_value=AssistantResponse(
+        content="Implementation plan created",
+        metadata={}
+    ))
+
     runner = FacetRunner()
     result = runner.execute_facet(
         phase=phase,
@@ -57,11 +67,15 @@ def test_facet_runner_with_tool_step():
         run_id="test-2",
         iteration=1,
         workspace_root="/workspace",
+        adapter=mock_adapter,
     )
 
     assert result.success
-    # Tool executed but no channel writes (context only)
-    # Agent step prepared but not executed (needs orchestrator integration)
+    # Agent should have been invoked
+    assert mock_adapter.stream.called
+    # Response written to plan channel
+    assert plan_ch.name in result.channel_writes
+    assert result.channel_writes[plan_ch.name] == "Implementation plan created"
 
 
 def test_facet_runner_human_step_pauses():

@@ -195,21 +195,85 @@ class FacetRunner:
         adapter=None,
     ) -> StepResult:
         """
-        Execute AgentStep - invoke agent (stub for now).
+        Execute AgentStep - invoke agent and write response to channels.
 
-        Sprint DSL-4: Agent execution integrated with orchestrator adapter system.
-        For now, this step just marks that agent invocation is needed.
+        Builds prompt from FacetContext, calls adapter, writes response
+        to declared channels.
+
+        Args:
+            step: AgentStep configuration
+            context: Facet execution context
+            adapter: Adapter to invoke
+
+        Returns:
+            StepResult with agent response in channel_writes
         """
-        # Stub: actual agent invocation happens in orchestrator
-        # This step prepares the agent call
-        return StepResult(
-            metadata={
-                "agent_step": True,
-                "agent": step.agent,
-                "writes": [ch.name for ch in step.writes],
+        if not adapter:
+            return StepResult.fail("No adapter provided for AgentStep")
+
+        # Build prompt from context
+        prompt_parts = [f"Phase: {context.phase_name}"]
+
+        # Include channel reads
+        if context.channel_reads:
+            prompt_parts.append("\n──── Channel Inputs ────")
+            for key, value in context.channel_reads.items():
+                value_str = str(value)[:500]  # Truncate long values
+                prompt_parts.append(f"{key}: {value_str}")
+
+        # Include local context state
+        if context.local_state:
+            prompt_parts.append("\n──── Context State ────")
+            for key, value in context.local_state.items():
+                value_str = str(value)[:500]
+                prompt_parts.append(f"{key}: {value_str}")
+
+        # Use custom prompt or default
+        if step.prompt_template:
+            prompt_parts.append(f"\n{step.prompt_template}")
+
+        prompt = "\n".join(prompt_parts)
+
+        # Build request
+        from .models import AssistantRequest
+
+        request = AssistantRequest(
+            role=step.role or step.agent,
+            prompt=prompt,
+            context={
+                "phase": context.phase_name,
+                "run_id": context.run_id,
+                "iteration": context.iteration,
+                "facet_execution": True,
             },
-            notes=f"Agent '{step.agent}' ready to invoke",
+        )
+
+        # Invoke adapter
+        try:
+            response = adapter.stream(request, on_event=lambda e: None)
+        except Exception as exc:
+            return StepResult.fail(f"Agent '{step.agent}' failed: {exc}")
+
+        if not response.content or not response.content.strip():
+            return StepResult.fail(f"Agent '{step.agent}' returned empty response")
+
+        # Write response to declared channels
+        channel_writes = {}
+        if step.writes:
+            # Primary output goes to first channel
+            channel_writes[step.writes[0].name] = response.content
+
+            # Additional channels from response metadata
+            for channel in step.writes[1:]:
+                if channel.name in response.metadata:
+                    channel_writes[channel.name] = response.metadata[channel.name]
+
+        return StepResult(
+            context_updates={"agent_response": response.content},
+            channel_writes=channel_writes,
+            metadata=response.metadata,
             success=True,
+            notes=f"Agent '{step.agent}' completed",
         )
 
     def _execute_human_step(self, step: HumanStep, context: FacetContext) -> StepResult:
