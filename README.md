@@ -13,9 +13,12 @@ Here's the story ...
 Many agentic IDEs (Codex, Claude Code, Kiro) bake in opinions about the _interaction model_ through which the user engages with their agents. This is not a bad thing: a stable UI and interaction model can be useful and reliable!
 
 But _this project_ is concerned with trying to have a bit of fun with these wacky, stochastic, not-at-all stable _ghosts_ of human language intelligence: being useful is an accident.
-And with that spirit in mind, the aspirational goal here is a _programmable interaction system_. If one wishes, they can _recover_ the interaction models of the systems mentioned above as _programs_ within Duet (for example: the "spec-driven development" interaction model from a system like Kiro is a Duet program).
 
-These interaction models take the form of _workflow programs_ (in a lightweight Python DSL) which are executed by a workflow executor. The programming model here is based on the _syndicated actor model_ -- which is [a useful programming model for constructing interacting concurrent systems](https://syndicate-lang.org/about/).
+And with that spirit in mind, the aspirational concern of this system right here is a _programmable interactions_. You, the user, get to have a say in how you interact with these spirits.
+
+The implication of this type of programmability is that, if one wishes, they can _recover_ the interaction models of the systems mentioned above as _programs_ within Duet (for example: the "spec-driven development" interaction model from a system like Kiro is a Duet program).
+
+In Duet, these interaction models take the form of _workflow programs_ (in a lightweight Python DSL) which are executed by a workflow executor. The programming model which Duet exposes is based on the _syndicated actor model_ -- which is [a useful programming model for constructing interacting concurrent systems](https://syndicate-lang.org/about/).
 
 A workflow program defines a type of conversation space -- not fully unstructured or spontaneous (unless you want it to be) -- a space through which multiple agents can interact to "do stuff".
 
