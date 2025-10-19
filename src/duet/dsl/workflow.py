@@ -427,6 +427,119 @@ class Phase(BaseElement):
         BaseElement.__post_init__(self)
         # Note: consumes/publishes can be empty for simple phases
 
+    # ──── Fluent Builder API (Sprint DSL-2) ────
+
+    def with_agent(self, agent: str) -> Phase:
+        """
+        Set the agent for this phase (fluent API).
+
+        Returns a new Phase instance with the agent set (copy-on-write).
+        """
+        from dataclasses import replace
+        return replace(self, agent=agent)
+
+    def consume(self, *channels: Channel) -> Phase:
+        """
+        Add channels to consume list (fluent API).
+
+        Returns a new Phase instance with channels added (copy-on-write).
+        """
+        from dataclasses import replace
+        new_consumes = list(self.consumes) + list(channels)
+        return replace(self, consumes=new_consumes)
+
+    def publish(self, *channels: Channel) -> Phase:
+        """
+        Add channels to publish list (fluent API).
+
+        Returns a new Phase instance with channels added (copy-on-write).
+        """
+        from dataclasses import replace
+        new_publishes = list(self.publishes) + list(channels)
+        return replace(self, publishes=new_publishes)
+
+    def describe(self, text: str) -> Phase:
+        """
+        Set phase description (fluent API).
+
+        Returns a new Phase instance with description set (copy-on-write).
+        """
+        from dataclasses import replace
+        return replace(self, description=text)
+
+    def terminal(self) -> Phase:
+        """
+        Mark this phase as terminal (fluent API).
+
+        Returns a new Phase instance marked as terminal (copy-on-write).
+        """
+        from dataclasses import replace
+        return replace(self, is_terminal=True)
+
+    def with_metadata(self, **kwargs) -> Phase:
+        """
+        Add metadata entries (fluent API).
+
+        Returns a new Phase instance with metadata merged (copy-on-write).
+        """
+        from dataclasses import replace
+        new_metadata = {**self.metadata, **kwargs}
+        return replace(self, metadata=new_metadata)
+
+    # ──── Policy Helpers (Sprint DSL-2) ────
+
+    def with_human(self, reason: str = "Human approval required") -> Phase:
+        """
+        Require human approval before proceeding from this phase (fluent API).
+
+        Returns a new Phase instance with requires_approval=True in metadata.
+        """
+        return self.with_metadata(requires_approval=True, approval_reason=reason)
+
+    def requires_git(self) -> Phase:
+        """
+        Require git changes from this phase (fluent API).
+
+        Returns a new Phase instance with git_changes_required=True in metadata.
+        """
+        return self.with_metadata(git_changes_required=True)
+
+    def counts_as_replan(self, loop_to: Optional[Phase] = None) -> Phase:
+        """
+        Mark transitions from this phase as replans (fluent API).
+
+        Args:
+            loop_to: Optional target phase that forms the replan loop
+
+        Returns a new Phase instance with replan_transition=True in metadata.
+        """
+        metadata_update = {"replan_transition": True}
+        if loop_to:
+            metadata_update["replan_target"] = loop_to.name
+        return self.with_metadata(**metadata_update)
+
+    # ──── Convenience Constructors (Sprint DSL-2) ────
+
+    @classmethod
+    def terminal_phase(cls, name: str, agent: str, description: str = "") -> Phase:
+        """
+        Create a terminal phase (convenience constructor).
+
+        Args:
+            name: Phase name
+            agent: Agent name
+            description: Optional description
+
+        Returns:
+            Terminal Phase instance
+        """
+        return cls(
+            name=name,
+            agent=agent,
+            description=description,
+            is_terminal=True,
+        )
+
 
 @dataclass
 class Transition:
