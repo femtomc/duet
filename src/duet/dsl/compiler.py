@@ -105,9 +105,12 @@ class WorkflowGraph:
         """
         Check if a transition counts as a replan.
 
-        A replan is detected if:
-        1. The from_phase has metadata replan_transition=True (transitioning FROM a review-like phase back to planning)
-        2. The to_phase has metadata replan_transition=True (transitioning TO a planning-like phase from a review)
+        A replan is detected when transitioning FROM a review-like phase
+        BACK TO an earlier planning phase. Both phases should be marked
+        with replan_transition=True to form a replan loop.
+
+        Alternatively, mark just the from_phase to indicate it's a replan source,
+        and check if we're transitioning to the initial phase or an earlier phase.
 
         Args:
             from_phase: Source phase name
@@ -116,13 +119,30 @@ class WorkflowGraph:
         Returns:
             True if this transition counts as a replan
         """
-        # Check both phases for replan markers
         from_marked = self.get_phase_metadata(from_phase, "replan_transition", False)
-        to_marked = self.get_phase_metadata(to_phase, "replan_transition", False)
 
-        # A replan occurs if either phase is marked as part of a replan transition
-        # Typically: from_phase would be review (source), to_phase would be plan (destination)
-        return from_marked or to_marked
+        # If from_phase is not marked as a replan source, it's not a replan
+        if not from_marked:
+            return False
+
+        # Check if we're transitioning back to initial phase or an earlier phase
+        # This indicates a loop/replan behavior
+        if to_phase == self.initial_phase:
+            return True
+
+        # Check phase order (if to_phase appears earlier in execution order)
+        try:
+            order = self.get_phase_order()
+            if from_phase in order and to_phase in order:
+                from_idx = order.index(from_phase)
+                to_idx = order.index(to_phase)
+                if to_idx < from_idx:
+                    # Going backwards in the flow
+                    return True
+        except (ValueError, IndexError):
+            pass
+
+        return False
 
     def requires_git_changes(self, phase_name: str) -> bool:
         """Check if a phase requires git changes."""
