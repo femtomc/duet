@@ -276,3 +276,55 @@ def test_tool_with_explicit_channel_writes():
     assert result.success
     assert "processed" in result.context_updates
     assert "output" in result.channel_writes
+
+
+def test_phase_get_reads_from_steps():
+    """Test that Phase.get_reads() extracts channels from steps."""
+    task = Channel(name="task")
+    feedback = Channel(name="feedback")
+    plan_ch = Channel(name="plan")
+
+    phase = (
+        Phase(name="plan", agent="planner")
+        .read(task, feedback)
+        .call_agent("planner", writes=[plan_ch])
+    )
+
+    reads = phase.get_reads()
+    assert len(reads) == 2
+    assert task in reads
+    assert feedback in reads
+
+
+def test_phase_get_writes_from_steps():
+    """Test that Phase.get_writes() extracts channels from steps."""
+    task = Channel(name="task")
+    plan_ch = Channel(name="plan")
+    status = Channel(name="status")
+
+    phase = (
+        Phase(name="plan", agent="planner")
+        .read(task)
+        .call_agent("planner", writes=[plan_ch])
+        .write(status, value="planned")
+    )
+
+    writes = phase.get_writes()
+    assert len(writes) == 2
+    assert plan_ch in writes
+    assert status in writes
+
+
+def test_phase_fallback_to_consumes_publishes():
+    """Test that phases without steps fall back to old consumes/publishes."""
+    task = Channel(name="task")
+    plan_ch = Channel(name="plan")
+
+    # Old-style phase definition
+    phase = Phase(name="plan", agent="planner", consumes=[task], publishes=[plan_ch])
+
+    reads = phase.get_reads()
+    writes = phase.get_writes()
+
+    assert reads == [task]
+    assert writes == [plan_ch]

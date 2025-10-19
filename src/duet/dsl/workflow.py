@@ -671,6 +671,87 @@ class Phase(BaseElement):
         new_steps = list(self.steps) + [step]
         return replace(self, steps=new_steps)
 
+    # ──── Step Introspection (Sprint DSL-3) ────
+
+    def get_reads(self) -> List[Channel]:
+        """
+        Extract channels read by this phase from its step list.
+
+        Analyzes ReadStep, ToolStep.consumes, HumanStep.reads to determine
+        which channels this phase subscribes to.
+
+        Returns:
+            List of Channel objects this phase reads from
+        """
+        reads = []
+        seen = set()
+
+        # Import step types
+        try:
+            from .steps import ReadStep, ToolStep, HumanStep
+        except ImportError:
+            # Steps not available - fall back to consumes
+            return self.consumes
+
+        for step in self.steps:
+            if isinstance(step, ReadStep):
+                for channel in step.channels:
+                    if channel.id not in seen:
+                        reads.append(channel)
+                        seen.add(channel.id)
+            elif isinstance(step, ToolStep) and hasattr(step.tool, 'consumes'):
+                for channel in step.tool.consumes:
+                    if channel.id not in seen:
+                        reads.append(channel)
+                        seen.add(channel.id)
+            elif isinstance(step, HumanStep):
+                for channel in step.reads:
+                    if channel.id not in seen:
+                        reads.append(channel)
+                        seen.add(channel.id)
+
+        # Fallback: if no steps, use old consumes
+        return reads if reads else self.consumes
+
+    def get_writes(self) -> List[Channel]:
+        """
+        Extract channels written by this phase from its step list.
+
+        Analyzes ToolStep.outputs, AgentStep.writes, WriteStep to determine
+        which channels this phase publishes to.
+
+        Returns:
+            List of Channel objects this phase writes to
+        """
+        writes = []
+        seen = set()
+
+        # Import step types
+        try:
+            from .steps import ToolStep, AgentStep, WriteStep
+        except ImportError:
+            # Steps not available - fall back to publishes
+            return self.publishes
+
+        for step in self.steps:
+            if isinstance(step, ToolStep):
+                for channel in step.outputs:
+                    if channel.id not in seen:
+                        writes.append(channel)
+                        seen.add(channel.id)
+            elif isinstance(step, AgentStep):
+                for channel in step.writes:
+                    if channel.id not in seen:
+                        writes.append(channel)
+                        seen.add(channel.id)
+            elif isinstance(step, WriteStep):
+                if step.channel.id not in seen:
+                    writes.append(step.channel)
+                    seen.add(step.channel.id)
+
+        # Fallback: if no steps, use old publishes
+        return writes if writes else self.publishes
+
     # ──── Convenience Constructors (Sprint DSL-2) ────
 
     @classmethod
