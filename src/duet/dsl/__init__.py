@@ -67,6 +67,13 @@ from .registry import (
     register_facet,
 )
 
+# Compiler
+from .compiler import (
+    compile_handle,
+    compile_program,
+    validate_and_compile,
+)
+
 # Workflow primitives
 from .workflow import Phase
 
@@ -107,6 +114,10 @@ __all__ = [
     "FacetProgram",
     "FacetHandle",
     "RunPolicy",
+    # Compiler
+    "compile_program",
+    "compile_handle",
+    "validate_and_compile",
     # Registry
     "FacetRegistry",
     "register_facet",

@@ -8,6 +8,7 @@ Facets subscribe to fact patterns and wake when inputs ready.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Set
 from collections import deque
 
@@ -17,10 +18,73 @@ from .dataspace import Dataspace, FactPattern, Handle
 from .dsl.workflow import Phase
 
 
+class ExecutionPolicy(Enum):
+    """Execution policy for facet scheduling."""
+
+    RUN_ONCE = "run_once"  # Execute once when triggers satisfied, then complete
+    LOOP_UNTIL = "loop_until"  # Re-execute until guard predicate true
+    ON_FACT = "on_fact"  # Execute whenever new matching fact appears
+    WAIT_APPROVAL = "wait_approval"  # Wait for human approval (already supported)
+
+
+@dataclass
+class FacetRegistration:
+    """
+    Registration for a facet with the scheduler.
+
+    Combines facet definition, trigger patterns, and execution policy.
+    Produced by the compiler from FacetProgram.
+
+    Attributes:
+        facet_id: Unique facet identifier
+        phase: Executable phase (from FacetDefinition.to_phase())
+        trigger_patterns: Fact patterns that activate this facet
+        policy: Execution policy (RUN_ONCE, LOOP_UNTIL, etc.)
+        guard: Optional predicate for conditional execution/looping
+        metadata: Additional registration metadata
+        completed: Whether facet has completed (for RUN_ONCE)
+    """
+
+    facet_id: str
+    phase: Phase
+    trigger_patterns: List[FactPattern]
+    policy: ExecutionPolicy = ExecutionPolicy.RUN_ONCE
+    guard: Optional[Callable[[Any], bool]] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    completed: bool = False
+
+    def should_execute(self, facts: Optional[List[Any]] = None) -> bool:
+        """
+        Check if facet should execute based on policy and guard.
+
+        Args:
+            facts: Optional facts to evaluate guard against
+
+        Returns:
+            True if facet should execute
+        """
+        # If already completed and RUN_ONCE, don't execute
+        if self.policy == ExecutionPolicy.RUN_ONCE and self.completed:
+            return False
+
+        # If guard exists, evaluate it
+        if self.guard and facts:
+            # For LOOP_UNTIL, execute if guard is False (loop until True)
+            if self.policy == ExecutionPolicy.LOOP_UNTIL:
+                # Guard should return True to stop looping
+                # So execute if guard returns False
+                return not all(self.guard(f) for f in facts)
+
+            # For other policies, execute if guard is True
+            return any(self.guard(f) for f in facts)
+
+        return True
+
+
 @dataclass
 class FacetSubscription:
     """
-    Subscription tracking for a facet.
+    Subscription tracking for a facet (legacy, for backward compatibility).
 
     Links facet to fact patterns it depends on.
     When matching facts appear, facet becomes ready.
@@ -51,7 +115,8 @@ class FacetScheduler:
         self.dataspace = dataspace
         self.console = console or Console()
 
-        self.facets: Dict[str, FacetSubscription] = {}  # facet_id -> subscription
+        self.facets: Dict[str, FacetSubscription] = {}  # facet_id -> subscription (legacy)
+        self.registrations: Dict[str, FacetRegistration] = {}  # facet_id -> registration (new)
         self.ready_queue: deque = deque()  # Facets ready to execute
         self.waiting: Set[str] = set()  # facet_ids waiting for facts
         self.executing: Optional[str] = None
@@ -89,6 +154,75 @@ class FacetScheduler:
         # Subscribe to dataspace for future facts
         for pattern in input_patterns:
             self.dataspace.subscribe(pattern, lambda fact: self._on_fact_asserted(facet_id, fact))
+
+    def register(self, registration: FacetRegistration) -> None:
+        """
+        Register a facet using FacetRegistration (new API).
+
+        Supports execution policies and guards for advanced scheduling.
+
+        Args:
+            registration: FacetRegistration with policy and triggers
+        """
+        self.registrations[registration.facet_id] = registration
+
+        # Check if triggers already satisfied
+        if self._check_triggers_ready(registration):
+            # Additional check: should_execute based on policy/guard
+            if registration.should_execute():
+                self.ready_queue.append(registration.facet_id)
+            else:
+                self.waiting.add(registration.facet_id)
+        else:
+            self.waiting.add(registration.facet_id)
+
+        # Subscribe to dataspace for future facts
+        for pattern in registration.trigger_patterns:
+            # Capture registration in closure
+            reg = registration
+            self.dataspace.subscribe(
+                pattern,
+                lambda fact, r=reg: self._on_fact_asserted_new(r.facet_id, fact)
+            )
+
+    def _check_triggers_ready(self, registration: FacetRegistration) -> bool:
+        """Check if all trigger patterns are satisfied."""
+        if not registration.trigger_patterns:
+            # No triggers - always ready
+            return True
+
+        for pattern in registration.trigger_patterns:
+            facts = self.dataspace.query(pattern, latest_only=True)
+            if not facts:
+                return False  # Missing required fact
+        return True
+
+    def _on_fact_asserted_new(self, facet_id: str, fact) -> None:
+        """
+        Callback for new registration system.
+
+        Checks policy and guard before queuing.
+        """
+        if facet_id not in self.registrations:
+            return
+
+        registration = self.registrations[facet_id]
+
+        # Skip if already completed (RUN_ONCE)
+        if registration.completed:
+            return
+
+        if facet_id in self.waiting:
+            if self._check_triggers_ready(registration):
+                # Check guard/policy
+                trigger_facts = []
+                for pattern in registration.trigger_patterns:
+                    trigger_facts.extend(self.dataspace.query(pattern, latest_only=True))
+
+                if registration.should_execute(trigger_facts):
+                    self.waiting.remove(facet_id)
+                    self.ready_queue.append(facet_id)
+                    self.console.log(f"[dim]Facet {facet_id} ready (triggers satisfied)[/]")
 
     def _check_inputs_ready(self, subscription: FacetSubscription) -> bool:
         """Check if all input facts available for facet."""
@@ -134,10 +268,37 @@ class FacetScheduler:
         """
         Mark facet execution completed.
 
-        Removes from executing state. Facet can be re-queued if inputs change.
+        Removes from executing state. For RUN_ONCE policy, marks as completed
+        to prevent re-execution.
         """
         if self.executing == facet_id:
             self.executing = None
+
+        # Mark registration as completed if RUN_ONCE
+        if facet_id in self.registrations:
+            registration = self.registrations[facet_id]
+            if registration.policy == ExecutionPolicy.RUN_ONCE:
+                registration.completed = True
+
+    def get_phase(self, facet_id: str) -> Optional[Phase]:
+        """
+        Get Phase for a facet (works with both old and new registration).
+
+        Args:
+            facet_id: Facet identifier
+
+        Returns:
+            Phase if found, None otherwise
+        """
+        # Try new registration first
+        if facet_id in self.registrations:
+            return self.registrations[facet_id].phase
+
+        # Fall back to old subscription
+        if facet_id in self.facets:
+            return self.facets[facet_id].phase
+
+        return None
 
     def mark_waiting(self, facet_id: str) -> None:
         """
