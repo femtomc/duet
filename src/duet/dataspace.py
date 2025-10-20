@@ -143,6 +143,18 @@ class Fact:
 
 @fact
 @dataclass
+class TaskRequest(Fact):
+    """Fact representing a task request to start a workflow."""
+
+    fact_id: str
+    description: str
+    priority: int = 0
+    assigned_to: Optional[str] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@fact
+@dataclass
 class PlanDoc(Fact):
     """Fact representing an implementation plan."""
 

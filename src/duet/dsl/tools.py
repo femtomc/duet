@@ -9,9 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Protocol
-
-from .workflow import Channel
+from typing import Any, Callable, Dict, List, Optional, Protocol, Type
 
 
 class ToolTiming(Enum):
@@ -96,19 +94,19 @@ class Tool(Protocol):
     Protocol for deterministic workflow tools.
 
     Tools perform operations like git validation, approval checks, or custom logic.
-    They run at specified times (pre/post phase) and can read/write channels.
+    They run at specified times (pre/post phase) and can read/write facts.
 
     Attributes:
         name: Unique tool identifier
         timing: When the tool executes (pre_phase, post_phase, custom)
-        consumes: Channels this tool reads from
-        publishes: Channels this tool writes to (via ToolResult.channel_updates)
+        consumes: Fact types this tool reads
+        publishes: Fact types this tool writes (via ToolResult.channel_updates)
     """
 
     name: str
     timing: ToolTiming
-    consumes: List[Channel]
-    publishes: List[Channel]
+    consumes: List[Type]
+    publishes: List[Type]
 
     def run(self, context: ToolContext) -> ToolResult:
         """
@@ -133,8 +131,8 @@ class BaseTool:
 
     name: str
     timing: ToolTiming = ToolTiming.PRE_PHASE
-    consumes: List[Channel] = field(default_factory=list)
-    publishes: List[Channel] = field(default_factory=list)
+    consumes: List[Type] = field(default_factory=list)
+    publishes: List[Type] = field(default_factory=list)
 
     def run(self, context: ToolContext) -> ToolResult:
         """
