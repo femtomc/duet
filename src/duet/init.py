@@ -381,118 +381,16 @@ logging:
         self.console.log(f"[green]Created:[/] {self._display_path(config_file)}")
 
     def _create_workflow_definition(self) -> None:
-        """Create workflow definition using Python DSL."""
-        # Read template from package
-        try:
-            # Try to read template from package resources
-            import duet.templates
-            template_path = Path(duet.templates.__file__).parent / "workflow.py.template"
+        """Create placeholder workflow definition for facet DSL."""
+        placeholder = '''"""
+Define your facet-based workflow here.
 
-            if template_path.exists():
-                template_content = template_path.read_text(encoding="utf-8")
-            else:
-                # Fallback: inline template if package resource missing
-                template_content = self._get_inline_workflow_template()
-        except Exception:
-            # Fallback: inline template
-            template_content = self._get_inline_workflow_template()
-
-        # Write workflow.py
-        workflow_file = self.config_path / "workflow.py"
-        workflow_file.write_text(template_content, encoding="utf-8")
-        self.console.log(f"[green]Created:[/] {self._display_path(workflow_file)}")
-
-        # Validate that generated workflow loads correctly
-        try:
-            from .workflow_loader import load_workflow
-            graph = load_workflow(workflow_path=workflow_file)
-            self.console.log(f"[dim]Validated workflow:[/] {len(graph.phases)} phases, {len(graph.agents)} agents")
-        except Exception as exc:
-            self.console.log(f"[yellow]Warning: Generated workflow validation failed: {exc}[/]")
-
-    def _get_inline_workflow_template(self) -> str:
-        """Typed fact-based workflow template."""
-        return '''"""
-Duet Workflow Definition - Typed Fact Edition.
-
-This file defines a reactive workflow using typed facts and the dataspace.
-Facets execute based on fact availability, not fixed phase order.
-
-Documentation: See docs/typed_facts_guide.md for detailed reference.
+Use the new facet/combinator DSL to declare reactive behavior.
 """
-
-from dataclasses import dataclass
-from duet.dsl import (
-    Agent, Phase, Transition, When, Workflow,
-    Fact, fact, PlanDoc, CodeArtifact, ReviewVerdict
-)
-from duet.dsl.steps import ReadStep, WriteStep, AgentStep
-
-# Define custom fact types for your workflow
-@fact
-@dataclass
-class TaskRequest(Fact):
-    """Initial task specification."""
-    fact_id: str
-    description: str
-    priority: int = 1
-
-workflow = Workflow(
-    agents=[
-        Agent(name="planner", provider="codex", model="gpt-5-codex"),
-        Agent(name="implementer", provider="claude", model="sonnet"),
-        Agent(name="reviewer", provider="codex", model="gpt-5-codex"),
-    ],
-    phases=[
-        Phase(name="plan", agent="planner", steps=[])
-            .read_fact(TaskRequest, into="task")
-            .agent("planner")
-            .write_fact(PlanDoc, values={
-                "task_id": "$task.fact_id",
-                "content": "$agent_response"
-            }),
-
-        Phase(name="implement", agent="implementer", steps=[])
-            .read_fact(PlanDoc, into="plan")
-            .agent("implementer")
-            .write_fact(CodeArtifact, values={
-                "plan_id": "$plan.fact_id",
-                "summary": "$agent_response"
-            }),
-
-        Phase(name="review", agent="reviewer", steps=[])
-            .read_fact(CodeArtifact, into="code")
-            .agent("reviewer")
-            .write_fact(ReviewVerdict, values={
-                "code_id": "$code.fact_id",
-                "verdict": "approve",  # Agent should set this
-                "feedback": "$agent_response"
-            }),
-
-        Phase(name="done", agent="reviewer", steps=[], is_terminal=True),
-    ],
-    transitions=[
-        Transition(from_phase="plan", to_phase="implement"),
-        Transition(from_phase="implement", to_phase="review"),
-        Transition(
-            from_phase="review",
-            to_phase="done",
-            when=When.fact_exists(ReviewVerdict, constraints={"verdict": "approve"})
-        ),
-        Transition(
-            from_phase="review",
-            to_phase="plan",
-            when=When.fact_exists(ReviewVerdict, constraints={"verdict": "changes_requested"})
-        ),
-    ],
-    initial_phase="plan",
-)
-
-# Usage:
-# 1. duet seed TaskRequest --data '{"description": "Your task here", "priority": 1}'
-# 2. duet run
-# 3. duet facts RUN_ID  # Inspect dataspace
 '''
+        workflow_file = self.config_path / "workflow.py"
+        workflow_file.write_text(placeholder, encoding="utf-8")
+        self.console.log(f"[green]Created:[/] {self._display_path(workflow_file)}")
 
     def _create_scaffold_files(self) -> None:
         """Create .gitkeep files and placeholder database."""

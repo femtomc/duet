@@ -79,19 +79,7 @@ def test_init_creates_workflow_definition(temp_workspace):
 
     # Verify content
     content = workflow_file.read_text()
-    assert "from duet.dsl import" in content
-    assert "workflow = Workflow(" in content
-    assert "agents=" in content
-    assert "channels=" in content
-    assert "phases=" in content
-    assert "transitions=" in content
-
-    # Verify it's valid Python and loads successfully
-    from duet.workflow_loader import load_workflow
-    graph = load_workflow(workflow_path=workflow_file)
-    assert graph is not None
-    assert len(graph.agents) > 0
-    assert len(graph.phases) > 0
+    assert "Define your facet-based workflow here." in content
 
 
 def test_init_creates_gitkeep_files(temp_workspace):

@@ -16,7 +16,6 @@ from .migrate import ArtifactMigrator
 from .models import StreamMode
 from .orchestrator import Orchestrator
 from .persistence import DuetDatabase
-from .workflow_loader import WorkflowLoadError, load_workflow
 
 app = typer.Typer(help="Automate the Codex ↔ Claude workflow.")
 console = Console()
@@ -163,26 +162,9 @@ def lint(
     config: Optional[Path] = typer.Option(None, "--config", "-c", help="Config file path."),
     workflow: Optional[Path] = typer.Option(None, "--workflow", help="Workflow file path (defaults to .duet/workflow.py)"),
 ) -> None:
-    """Validate the workflow definition without executing it."""
-    try:
-        duet_config = find_config(config)
-    except FileNotFoundError as exc:
-        console.print(f"[red]Failed to locate duet configuration:[/] {exc}")
-        raise typer.Exit(1)
-
-    workflow_path = Path(workflow) if workflow else None
-    workspace_root = duet_config.storage.workspace_root
-
-    try:
-        load_workflow(workflow_path=workflow_path, workspace_root=workspace_root)
-    except WorkflowLoadError as exc:
-        console.print(f"[red]Workflow validation failed:[/] {exc}")
-        raise typer.Exit(1)
-    except Exception as exc:
-        console.print(f"[red]Unexpected error while loading workflow:[/] {exc}")
-        raise typer.Exit(1)
-
-    console.print("[green]Workflow validation succeeded.[/]")
+    """Placeholder for future facet DSL linting."""
+    console.print("[yellow]Facet DSL linting is not implemented yet.[/]")
+    raise typer.Exit(1)
 
 
 @app.command()

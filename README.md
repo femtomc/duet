@@ -69,55 +69,8 @@ Each assistant entry in `.duet/duet.yaml` maps to a CLI provider. Fields like `t
 
 ## Workflow at a Glance
 
-```python
-from dataclasses import dataclass
-from duet.dsl import (
-    Agent, Phase, Transition, When, Workflow,
-    Fact, fact, PlanDoc, ReviewVerdict
-)
-
-@fact
-@dataclass
-class TaskRequest(Fact):
-    fact_id: str
-    description: str
-
-workflow = Workflow(
-    agents=[
-        Agent(name="planner", provider="codex", model="gpt-5-codex"),
-        Agent(name="implementer", provider="claude", model="sonnet"),
-    ],
-    phases=[
-        Phase(name="plan", agent="planner", steps=[])
-            .read_fact(TaskRequest, into="task")
-            .agent("planner")
-            .write_fact(PlanDoc, values={"task_id": "$task.fact_id", "content": "$agent_response"}),
-
-        Phase(name="implement", agent="implementer", steps=[])
-            .read_fact(PlanDoc, into="plan")
-            .agent("implementer")
-            .write_fact(ReviewVerdict, values={"plan_id": "$plan.fact_id", "verdict": "approve"}),
-
-        Phase(name="done", agent="implementer", steps=[], is_terminal=True),
-    ],
-    transitions=[
-        Transition(from_phase="plan", to_phase="implement"),
-        Transition(
-            from_phase="implement",
-            to_phase="done",
-            when=When.fact_exists(ReviewVerdict, constraints={"verdict": "approve"})
-        ),
-    ],
-)
-```
-
-**Reactive Execution:** Facets execute when their input facts appear in the dataspace.
-**Typed Facts:** Structured data with validation instead of string channels.
-**Scheduler-Driven:** No fixed phase order - facets wake based on fact availability.
-
-Learn more in [`docs/typed_facts_guide.md`](docs/typed_facts_guide.md).
-
-## Fact-Based Workflows
+The legacy channel-based DSL has been removed. A new facet/combinator DSL is
+in the works; once it lands, this section will showcase the updated syntax.
 
 Every fact is persisted to the `facts` table with type information.
 This enables:

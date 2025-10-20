@@ -113,7 +113,7 @@ class Fact:
 
     Example:
         from dataclasses import dataclass
-        from duet.dsl import Fact, fact
+        from duet.dataspace import Fact, fact
 
         @fact
         @dataclass
