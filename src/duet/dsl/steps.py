@@ -408,10 +408,29 @@ class WriteStep:
         fact_values = {}
         if self.values:
             for key, value in self.values.items():
-                # If value is a string starting with "$", treat as context key
+                # If value is a string starting with "$", resolve from context
                 if isinstance(value, str) and value.startswith("$"):
                     context_key = value[1:]
-                    fact_values[key] = context.get(context_key)
+
+                    # Parse dotted references (e.g., "task.fact_id")
+                    if '.' in context_key:
+                        parts = context_key.split('.')
+                        # Get base object from context
+                        obj = context.get(parts[0])
+                        if obj is None:
+                            fact_values[key] = None
+                        else:
+                            # Navigate dotted path
+                            for part in parts[1:]:
+                                if hasattr(obj, part):
+                                    obj = getattr(obj, part)
+                                else:
+                                    obj = None
+                                    break
+                            fact_values[key] = obj
+                    else:
+                        # Simple reference (no dots)
+                        fact_values[key] = context.get(context_key)
                 else:
                     fact_values[key] = value
 

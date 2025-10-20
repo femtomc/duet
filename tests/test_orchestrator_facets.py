@@ -239,7 +239,7 @@ class TestOrchestratorErrorHandling:
 
     def test_facet_execution_failure_stops_orchestration(self, config, artifact_store):
         """Test that facet failure stops orchestration."""
-        # Create facet that will fail (no adapter)
+        # Create facet that will fail (no adapter provided)
         program = seq(
             facet("plan").needs(TaskRequest).agent("planner").emit(PlanDoc, values={"c": "p"}).build(),
             facet("implement").needs(PlanDoc).build()
@@ -247,9 +247,37 @@ class TestOrchestratorErrorHandling:
 
         orch = Orchestrator(config=config, artifact_store=artifact_store)
 
-        # Note: Without seeding, facets won't execute
-        # This test needs redesign once we have fact seeding
-        result = orch.run(program, run_id="test", adapter=None, max_iterations=10)
+        # Seed TaskRequest to start execution
+        task = TaskRequest(fact_id="task_1", description="Test", priority=1)
 
-        # Should be waiting (no facts to trigger)
-        assert result.facets_executed == 0
+        result = orch.run(program, run_id="test", adapter=None, max_iterations=10, initial_facts=[task])
+
+        # Should fail due to no adapter
+        assert not result.success
+        assert result.error is not None
+
+    def test_partial_completion_reports_failure(self, config, artifact_store, echo_adapter):
+        """Test that partial pipeline completion reports failure (Issue #2)."""
+        from duet.dataspace import FactPattern, ReviewVerdict
+        from duet.dsl.combinators import FacetHandle, FacetProgram, RunPolicy
+
+        # Create program where first facet triggers immediately, second waits for fact that never arrives
+        f1 = facet("f1").emit(TaskRequest, values={"description": "task", "priority": 1}).build()
+        f2 = facet("f2").needs(ReviewVerdict).emit(CodeArtifact, values={"summary": "code", "plan_id": "p1"}).build()
+
+        # f1 has no triggers (starts immediately), f2 triggers on ReviewVerdict (never provided)
+        program = FacetProgram(handles=[
+            FacetHandle(definition=f1, triggers=[], policy=RunPolicy.RUN_ONCE),
+            FacetHandle(definition=f2, triggers=[FactPattern(fact_type=ReviewVerdict)], policy=RunPolicy.RUN_ONCE)
+        ])
+
+        orch = Orchestrator(config=config, artifact_store=artifact_store)
+
+        result = orch.run(program, run_id="test", adapter=echo_adapter, max_iterations=10)
+
+        # First facet executes, second waits for ReviewVerdict
+        assert result.facets_executed == 1
+        assert len(result.waiting_facets) == 1
+        assert "f2" in result.waiting_facets
+        # Success should be False (f2 waiting for facts, not approval)
+        assert not result.success

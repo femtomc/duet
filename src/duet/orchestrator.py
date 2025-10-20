@@ -214,8 +214,18 @@ class Orchestrator:
                 waiting_facets=waiting_facets
             )
 
-        # Success if no facets waiting (or only approval-waiting facets)
-        success = len(waiting_facets) == 0 or facets_executed > 0
+        # Success only if:
+        # 1. No facets waiting (all completed), OR
+        # 2. All waiting facets are waiting for approval (well-defined pause state)
+        if len(waiting_facets) == 0:
+            # All facets completed
+            success = True
+        elif len(scheduler.approval_requests) == len(waiting_facets):
+            # All waiting facets are approval-waiting (valid pause state)
+            success = True
+        else:
+            # Some facets blocked waiting for facts that may never arrive
+            success = False
 
         self.console.log(f"\n[bold green]Orchestration complete[/]")
         self.console.log(f"  Facets executed: {facets_executed}")
