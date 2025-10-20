@@ -297,12 +297,17 @@ class TestEndToEndScheduling:
         # Compile
         registrations = compile_program(program)
 
+        # Verify first facet has triggers (regression test for Issue #2)
+        assert len(registrations[0].trigger_patterns) == 1
+        assert registrations[0].trigger_patterns[0].fact_type == TaskRequest
+
         # Register with scheduler
         for reg in registrations:
             scheduler.register(reg)
 
         # No facets ready yet (waiting for TaskRequest)
         assert not scheduler.has_ready_facets()
+        assert "plan" in scheduler.waiting
 
         # Seed TaskRequest
         task = TaskRequest(fact_id="task_1", description="Build feature", priority=1)
@@ -323,3 +328,78 @@ class TestEndToEndScheduling:
         assert scheduler.has_ready_facets()
         facet_id = scheduler.next_ready()
         assert facet_id == "implement"
+
+    def test_first_facet_waits_for_seed_facts(self):
+        """Test that first facet in seq() waits for its required facts (Issue #2)."""
+        ds = Dataspace()
+        scheduler = FacetScheduler(ds)
+
+        # First facet needs TaskRequest
+        program = seq(
+            facet("plan").needs(TaskRequest).emit(PlanDoc, values={"c": "p"}).build(),
+            facet("implement").needs(PlanDoc).emit(CodeArtifact, values={"s": "c"}).build()
+        )
+
+        registrations = compile_program(program)
+
+        # First registration should have TaskRequest trigger
+        assert len(registrations[0].trigger_patterns) > 0
+        assert registrations[0].trigger_patterns[0].fact_type == TaskRequest
+
+        # Register
+        for reg in registrations:
+            scheduler.register(reg)
+
+        # Should NOT be ready (no TaskRequest yet)
+        assert not scheduler.has_ready_facets()
+        assert "plan" in scheduler.waiting
+
+    def test_loop_guard_prevents_initial_execution(self):
+        """Test that loop() guard can prevent execution even on first run (Issue #1)."""
+        ds = Dataspace()
+        scheduler = FacetScheduler(ds)
+
+        # Seed CodeArtifact (trigger) so the facet could run
+        code = CodeArtifact(
+            fact_id="code_1",
+            plan_id="plan_1",
+            summary="Test code"
+        )
+        ds.assert_fact(code)
+
+        # Seed a ReviewVerdict that satisfies the guard BEFORE registering
+        approval = ReviewVerdict(
+            fact_id="verdict_1",
+            code_id="code_1",
+            verdict="approve",
+            feedback="Already approved"
+        )
+        ds.assert_fact(approval)
+
+        # Loop until we get an approval verdict
+        # Guard checks ReviewVerdict facts (what loop emits)
+        test_facet = facet("test").needs(CodeArtifact).emit(ReviewVerdict, values={"verdict": "test"}).build()
+
+        # For LOOP_UNTIL, guard should check emitted fact type, not triggers
+        # Create a guard that queries dataspace for ReviewVerdict with approve
+        def guard_check_approval(facts):
+            # Check if there's already an approval in dataspace
+            # (facts here are trigger facts - CodeArtifact)
+            # But we want to check if ReviewVerdict with approve exists
+            from duet.dataspace import FactPattern, ReviewVerdict as RV
+            pattern = FactPattern(fact_type=RV, constraints={"verdict": "approve"})
+            approvals = ds.query(pattern)
+            return len(approvals) > 0
+
+        handle = loop(test_facet, until=guard_check_approval)
+
+        from duet.dsl.compiler import compile_handle
+
+        registration = compile_handle(handle)
+
+        # Register - triggers (CodeArtifact) ready, guard satisfied (approval exists)
+        scheduler.register(registration)
+
+        # Should NOT be ready (guard says we're done - approval already exists)
+        assert not scheduler.has_ready_facets()
+        assert "test" in scheduler.waiting

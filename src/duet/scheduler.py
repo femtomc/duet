@@ -168,8 +168,13 @@ class FacetScheduler:
 
         # Check if triggers already satisfied
         if self._check_triggers_ready(registration):
+            # Query trigger facts to pass to guard
+            trigger_facts = []
+            for pattern in registration.trigger_patterns:
+                trigger_facts.extend(self.dataspace.query(pattern, latest_only=True))
+
             # Additional check: should_execute based on policy/guard
-            if registration.should_execute():
+            if registration.should_execute(trigger_facts if trigger_facts else None):
                 self.ready_queue.append(registration.facet_id)
             else:
                 self.waiting.add(registration.facet_id)
