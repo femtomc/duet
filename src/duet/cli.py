@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 from pathlib import Path
 from typing import Optional
 
@@ -988,6 +989,174 @@ def messages(
 
     console.print(table)
     console.print(f"\n[dim]Showing {len(msgs)} messages{f' (limited to {limit})' if len(msgs) == limit else ''}[/]")
+
+
+@app.command()
+def seed(
+    fact_type: str = typer.Argument(..., help="Fact type name (e.g., TaskRequest, PlanDoc)"),
+    run_id: Optional[str] = typer.Option(None, "--run-id", help="Run ID to associate fact with"),
+    fact_id: Optional[str] = typer.Option(None, "--fact-id", help="Custom fact ID (auto-generated if not provided)"),
+    data: str = typer.Option("{}", "--data", help="JSON dict of fact field values"),
+    config: Optional[Path] = typer.Option(None, "--config", "-c", help="Config file path."),
+) -> None:
+    """
+    Assert an initial fact into the dataspace to seed a workflow.
+
+    Use this to provide input facts that typed workflows depend on.
+
+    Usage:
+        duet seed TaskRequest --data '{"task_description": "Build auth system", "priority": 1}'
+        duet seed PlanDoc --run-id abc123 --data '{"task_id": "t1", "content": "Plan..."}'
+    """
+    import json
+    import uuid
+
+    from .dataspace import FactRegistry
+
+    duet_config = find_config(config)
+
+    # Database required
+    db_path = Path(duet_config.storage.run_artifact_dir).parent / "duet.db"
+    if not db_path.exists():
+        console.print("[red]Database not found. Initialize with: uv run duet init[/]")
+        raise typer.Exit(1)
+
+    db = DuetDatabase(db_path)
+
+    # Get or create run_id
+    if not run_id:
+        # Create new run
+        run_id = f"run_{dt.datetime.now(dt.timezone.utc).strftime('%Y%m%d_%H%M%S')}"
+        console.print(f"[cyan]Creating new run:[/] {run_id}")
+        # Insert run record
+        from .models import RunSnapshot
+        snapshot = RunSnapshot(run_id=run_id, iteration=0, phase="seeding")
+        db.insert_run(snapshot)
+    else:
+        # Verify run exists
+        run = db.get_run(run_id)
+        if not run:
+            console.print(f"[red]Run not found:[/] {run_id}")
+            raise typer.Exit(1)
+
+    # Parse data JSON
+    try:
+        field_values = json.loads(data)
+    except json.JSONDecodeError as e:
+        console.print(f"[red]Invalid JSON in --data:[/] {e}")
+        raise typer.Exit(1)
+
+    # Get fact class from registry
+    fact_class = FactRegistry.get(fact_type)
+    if not fact_class:
+        console.print(f"[red]Unknown fact type:[/] {fact_type}")
+        console.print(f"[dim]Available types: {', '.join(FactRegistry.all_types().keys())}[/]")
+        raise typer.Exit(1)
+
+    # Generate fact_id if not provided
+    if not fact_id:
+        if "fact_id" not in field_values:
+            fact_id = f"{fact_type.lower()}_{uuid.uuid4().hex[:8]}"
+            field_values["fact_id"] = fact_id
+    else:
+        field_values["fact_id"] = fact_id
+
+    # Construct fact
+    try:
+        fact = fact_class(**field_values)
+    except TypeError as e:
+        console.print(f"[red]Failed to construct {fact_type}:[/] {e}")
+        console.print(f"[dim]Provided fields: {list(field_values.keys())}[/]")
+        raise typer.Exit(1)
+
+    # Save to database
+    db.save_fact(run_id, fact)
+
+    console.print(f"[green]✓ Fact asserted![/]")
+    console.print(f"[dim]Type: {fact_type}[/]")
+    console.print(f"[dim]Fact ID: {field_values['fact_id']}[/]")
+    console.print(f"[dim]Run ID: {run_id}[/]")
+    console.print()
+    console.print(f"[cyan]Continue workflow with:[/] duet next --run-id {run_id}")
+
+
+@app.command()
+def facts(
+    run_id: str = typer.Argument(..., help="Run ID to inspect facts for"),
+    fact_type: Optional[str] = typer.Option(None, "--type", help="Filter by fact type"),
+    active_only: bool = typer.Option(True, "--active-only/--all", help="Show only active (non-retracted) facts"),
+    config: Optional[Path] = typer.Option(None, "--config", "-c", help="Config file path."),
+) -> None:
+    """
+    Inspect facts in the dataspace for a run.
+
+    Shows all typed facts asserted during workflow execution.
+
+    Usage:
+        duet facts RUN_ID
+        duet facts RUN_ID --type ApprovalRequest
+        duet facts RUN_ID --all  # Include retracted facts
+    """
+    from rich.table import Table
+
+    duet_config = find_config(config)
+
+    # Database required
+    db_path = Path(duet_config.storage.run_artifact_dir).parent / "duet.db"
+    if not db_path.exists():
+        console.print("[red]Database not found. Initialize with: uv run duet init[/]")
+        raise typer.Exit(1)
+
+    db = DuetDatabase(db_path)
+
+    # Verify run exists
+    run = db.get_run(run_id)
+    if not run:
+        console.print(f"[red]Run not found:[/] {run_id}")
+        raise typer.Exit(1)
+
+    # Query facts
+    fact_records = db.get_facts(run_id, fact_type=fact_type, active_only=active_only)
+
+    console.print(f"[bold]Facts for run:[/] {run_id}")
+    if fact_type:
+        console.print(f"[dim]Filtered by type: {fact_type}[/]")
+    console.print(f"[dim]Status: {'Active only' if active_only else 'All (including retracted)'}[/]")
+    console.print()
+
+    if not fact_records:
+        console.print("[yellow]No facts found[/]")
+        return
+
+    # Display as table
+    table = Table()
+    table.add_column("Fact Type", style="cyan")
+    table.add_column("Fact ID", style="green")
+    table.add_column("Created", style="dim")
+    table.add_column("Status", style="magenta")
+    table.add_column("Fields", style="white")
+
+    for record in fact_records:
+        payload = record["payload"]
+        # Remove fact_id from display (already in column)
+        display_fields = {k: v for k, v in payload.items() if k != "fact_id"}
+        fields_preview = str(display_fields)[:60]
+        if len(str(display_fields)) > 60:
+            fields_preview += "..."
+
+        status = "retracted" if record["retracted_at"] else "active"
+        status_style = "red" if record["retracted_at"] else "green"
+
+        table.add_row(
+            record["fact_type"],
+            record["fact_id"][:20] + "..." if len(record["fact_id"]) > 20 else record["fact_id"],
+            record["created_at"][:19],
+            f"[{status_style}]{status}[/]",
+            fields_preview,
+        )
+
+    console.print(table)
+    console.print(f"\n[dim]Showing {len(fact_records)} fact(s)[/]")
 
 
 @app.command()
