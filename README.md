@@ -3,18 +3,18 @@
 
   # Duet
 
-  **Programmable agents with a time machine**
+  **Programmable conversations in a time machine**
 </div>
 
-This is a programmable agentic orchestration tool -- it's a kind of swiss army watch for defining structured interactions with agents. 
+Duet is a programmable agentic orchestration system. What does that even mean? Here's a likely even more unsatisfying description: a swiss army watch for defining and executing structured interactions with agents.
 
-Many agentic IDEs (Codex, Claude Code, Kiro) bake in opinions about the _interaction model_ through which the user engages with their agents -- Duet is designed to be programmable enough to _recover_ those interaction models as programs (for example: the "spec-driven development" interaction model from a system like Kiro is a Duet program).
+To properly explain, I have to be a bit long-winded. Here's the gist ...
 
-These interaction models take the form of _workflow programs_ (in a lightweight Python DSL) which are executed by a graph-driven workflow executor with channel-based message passing.
+**(Today's agentic IDEs have fixed interaction models)** Many agentic IDEs (Codex, Claude Code, Kiro) bake in opinions about the _interaction model_ through which the user engages with their agents. This is not a bad thing: a stable UI and interaction model can be useful and reliable!
 
-Duet's backend takes care of a bunch of other things that you'd probably find yourself wanting: the ability to jump backwards and forwards in the history of the workflow (persistence), the ability to query and inspect _everything_, etc.
+**(We want a system for _programming_ interaction models)** _This project_ is concerned with trying to have a bit of fun with these wacky, stochastic, not-at-all stable _ghosts_ of human language intelligence: being useful is an accident. And with that spirit in mind, the aspirational concern of this system right here is a _programmable interactions_. You, the user, get to have a say in how you interact with these spirits. The implication of this type of programmability is that, if one wishes, they can _recover_ the interaction models of the systems mentioned above as _programs_ within Duet (for example: the "spec-driven development" interaction model from a system like Kiro is a Duet program).
 
-In short, it's a programmable agentic CLI IDE.
+**(Interaction model as a Duet program)** In Duet, these interaction models take the form of _workflow programs_ (in a lightweight Python DSL) which are executed by a workflow executor. The programming model which Duet exposes is based on the _syndicated actor model_: [a useful programming model for constructing interacting concurrent systems](https://syndicate-lang.org/about/). A workflow program defines a type of conversation space: a space through which multiple agents can interact to "do stuff". Duet's backend takes care of a bunch of other things that you'd probably find yourself wanting here: the ability to jump backwards and forwards in the history of the conversation (persistence), the ability to query and inspect _everything_, etc.
 
 ## How does it work?
 
