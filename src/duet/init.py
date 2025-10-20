@@ -411,18 +411,31 @@ logging:
             self.console.log(f"[yellow]Warning: Generated workflow validation failed: {exc}[/]")
 
     def _get_inline_workflow_template(self) -> str:
-        """Fallback inline workflow template if package resource missing."""
+        """Typed fact-based workflow template."""
         return '''"""
-Duet Workflow Definition.
+Duet Workflow Definition - Typed Fact Edition.
 
-This file defines the orchestration workflow for your project using Duet's
-Python DSL. Customize agents, channels, phases, and transitions to fit your
-development process.
+This file defines a reactive workflow using typed facts and the dataspace.
+Facets execute based on fact availability, not fixed phase order.
 
-Documentation: See docs/workflow_dsl.md for detailed DSL reference.
+Documentation: See docs/typed_facts_guide.md for detailed reference.
 """
 
-from duet.dsl import Agent, Channel, Phase, Transition, When, Workflow
+from dataclasses import dataclass
+from duet.dsl import (
+    Agent, Phase, Transition, When, Workflow,
+    Fact, fact, PlanDoc, CodeArtifact, ReviewVerdict
+)
+from duet.dsl.steps import ReadStep, WriteStep, AgentStep
+
+# Define custom fact types for your workflow
+@fact
+@dataclass
+class TaskRequest(Fact):
+    """Initial task specification."""
+    fact_id: str
+    description: str
+    priority: int = 1
 
 workflow = Workflow(
     agents=[
@@ -430,50 +443,55 @@ workflow = Workflow(
         Agent(name="implementer", provider="claude", model="sonnet"),
         Agent(name="reviewer", provider="codex", model="gpt-5-codex"),
     ],
-    channels=[
-        Channel(name="task", description="Input task specification", schema="text"),
-        Channel(name="plan", description="Implementation plan", schema="text"),
-        Channel(name="code", description="Implementation artifacts", schema="git_diff"),
-        Channel(name="verdict", description="Review outcome", schema="verdict"),
-        Channel(name="feedback", description="Review feedback", schema="text"),
-    ],
     phases=[
-        Phase(
-            name="plan",
-            agent="planner",
-            consumes=["task", "feedback"],
-            publishes=["plan"],
-            description="Draft implementation plan",
-        ),
-        Phase(
-            name="implement",
-            agent="implementer",
-            consumes=["plan"],
-            publishes=["code"],
-            description="Execute plan and make changes",
-        ),
-        Phase(
-            name="review",
-            agent="reviewer",
-            consumes=["plan", "code"],
-            publishes=["verdict", "feedback"],
-            description="Review implementation",
-        ),
-        Phase(name="done", agent="reviewer", description="Complete", is_terminal=True),
-        Phase(name="blocked", agent="reviewer", description="Blocked", is_terminal=True),
+        Phase(name="plan", agent="planner", steps=[])
+            .read_fact(TaskRequest, into="task")
+            .agent("planner")
+            .write_fact(PlanDoc, values={
+                "task_id": "$task.fact_id",
+                "content": "$agent_response"
+            }),
+
+        Phase(name="implement", agent="implementer", steps=[])
+            .read_fact(PlanDoc, into="plan")
+            .agent("implementer")
+            .write_fact(CodeArtifact, values={
+                "plan_id": "$plan.fact_id",
+                "summary": "$agent_response"
+            }),
+
+        Phase(name="review", agent="reviewer", steps=[])
+            .read_fact(CodeArtifact, into="code")
+            .agent("reviewer")
+            .write_fact(ReviewVerdict, values={
+                "code_id": "$code.fact_id",
+                "verdict": "approve",  # Agent should set this
+                "feedback": "$agent_response"
+            }),
+
+        Phase(name="done", agent="reviewer", steps=[], is_terminal=True),
     ],
     transitions=[
         Transition(from_phase="plan", to_phase="implement"),
         Transition(from_phase="implement", to_phase="review"),
-        Transition(from_phase="review", to_phase="done",
-                   when=When.channel_has("verdict", "approve"), priority=10),
-        Transition(from_phase="review", to_phase="plan",
-                   when=When.channel_has("verdict", "changes_requested"), priority=5),
-        Transition(from_phase="review", to_phase="blocked",
-                   when=When.channel_has("verdict", "blocked"), priority=15),
+        Transition(
+            from_phase="review",
+            to_phase="done",
+            when=When.fact_exists(ReviewVerdict, constraints={"verdict": "approve"})
+        ),
+        Transition(
+            from_phase="review",
+            to_phase="plan",
+            when=When.fact_exists(ReviewVerdict, constraints={"verdict": "changes_requested"})
+        ),
     ],
     initial_phase="plan",
 )
+
+# Usage:
+# 1. duet seed TaskRequest --data '{"description": "Your task here", "priority": 1}'
+# 2. duet run
+# 3. duet facts RUN_ID  # Inspect dataspace
 '''
 
     def _create_scaffold_files(self) -> None:

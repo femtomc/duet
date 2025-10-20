@@ -70,52 +70,65 @@ Each assistant entry in `.duet/duet.yaml` maps to a CLI provider. Fields like `t
 ## Workflow at a Glance
 
 ```python
-from duet.dsl import Agent, Channel, Phase, Transition, When, Workflow
+from dataclasses import dataclass
+from duet.dsl import (
+    Agent, Phase, Transition, When, Workflow,
+    Fact, fact, PlanDoc, ReviewVerdict
+)
+
+@fact
+@dataclass
+class TaskRequest(Fact):
+    fact_id: str
+    description: str
 
 workflow = Workflow(
     agents=[
         Agent(name="planner", provider="codex", model="gpt-5-codex"),
         Agent(name="implementer", provider="claude", model="sonnet"),
-        Agent(name="reviewer", provider="codex", model="gpt-5-codex"),
-    ],
-    channels=[
-        Channel(name="task", schema="text"),
-        Channel(name="plan", schema="text"),
-        Channel(name="code", schema="git_diff"),
-        Channel(name="verdict", schema="verdict"),
-        Channel(name="feedback", schema="text"),
     ],
     phases=[
-        Phase(name="plan", agent="planner", consumes=["task", "feedback"], publishes=["plan"]),
-        Phase(name="implement", agent="implementer", consumes=["plan"], publishes=["code"]),
-        Phase(name="review", agent="reviewer", consumes=["plan", "code"], publishes=["verdict", "feedback"]),
-        Phase(name="done", agent="reviewer", is_terminal=True),
-        Phase(name="blocked", agent="reviewer", is_terminal=True),
+        Phase(name="plan", agent="planner", steps=[])
+            .read_fact(TaskRequest, into="task")
+            .agent("planner")
+            .write_fact(PlanDoc, values={"task_id": "$task.fact_id", "content": "$agent_response"}),
+
+        Phase(name="implement", agent="implementer", steps=[])
+            .read_fact(PlanDoc, into="plan")
+            .agent("implementer")
+            .write_fact(ReviewVerdict, values={"plan_id": "$plan.fact_id", "verdict": "approve"}),
+
+        Phase(name="done", agent="implementer", steps=[], is_terminal=True),
     ],
     transitions=[
         Transition(from_phase="plan", to_phase="implement"),
-        Transition(from_phase="implement", to_phase="review"),
-        Transition(from_phase="review", to_phase="done", when=When.channel_has("verdict", "approve")),
-        Transition(from_phase="review", to_phase="plan", when=When.channel_has("verdict", "changes_requested")),
-        Transition(from_phase="review", to_phase="blocked", when=When.channel_has("verdict", "blocked")),
+        Transition(
+            from_phase="implement",
+            to_phase="done",
+            when=When.fact_exists(ReviewVerdict, constraints={"verdict": "approve"})
+        ),
     ],
 )
 ```
 
-Prompt builders receive channel payloads through a `PromptContext`, so the generated instructions are always aligned with the syndicated workspace.
+**Reactive Execution:** Facets execute when their input facts appear in the dataspace.
+**Typed Facts:** Structured data with validation instead of string channels.
+**Scheduler-Driven:** No fixed phase order - facets wake based on fact availability.
 
-Learn more in [`docs/workflow_dsl.md`](docs/workflow_dsl.md).
+Learn more in [`docs/typed_facts_guide.md`](docs/typed_facts_guide.md).
 
-## Channel History & Replay
+## Fact-Based Workflows
 
-Every channel update is persisted to the `messages` table with timestamps and metadata.  
-This powers:
+Every fact is persisted to the `facts` table with type information.
+This enables:
 
-- `duet status RUN_ID` – shows the latest value for each channel and the active state.
-- `duet inspect RUN_ID` – displays per-iteration details plus channel history (filters coming soon).
-- `duet back STATE_ID` – restores git baseline **and** channel snapshot so phases resume with identical context.
+- `duet seed TaskRequest --data '{...}'` – Provide initial facts to start workflows
+- `duet facts RUN_ID [--type TYPE]` – Inspect typed facts in the dataspace
+- `duet approve RUN_ID` – Grant approvals for paused facets
+- Reactive facet scheduling based on fact dependencies
+- Type-safe data flow between workflow phases
 
-Message persistence makes the workspace replayable, auditable, and ready for analytics or streaming UIs.
+Fact persistence makes workflows reactive, type-safe, and introspectable.
 
 ## Testing & Development
 
