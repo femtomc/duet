@@ -55,10 +55,11 @@ class TestSeqCombinator:
 
         program = seq(plan_facet, implement_facet)
 
-        # First facet has no triggers (starts immediately)
-        assert len(program.handles[0].triggers) == 0
+        # First facet triggers on TaskRequest (from its .needs())
+        assert len(program.handles[0].triggers) == 1
+        assert program.handles[0].triggers[0].fact_type == TaskRequest
 
-        # Second facet triggers on first facet's emission
+        # Second facet triggers on first facet's emission (PlanDoc)
         assert len(program.handles[1].triggers) > 0
         assert program.handles[1].triggers[0].fact_type == PlanDoc
 
@@ -71,8 +72,9 @@ class TestSeqCombinator:
         program = seq(f1, f2, f3)
 
         assert len(program.handles) == 3
-        # f1: no triggers
-        assert len(program.handles[0].triggers) == 0
+        # f1: triggers on TaskRequest (from its .needs())
+        assert len(program.handles[0].triggers) == 1
+        assert program.handles[0].triggers[0].fact_type == TaskRequest
         # f2: triggers on PlanDoc
         assert program.handles[1].triggers[0].fact_type == PlanDoc
         # f3: triggers on CodeArtifact
@@ -101,6 +103,26 @@ class TestSeqCombinator:
         program = seq(f1, f2)
 
         assert all(h.policy == RunPolicy.RUN_ONCE for h in program.handles)
+
+    def test_seq_first_facet_triggers_on_needs(self):
+        """Test seq() makes first facet trigger on its required facts."""
+        f1 = facet("f1").needs(TaskRequest, alias="task").emit(PlanDoc, values={"content": "p"}).build()
+        f2 = facet("f2").needs(PlanDoc).emit(CodeArtifact, values={"summary": "c"}).build()
+
+        program = seq(f1, f2)
+
+        # First facet should trigger on TaskRequest (from its .needs())
+        assert len(program.handles[0].triggers) == 1
+        assert program.handles[0].triggers[0].fact_type == TaskRequest
+
+    def test_seq_fails_on_mismatched_fact_contracts(self):
+        """Test seq() raises error when facets don't share fact contracts."""
+        # f1 emits PlanDoc, but f2 needs CodeArtifact - mismatch!
+        f1 = facet("f1").needs(TaskRequest).emit(PlanDoc, values={"content": "p"}).build()
+        f2 = facet("f2").needs(CodeArtifact).emit(ReviewVerdict, values={"verdict": "v"}).build()
+
+        with pytest.raises(ValueError, match="emits .* but .* needs"):
+            seq(f1, f2)
 
 
 class TestLoopCombinator:

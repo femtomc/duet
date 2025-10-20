@@ -118,7 +118,11 @@ def seq(*facets: FacetDefinition) -> FacetProgram:
     Sequential pipeline combinator.
 
     Chains facets so each subsequent facet triggers on the previous
-    facet's emitted facts. Auto-wires dependencies.
+    facet's emitted facts. Auto-wires dependencies and validates fact contracts.
+
+    The first facet triggers on its required facts (from .needs()).
+    Each subsequent facet triggers on the previous facet's emissions that
+    match what it needs. Raises an error if there's no overlap.
 
     Args:
         *facets: Facet definitions in execution order
@@ -134,17 +138,21 @@ def seq(*facets: FacetDefinition) -> FacetProgram:
         )
 
     Raises:
-        ValueError: If facets can't be chained (missing emissions)
+        ValueError: If facets can't be chained (missing emissions or mismatched fact types)
     """
     if len(facets) < 2:
         raise ValueError("seq() requires at least 2 facets")
 
     handles = []
 
-    # First facet - no trigger (starts immediately)
+    # First facet - triggers on its required facts (from .needs())
+    first_triggers = []
+    for fact_type in facets[0].alias_map.values():
+        first_triggers.append(FactPattern(fact_type=fact_type))
+
     first_handle = FacetHandle(
         definition=facets[0],
-        triggers=[],
+        triggers=first_triggers,
         policy=RunPolicy.RUN_ONCE
     )
     handles.append(first_handle)
@@ -154,6 +162,7 @@ def seq(*facets: FacetDefinition) -> FacetProgram:
         prev_facet = facets[i - 1]
 
         # Auto-wire: current facet triggers on previous facet's emissions
+        # that match what this facet needs
         triggers = []
         for emitted_type in prev_facet.emitted_facts:
             # Check if current facet needs this type
@@ -162,10 +171,13 @@ def seq(*facets: FacetDefinition) -> FacetProgram:
                 triggers.append(pattern)
 
         if not triggers:
-            # Fallback: trigger on any emission from previous facet
+            # No overlap between emitted and needed facts - invalid chain
             if prev_facet.emitted_facts:
-                pattern = FactPattern(fact_type=prev_facet.emitted_facts[0])
-                triggers.append(pattern)
+                raise ValueError(
+                    f"Cannot chain facet '{facet_def.name}' after '{prev_facet.name}': "
+                    f"'{prev_facet.name}' emits {[t.__name__ for t in prev_facet.emitted_facts]} "
+                    f"but '{facet_def.name}' needs {[t.__name__ for t in facet_def.alias_map.values()]}"
+                )
             else:
                 raise ValueError(
                     f"Cannot chain facet '{facet_def.name}' after '{prev_facet.name}': "
