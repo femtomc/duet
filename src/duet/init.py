@@ -381,15 +381,84 @@ logging:
         self.console.log(f"[green]Created:[/] {self._display_path(config_file)}")
 
     def _create_workflow_definition(self) -> None:
-        """Create placeholder workflow definition for facet DSL."""
-        placeholder = '''"""
-Define your facet-based workflow here.
+        """Create example workflow definition using facet DSL."""
+        template = '''"""
+Duet workflow definition using facet DSL.
 
-Use the new facet/combinator DSL to declare reactive behavior.
+This file defines your workflow as a reactive facet program.
+Facets execute based on fact availability, not sequential order.
+
+To run: uv run duet run
+To validate: uv run duet lint
 """
+
+from duet.dsl import facet, seq
+from duet.dataspace import TaskRequest, PlanDoc, CodeArtifact, ReviewVerdict
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Define your workflow
+# ──────────────────────────────────────────────────────────────────────────────
+
+workflow = seq(
+    # 1. Planning facet - creates implementation plan
+    facet("plan")
+        .needs(TaskRequest, alias="task")
+        .agent("planner", prompt="Create a detailed implementation plan")
+        .emit(PlanDoc, values={
+            "content": "$agent_response",
+            "task_id": "$task.fact_id",
+            "iteration": 0
+        })
+        .build(),
+
+    # 2. Implementation facet - writes code
+    facet("implement")
+        .needs(PlanDoc, alias="plan")
+        .agent("coder", prompt="Implement the plan")
+        .emit(CodeArtifact, values={
+            "summary": "$agent_response",
+            "plan_id": "$plan.fact_id",
+            "files_changed": 0
+        })
+        .build(),
+
+    # 3. Review facet - validates implementation
+    facet("review")
+        .needs(CodeArtifact, alias="code")
+        .agent("reviewer", prompt="Review the code changes")
+        .emit(ReviewVerdict, values={
+            "verdict": "$agent_response",
+            "code_id": "$code.fact_id"
+        })
+        .build()
+)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# How to use:
+# ──────────────────────────────────────────────────────────────────────────────
+#
+# 1. Seed initial facts:
+#    duet seed TaskRequest --description "Build authentication" --priority 1
+#
+# 2. Run the workflow:
+#    duet run
+#
+# 3. The workflow executes reactively:
+#    - "plan" facet waits for TaskRequest fact
+#    - "implement" facet waits for PlanDoc from plan
+#    - "review" facet waits for CodeArtifact from implement
+#
+# 4. Customize by:
+#    - Adding .tool() steps for git validation
+#    - Adding .human() steps for approval gates
+#    - Using loop() for test-fix cycles
+#    - Using branch() for conditional logic
+#
+# See docs/facet_dsl.md for full DSL reference.
+# ──────────────────────────────────────────────────────────────────────────────
 '''
         workflow_file = self.config_path / "workflow.py"
-        workflow_file.write_text(placeholder, encoding="utf-8")
+        workflow_file.write_text(template, encoding="utf-8")
         self.console.log(f"[green]Created:[/] {self._display_path(workflow_file)}")
 
     def _create_scaffold_files(self) -> None:

@@ -114,9 +114,59 @@ def run(
         db = DuetDatabase(db_path)
         console.log("[dim]Using SQLite database for persistence[/]")
 
+    # Load workflow
+    workflow_path = Path(workflow) if workflow else Path(".duet/workflow.py")
+
     try:
-        orchestrator = Orchestrator(duet_config, artifact_store, console=console, db=db, workflow_path=workflow)
-        orchestrator.run(run_id=run_id)
+        from .workflow_loader import load_facet_program
+
+        program = load_facet_program(workflow_path, workspace_root=duet_config.storage.workspace_root)
+        console.log(f"[dim]Loaded workflow from {workflow_path}[/]")
+        console.log(f"[dim]Workflow has {len(program.handles)} facet(s)[/]")
+    except Exception as e:
+        console.print(f"[red]Failed to load workflow: {e}[/]")
+        console.print(f"[yellow]Check {workflow_path} for errors[/]")
+        raise typer.Exit(1)
+
+    # Get adapter
+    from .adapters import get_adapter
+
+    try:
+        adapter = get_adapter(duet_config.codex)
+    except Exception as e:
+        console.print(f"[red]Failed to initialize adapter: {e}[/]")
+        raise typer.Exit(1)
+
+    # Generate run_id if not provided
+    if not run_id:
+        import uuid
+        run_id = f"run_{uuid.uuid4().hex[:8]}"
+
+    try:
+        orchestrator = Orchestrator(
+            duet_config,
+            artifact_store,
+            console=console,
+            db=db,
+            workspace_root=str(duet_config.storage.workspace_root)
+        )
+
+        result = orchestrator.run(
+            program=program,
+            run_id=run_id,
+            adapter=adapter,
+            max_iterations=duet_config.workflow.max_iterations
+        )
+
+        if not result.success:
+            console.print(f"\n[red]Orchestration failed: {result.error or 'Incomplete execution'}[/]")
+            console.print(f"[yellow]Facets executed: {result.facets_executed}[/]")
+            console.print(f"[yellow]Facets waiting: {len(result.waiting_facets)}[/]")
+            raise typer.Exit(1)
+
+        console.print(f"\n[green]✓ Orchestration completed successfully[/]")
+        console.print(f"[dim]Run ID: {run_id}[/]")
+        console.print(f"[dim]Facets executed: {result.facets_executed}[/]")
     except Exception as exc:
         # Handle adapter and orchestration errors with friendly messages
         error_msg = str(exc)
@@ -162,9 +212,52 @@ def lint(
     config: Optional[Path] = typer.Option(None, "--config", "-c", help="Config file path."),
     workflow: Optional[Path] = typer.Option(None, "--workflow", help="Workflow file path (defaults to .duet/workflow.py)"),
 ) -> None:
-    """Placeholder for future facet DSL linting."""
-    console.print("[yellow]Facet DSL linting is not implemented yet.[/]")
-    raise typer.Exit(1)
+    """
+    Validate facet workflow without executing.
+
+    Loads the workflow, runs validation, and reports any errors.
+    """
+    from .workflow_loader import load_and_validate
+    from .dsl.compiler import validate_and_compile
+
+    workflow_path = Path(workflow) if workflow else Path(".duet/workflow.py")
+
+    console.print(f"[bold]Linting workflow: {workflow_path}[/]")
+
+    # Load and validate
+    program, load_errors = load_and_validate(workflow_path)
+
+    if load_errors:
+        console.print("[red]✗ Workflow loading failed:[/]")
+        for error in load_errors:
+            console.print(f"  [red]{error}[/]")
+        raise typer.Exit(1)
+
+    console.print(f"[green]✓ Workflow loaded successfully[/]")
+    console.print(f"  Facets: {len(program.handles)}")
+
+    # Run compiler validation
+    try:
+        registrations = validate_and_compile(program)
+        console.print(f"[green]✓ Compilation successful[/]")
+        console.print(f"  Registrations: {len(registrations)}")
+
+        # Show facet summary
+        console.print("\n[bold]Facet Summary:[/]")
+        for handle in program.handles:
+            facet_def = handle.definition
+            console.print(f"  • {facet_def.name}")
+            console.print(f"      Needs: {[t.__name__ for t in facet_def.alias_map.values()] or 'none'}")
+            console.print(f"      Emits: {[t.__name__ for t in facet_def.emitted_facts] or 'none'}")
+            console.print(f"      Triggers: {len(handle.triggers)} pattern(s)")
+            console.print(f"      Policy: {handle.policy.value}")
+
+        console.print("\n[green bold]✓ Workflow validation passed[/]")
+
+    except ValueError as e:
+        console.print(f"[red]✗ Compilation failed:[/]")
+        console.print(f"[red]{e}[/]")
+        raise typer.Exit(1)
 
 
 @app.command()
