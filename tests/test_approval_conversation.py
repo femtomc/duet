@@ -48,7 +48,9 @@ def test_approval_conversation_pattern():
 
 
 def test_latest_only_query():
-    """Test latest_only parameter for ChannelFact queries."""
+    """Test latest_only parameter for ChannelFact queries (legacy - skipped)."""
+    import pytest
+    pytest.skip("ChannelFact removed - legacy channel-based system replaced by typed facts")
     from duet.dataspace import ChannelFact
 
     ds = Dataspace()
@@ -88,7 +90,9 @@ def test_latest_only_query():
 
 
 def test_multiple_channel_latest_only():
-    """Test latest_only with multiple channels."""
+    """Test latest_only with multiple channels (legacy - skipped)."""
+    import pytest
+    pytest.skip("ChannelFact removed - legacy channel-based system replaced by typed facts")
     from duet.dataspace import ChannelFact
 
     ds = Dataspace()

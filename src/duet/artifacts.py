@@ -10,7 +10,7 @@ from typing import Any, Dict
 
 from rich.console import Console
 
-from .models import AssistantRequest, AssistantResponse, RunSnapshot, TransitionDecision
+from .models import AssistantRequest, AssistantResponse, RunSnapshot
 
 
 class ArtifactStore:
@@ -48,7 +48,6 @@ class ArtifactStore:
         phase: str,
         request: AssistantRequest,
         response: AssistantResponse,
-        decision: TransitionDecision | None = None,
         summary: str | None = None,
     ) -> None:
         """
@@ -57,13 +56,14 @@ class ArtifactStore:
         Creates a single JSON file per iteration containing:
         - Timestamp
         - Iteration number
-        - Phase
+        - Facet ID (stored in phase field for backward compatibility)
         - Request (prompt + context)
         - Response (content + metadata)
-        - Transition decision (if available)
         - Summary (if available)
 
-        Filename format: iterations/iter-{iteration:03d}-{phase}-{timestamp}.json
+        Filename format: iterations/iter-{iteration:03d}-{facet_id}-{timestamp}.json
+
+        Note: 'phase' parameter represents facet_id in the new model.
         """
         now = dt.datetime.now(dt.timezone.utc)
         timestamp_iso = now.isoformat()  # For record data
@@ -71,13 +71,11 @@ class ArtifactStore:
         record = {
             "timestamp": timestamp_iso,
             "iteration": iteration,
-            "phase": phase,
+            "facet_id": phase,  # New terminology
+            "phase": phase,  # Backward compatibility
             "request": request.model_dump(),
             "response": response.model_dump(),
         }
-
-        if decision:
-            record["decision"] = decision.model_dump()
 
         if summary:
             record["summary"] = summary

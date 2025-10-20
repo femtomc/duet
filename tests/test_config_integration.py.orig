@@ -124,7 +124,6 @@ def test_claude_adapter_receives_workspace_root():
         assert adapter.workspace_root == str(workspace)
 
 
-@pytest.mark.skip(reason="Legacy orchestrator API - replaced by facet-based orchestrator")
 def test_orchestrator_passes_workspace_to_claude_adapter():
     """Test that orchestrator passes workspace_root to Claude adapter."""
     with tempfile.TemporaryDirectory() as tmpdir_workspace:
@@ -150,7 +149,6 @@ def test_orchestrator_passes_workspace_to_claude_adapter():
             assert Path(orchestrator.claude_adapter.workspace_root).resolve() == workspace.resolve()
 
 
-@pytest.mark.skip(reason="Legacy orchestrator API - replaced by facet-based orchestrator")
 def test_orchestrator_passes_all_config_params_to_adapters():
     """Test that orchestrator passes all config parameters to adapters."""
     with tempfile.TemporaryDirectory() as tmpdir_workspace:

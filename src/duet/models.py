@@ -64,14 +64,6 @@ class AssistantResponse(BaseModel):
     verdict: Optional[ReviewVerdict] = None  # Structured review outcome (REVIEW phase only)
 
 
-class TransitionDecision(BaseModel):
-    """Represents the orchestrator's decision after evaluating a response."""
-
-    next_phase: Optional[str] = None
-    rationale: str
-    requires_human: bool = False
-
-
 class RunSnapshot(BaseModel):
     """Persisted representation of an orchestration run checkpoint."""
 

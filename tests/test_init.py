@@ -79,7 +79,9 @@ def test_init_creates_workflow_definition(temp_workspace):
 
     # Verify content
     content = workflow_file.read_text()
-    assert "Define your facet-based workflow here." in content
+    assert "Duet workflow definition using facet DSL" in content
+    assert "from duet.dsl import facet, seq" in content
+    assert "workflow = seq(" in content
 
 
 def test_init_creates_gitkeep_files(temp_workspace):
