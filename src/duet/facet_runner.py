@@ -99,8 +99,7 @@ class FacetRunner:
             workspace_root=workspace_root,
         )
 
-        # Accumulated channel writes (staged until end)
-        staged_writes = {}
+        # Track step execution logs
         step_logs = []
 
         # Execute steps in order
@@ -153,7 +152,7 @@ class FacetRunner:
                     # Not a failure, execution paused for human
                     return FacetExecutionResult(
                         context=context,
-                        channel_writes=staged_writes,
+                        channel_writes={},
                         human_approval_needed=True,
                         approval_reason=result.notes or "Approval required",
                         approval_request_id=request_id,
@@ -166,24 +165,21 @@ class FacetRunner:
                     # Step failed - return early
                     return FacetExecutionResult(
                         context=context,
-                        channel_writes=staged_writes,
+                        channel_writes={},
                         success=False,
                         error=result.error or f"Step {step_name} failed",
                         step_logs=step_logs,
                     )
 
-                # Merge step results
+                # Merge step results into context
                 for key, value in result.context_updates.items():
                     context.set(key, value)
-
-                # Stage channel writes
-                staged_writes.update(result.channel_writes)
 
             except Exception as exc:
                 self.console.log(f"[red]Step {step_name} raised exception: {exc}[/]")
                 return FacetExecutionResult(
                     context=context,
-                    channel_writes=staged_writes,
+                    channel_writes={},
                     success=False,
                     error=f"Step {step_name} exception: {exc}",
                     step_logs=step_logs,
@@ -280,21 +276,9 @@ class FacetRunner:
         if not response.content or not response.content.strip():
             return StepResult.fail(f"Agent '{step.agent}' returned empty response")
 
-        # Write response to declared channels
-        channel_writes = {}
-        if step.writes:
-            # Try to match channels to response metadata first (for structured outputs)
-            for channel in step.writes:
-                if channel.name in response.metadata:
-                    # Use metadata value if available (e.g., verdict from echo adapter)
-                    channel_writes[channel.name] = response.metadata[channel.name]
-                elif channel == step.writes[0]:
-                    # Primary output: use response content
-                    channel_writes[channel.name] = response.content
-
+        # Store response in context for use by subsequent WriteSteps
         return StepResult(
             context_updates={"agent_response": response.content},
-            channel_writes=channel_writes,
             metadata=response.metadata,
             success=True,
             notes=f"Agent '{step.agent}' completed",

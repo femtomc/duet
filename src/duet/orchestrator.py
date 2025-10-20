@@ -1038,13 +1038,11 @@ class Orchestrator:
                     self.console.log(f"[yellow]Failed to persist step log: {exc}[/]")
 
         # Build AssistantResponse from facet result
-        # For now, use a synthetic response (real agent integration coming)
         response = AssistantResponse(
             content=f"Facet '{phase}' executed {len(facet_result.step_logs)} steps",
             metadata={
                 "facet_execution": True,
                 "steps_executed": len(facet_result.step_logs),
-                "channel_writes": list(facet_result.channel_writes.keys()),
                 "step_logs": facet_result.step_logs,
             },
         )

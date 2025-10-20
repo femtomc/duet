@@ -66,17 +66,6 @@ class FacetContext:
         """Track a handle for later retraction."""
         self.handles.append(handle)
 
-    # Backward compat alias
-    def get_channel_value(self, channel_name: str, default: Any = None) -> Any:
-        """Alias for get_fact (backward compat)."""
-        return self.get_fact(channel_name, default)
-
-    # Backward compat alias
-    @property
-    def channel_reads(self) -> Dict[str, Any]:
-        """Alias for fact_reads (backward compat)."""
-        return self.fact_reads
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Phase Step Protocol
@@ -114,14 +103,12 @@ class StepResult:
 
     Contains:
     - Context updates (local state changes)
-    - Channel writes to apply
     - Metadata to merge
     - Success/failure status
     - Blocked flag (for human approval pauses)
     """
 
     context_updates: Dict[str, Any] = field(default_factory=dict)
-    channel_writes: Dict[str, Any] = field(default_factory=dict)
     metadata: Dict[str, Any] = field(default_factory=dict)
     success: bool = True
     blocked: bool = False  # True for human approval pauses (not failures)
@@ -226,32 +213,29 @@ class ToolStep:
     """
     Step that executes a deterministic tool.
 
-    Tools read from context, perform logic, and write results back to context
-    or channels explicitly via outputs parameter.
+    Tools read from context, perform logic, and write results back to context.
+    Use WriteStep to assert tool results as typed facts.
 
     Attributes:
         tool: Tool instance to execute
-        outputs: Channels to write tool results to (explicit channel writes)
         into_context: Whether to merge tool results into local context (default: True)
     """
 
     tool: Any  # Type: Tool - avoid circular import
-    outputs: List[Channel] = field(default_factory=list)
     into_context: bool = True
 
     def execute(self, context: FacetContext) -> StepResult:
         """
-        Execute tool and merge results.
+        Execute tool and merge results into context.
 
-        Tool results go into local context by default. If outputs are specified,
-        also stage channel writes. This allows tools to enrich context without
-        forcing external writes.
+        Tool results go into local context for use by subsequent steps.
+        Use WriteStep to assert tool results as typed facts.
 
         Args:
             context: Facet execution context
 
         Returns:
-            StepResult with tool outputs
+            StepResult with tool outputs in context_updates
         """
         # Import here to avoid circular dependency
         from .tools import ToolContext
@@ -261,7 +245,7 @@ class ToolStep:
             run_id=context.run_id,
             iteration=context.iteration,
             phase_name=context.phase_name,
-            channel_state=context.channel_reads,
+            channel_state=context.fact_reads,
             workspace_root=context.workspace_root,
             metadata=context.metadata,
         )
@@ -272,27 +256,11 @@ class ToolStep:
         if not tool_result.success:
             return StepResult.fail(tool_result.error or "Tool execution failed")
 
-        # Tool results are now split:
-        # - context_updates: enrich local facet context (for prompt building, etc.)
-        # - channel_updates: write to global dataspace (if tool declares them)
-
         # Merge context updates if requested
         context_updates = tool_result.context_updates if self.into_context else {}
 
-        # Channel writes from tool's channel_updates OR explicit outputs mapping
-        channel_writes = {}
-        if self.outputs:
-            # Map tool channel_updates to declared output channels
-            for channel in self.outputs:
-                if channel.name in tool_result.channel_updates:
-                    channel_writes[channel.name] = tool_result.channel_updates[channel.name]
-        else:
-            # No outputs declared - use tool's channel_updates directly
-            channel_writes = tool_result.channel_updates
-
         return StepResult(
             context_updates=context_updates,
-            channel_writes=channel_writes,
             metadata=tool_result.metadata,
             success=True,
             notes=tool_result.notes,
@@ -304,17 +272,16 @@ class AgentStep:
     """
     Step that invokes an AI agent/assistant.
 
-    Reads from context, builds prompt, calls agent, writes response to channels.
+    Reads from context, builds prompt, calls agent. Agent response stored
+    in context as 'agent_response' for use by subsequent WriteSteps.
 
     Attributes:
         agent: Name of agent to invoke (references workflow agent)
-        writes: Channels to write agent response to
         prompt_template: Optional custom prompt (uses default builder if None)
         role: Optional role hint for prompt builder
     """
 
     agent: str
-    writes: List[Channel]
     prompt_template: Optional[str] = None
     role: Optional[str] = None
 
@@ -343,26 +310,18 @@ class HumanStep:
     Step that requires human interaction/approval.
 
     **Pause Semantics:**
-    HumanStep intentionally pauses facet execution by returning
-    StepResult.pause() (blocked=True). This is NOT a failure - it signals
-    the orchestrator to suspend the workflow and wait for manual intervention.
+    HumanStep pauses facet execution by returning StepResult.pause() (blocked=True).
+    This signals the orchestrator to suspend the workflow and wait for approval.
 
-    The orchestrator will:
-    1. Mark run as blocked with approval_reason
-    2. Stop executing further steps
-    3. Wait for 'duet next' with approval/feedback
-
-    **Future:** Will create ApprovalRequest/ApprovalGrant conversation facts
-    in the dataspace for reactive approval workflows.
+    Creates ApprovalRequest fact in dataspace, which is persisted to DB.
+    Scheduler subscribes to matching ApprovalGrant fact to resume execution.
 
     Attributes:
         reason: Human-readable reason for approval
-        reads: Channels to present to human for context
         timeout: Optional timeout in seconds
     """
 
     reason: str
-    reads: List[Channel] = field(default_factory=list)
     timeout: Optional[int] = None
 
     def execute(self, context: FacetContext, dataspace) -> StepResult:

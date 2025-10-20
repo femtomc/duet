@@ -369,25 +369,20 @@ class Channel(BaseElement):
 @dataclass(eq=False)
 class Phase(BaseElement):
     """
-    Defines a workflow phase with channel-based message passing.
+    Defines a workflow phase with typed fact-based execution.
 
-    Phases consume messages from input channels and publish results to output
-    channels, enabling a syndicated workspace model where agents communicate
-    through structured data rather than prompt templates.
-
-    Sprint DSL-2+: Moving toward facet-based reactive execution. Metadata flags
-    are being phased out in favor of explicit tool/step declarations via fluent API.
+    Phases execute ordered steps (ReadStep, ToolStep, AgentStep, WriteStep)
+    that query and assert typed facts in the dataspace. This enables reactive,
+    type-safe data flow between workflow components.
 
     Attributes:
         name: Unique phase identifier (human-readable)
         id: Stable UUID for identity (auto-generated if not provided)
         agent: Name of the agent that executes this phase
-        consumes: List of Channel objects this phase reads from
-        publishes: List of Channel objects this phase writes to
         description: Human-readable description of what this phase does
         is_terminal: Whether this phase ends the workflow
-        tools: List of Tool instances attached to this phase
-        metadata: Generic metadata dict (preserved for backward compat, no special keys enforced)
+        steps: Ordered list of step instances (facet script)
+        metadata: Generic metadata dict
     """
 
     name: str
@@ -516,75 +511,76 @@ class Phase(BaseElement):
         new_steps = list(self.steps) + [step]
         return replace(self, steps=new_steps)
 
-    def tool(self, tool: Any, outputs: Optional[List[Channel]] = None, into_context: bool = True) -> Phase:
+    def tool(self, tool: Any, into_context: bool = True) -> Phase:
         """
-        Add ToolStep to facet script (Sprint DSL-3).
+        Add ToolStep to facet script.
 
-        Executes deterministic tool. Results go into local context by default.
-        If outputs specified, also writes to those channels.
+        Executes deterministic tool. Results merged into local context.
+        Use write_fact() to assert tool results as typed facts.
 
         Args:
             tool: Tool instance to execute
-            outputs: Channel objects to write tool results to (optional)
             into_context: Whether to merge tool results into local context (default: True)
 
-        Returns a new Phase instance with ToolStep appended.
+        Returns:
+            New Phase instance with ToolStep appended
 
         Example:
-            phase.tool(GitChangeTool())  # Context only
-            phase.tool(ValidationTool(), outputs=[status_channel])  # Context + channel write
+            phase.tool(GitChangeTool()).write_fact(GitStatus, values={...})
         """
         from dataclasses import replace
         from .steps import ToolStep
 
-        step = ToolStep(tool=tool, outputs=outputs or [], into_context=into_context)
+        step = ToolStep(tool=tool, into_context=into_context)
         new_steps = list(self.steps) + [step]
         return replace(self, steps=new_steps)
 
-    def call_agent(self, agent_name: str, writes: List[Channel], prompt: Optional[str] = None, role: Optional[str] = None) -> Phase:
+    def agent(self, agent_name: str, prompt: Optional[str] = None, role: Optional[str] = None) -> Phase:
         """
-        Add AgentStep to facet script (Sprint DSL-3).
+        Add AgentStep to facet script.
 
-        Invokes AI agent with context, writes response to specified channels.
+        Invokes AI agent with context. Response stored in context as 'agent_response'.
+        Use write_fact() to assert agent output as typed fact.
 
         Args:
             agent_name: Name of agent to invoke
-            writes: Channels to write agent response to
             prompt: Optional custom prompt template
             role: Optional role hint for prompt builder
 
-        Returns a new Phase instance with AgentStep appended.
+        Returns:
+            New Phase instance with AgentStep appended
 
         Example:
-            phase.call_agent("planner", writes=[plan_channel], role="planner")
+            phase.agent("planner").write_fact(PlanDoc, values={"content": "$agent_response"})
         """
         from dataclasses import replace
         from .steps import AgentStep
 
-        step = AgentStep(agent=agent_name, writes=writes, prompt_template=prompt, role=role)
+        step = AgentStep(agent=agent_name, prompt_template=prompt, role=role)
         new_steps = list(self.steps) + [step]
-        return replace(self, steps=new_steps, agent=agent_name)  # Also set phase.agent
+        return replace(self, steps=new_steps, agent=agent_name)
 
-    def human(self, reason: str, reads: Optional[List[Channel]] = None, timeout: Optional[int] = None) -> Phase:
+    def human(self, reason: str, timeout: Optional[int] = None) -> Phase:
         """
-        Add HumanStep to facet script (Sprint DSL-3).
+        Add HumanStep to facet script.
 
-        Requires human interaction/approval. Suspends execution until human responds.
+        Requires human interaction/approval. Suspends execution until approved.
+        Creates ApprovalRequest fact for reactive resumption.
 
         Args:
             reason: Human-readable reason for approval
-            reads: Channels to present to human
             timeout: Optional timeout in seconds
 
-        Returns a new Phase instance with HumanStep appended.
+        Returns:
+            New Phase instance with HumanStep appended
 
         Example:
-            phase.human("QA approval required", reads=[plan_channel, code])
+            phase.human("QA approval required")
         """
         from dataclasses import replace
         from .steps import HumanStep
 
-        step = HumanStep(reason=reason, reads=reads or [], timeout=timeout)
+        step = HumanStep(reason=reason, timeout=timeout)
         new_steps = list(self.steps) + [step]
         return replace(self, steps=new_steps)
 
@@ -686,17 +682,6 @@ class Phase(BaseElement):
 
     # ──── Step Introspection (Sprint DSL-3) ────
 
-    def get_reads(self) -> List[Channel]:
-        """
-        Extract channels read by this phase from its step list.
-
-        DEPRECATED: Use get_fact_reads() for typed fact dependencies.
-
-        Returns:
-            Empty list (legacy channel-based reads removed)
-        """
-        return []
-
     def get_fact_reads(self) -> List:
         """
         Extract fact pattern dependencies from ReadSteps.
@@ -728,38 +713,6 @@ class Phase(BaseElement):
                     seen_types.add(pattern_key)
 
         return patterns
-
-    def get_writes(self) -> List[Channel]:
-        """
-        Extract channels written by this phase from its step list.
-
-        Analyzes ToolStep.outputs, AgentStep.writes, WriteStep.
-
-        Returns:
-            List of Channel objects this phase writes to
-        """
-        writes = []
-        seen = set()
-
-        from .steps import ToolStep, AgentStep, WriteStep
-
-        for step in self.steps:
-            if isinstance(step, ToolStep):
-                for channel in step.outputs:
-                    if channel.id not in seen:
-                        writes.append(channel)
-                        seen.add(channel.id)
-            elif isinstance(step, AgentStep):
-                for channel in step.writes:
-                    if channel.id not in seen:
-                        writes.append(channel)
-                        seen.add(channel.id)
-            elif isinstance(step, WriteStep):
-                if step.channel.id not in seen:
-                    writes.append(step.channel)
-                    seen.add(step.channel.id)
-
-        return writes
 
     # ──── Convenience Constructors (Sprint DSL-2) ────
 
