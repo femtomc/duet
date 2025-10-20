@@ -21,6 +21,64 @@ app = typer.Typer(help="Automate the Codex ↔ Claude workflow.")
 console = Console()
 
 
+def _prepare_execution_context(
+    *,
+    config: Optional[Path],
+    workflow: Optional[Path],
+    quiet: bool,
+    stream_mode: Optional[str],
+) -> tuple[DuetConfig, "FacetProgram", ArtifactStore, Optional[DuetDatabase], object]:
+    """
+    Load configuration, workflow, and adapter shared by run/cancel commands.
+
+    Returns tuple of (duet_config, program, artifact_store, db, adapter).
+    """
+    from .adapters import get_adapter
+    from .workflow_loader import load_facet_program
+
+    duet_config = find_config(config)
+
+    if quiet:
+        duet_config.logging.quiet = True
+        duet_config.logging.stream_mode = StreamMode.OFF
+
+    if stream_mode:
+        valid_modes = [mode.value for mode in StreamMode]
+        if stream_mode not in valid_modes:
+            console.print(f"[red]Invalid --stream-mode: {stream_mode}[/]")
+            console.print(f"[yellow]Valid options: {', '.join(valid_modes)}[/]")
+            raise typer.Exit(1)
+        duet_config.logging.stream_mode = StreamMode(stream_mode)
+
+    artifact_store = ArtifactStore(duet_config.storage.run_artifact_dir, console=console)
+
+    db = None
+    db_path = Path(duet_config.storage.run_artifact_dir).parent / "duet.db"
+    if db_path.exists():
+        db = DuetDatabase(db_path)
+        console.log("[dim]Using SQLite database for persistence[/]")
+
+    workflow_path = Path(workflow) if workflow else Path(".duet/workflow.py")
+
+    try:
+        program = load_facet_program(
+            workflow_path, workspace_root=duet_config.storage.workspace_root
+        )
+        console.log(f"[dim]Loaded workflow from {workflow_path}[/]")
+        console.log(f"[dim]Workflow has {len(program.handles)} facet(s)[/]")
+    except Exception as e:
+        console.print(f"[red]Failed to load workflow: {e}[/]")
+        console.print(f"[yellow]Check {workflow_path} for errors[/]")
+        raise typer.Exit(1)
+
+    try:
+        adapter = get_adapter(duet_config.codex)
+    except Exception as e:
+        console.print(f"[red]Failed to initialize adapter: {e}[/]")
+        raise typer.Exit(1)
+
+    return duet_config, program, artifact_store, db, adapter
+
 
 @app.command()
 def init(
@@ -88,55 +146,12 @@ def run(
     ),
 ) -> None:
     """Execute the duet orchestration loop."""
-    duet_config = find_config(config)
-
-    # Override quiet mode if CLI flag provided
-    if quiet:
-        duet_config.logging.quiet = True
-        duet_config.logging.stream_mode = StreamMode.OFF
-
-    # Override stream_mode if CLI flag provided (with validation)
-    if stream_mode:
-        # Validate against enum values
-        valid_modes = [mode.value for mode in StreamMode]
-        if stream_mode not in valid_modes:
-            console.print(f"[red]Invalid --stream-mode: {stream_mode}[/]")
-            console.print(f"[yellow]Valid options: {', '.join(valid_modes)}[/]")
-            raise typer.Exit(1)
-        duet_config.logging.stream_mode = StreamMode(stream_mode)
-
-    artifact_store = ArtifactStore(duet_config.storage.run_artifact_dir, console=console)
-
-    # Initialize database if duet.db exists
-    # DB is in parent of run_artifact_dir (e.g., .duet/runs -> .duet/duet.db)
-    db = None
-    db_path = Path(duet_config.storage.run_artifact_dir).parent / "duet.db"
-    if db_path.exists():
-        db = DuetDatabase(db_path)
-        console.log("[dim]Using SQLite database for persistence[/]")
-
-    # Load workflow
-    workflow_path = Path(workflow) if workflow else Path(".duet/workflow.py")
-
-    try:
-        from .workflow_loader import load_facet_program
-
-        program = load_facet_program(workflow_path, workspace_root=duet_config.storage.workspace_root)
-        console.log(f"[dim]Loaded workflow from {workflow_path}[/]")
-        console.log(f"[dim]Workflow has {len(program.handles)} facet(s)[/]")
-    except Exception as e:
-        console.print(f"[red]Failed to load workflow: {e}[/]")
-        console.print(f"[yellow]Check {workflow_path} for errors[/]")
-        raise typer.Exit(1)
-
-    # Get adapter
-    from .adapters import get_adapter
-
-    try:
-        adapter = get_adapter(duet_config.codex)
-    except Exception as e:
-        console.print(f"[red]Failed to initialize adapter: {e}[/]")
-        raise typer.Exit(1)
+    duet_config, program, artifact_store, db, adapter = _prepare_execution_context(
+        config=config,
+        workflow=workflow,
+        quiet=quiet,
+        stream_mode=stream_mode,
+    )
 
     # Generate run_id if not provided
     if not run_id:
@@ -208,6 +223,111 @@ def run(
             raise
 
 
+@app.command()
+def cancel(
+    facet_id: str = typer.Argument(..., help="Facet identifier to cancel"),
+    config: Optional[Path] = typer.Option(
+        None, "--config", "-c", help="Path to duet configuration YAML."
+    ),
+    workflow: Optional[Path] = typer.Option(
+        None, "--workflow", help="Workflow file path (defaults to .duet/workflow.py)"
+    ),
+    run_id: Optional[str] = typer.Option(None, help="Override generated run identifier."),
+    quiet: bool = typer.Option(
+        False, "--quiet", "-q", help="Disable streaming console output."
+    ),
+    stream_mode: Optional[str] = typer.Option(
+        None, "--stream-mode", help="Streaming display mode: detailed | compact | off."
+    ),
+) -> None:
+    """
+    Cancel a waiting facet within the orchestration loop.
+
+    Executes the workflow and aborts the specified facet when it enters a
+    waiting state (e.g., paused for approval), retracting its outstanding
+    assertions and child dataspace state.
+    """
+    duet_config, program, artifact_store, db, adapter = _prepare_execution_context(
+        config=config,
+        workflow=workflow,
+        quiet=quiet,
+        stream_mode=stream_mode,
+    )
+
+    if not run_id:
+        import uuid
+        run_id = f"run_{uuid.uuid4().hex[:8]}"
+
+    orchestrator = Orchestrator(
+        duet_config,
+        artifact_store,
+        console=console,
+        db=db,
+        workspace_root=str(duet_config.storage.workspace_root)
+    )
+
+    try:
+        result = orchestrator.run(
+            program=program,
+            run_id=run_id,
+            adapter=adapter,
+            max_iterations=duet_config.workflow.max_iterations,
+            cancel_facet_id=facet_id,
+        )
+    except Exception as exc:
+        error_msg = str(exc)
+        if "failed to load workflow" in error_msg.lower() or "workflow validation failed" in error_msg.lower():
+            console.print("[red bold]Workflow Error:[/]")
+            lines = error_msg.split("\n")
+            for line in lines[:5]:
+                console.print(f"[red]{line}[/]")
+            console.print()
+            console.print("[yellow]Suggestions:[/]")
+            console.print("  • Run 'duet lint' to validate your workflow")
+            console.print("  • Check .duet/workflow.py for syntax errors")
+            console.print("  • See docs/workflow_dsl.md for DSL reference")
+            raise typer.Exit(1)
+        elif "not found" in error_msg.lower() and ("codex" in error_msg.lower() or "claude" in error_msg.lower()):
+            console.print("[red bold]Adapter Error:[/]")
+            console.print(f"[red]{error_msg}[/]")
+            console.print()
+            console.print("[yellow]Suggestions:[/]")
+            console.print("  • For testing without real adapters, set provider: 'echo' in .duet/duet.yaml")
+            console.print("  • Install the required CLI: 'codex' or 'claude'")
+            console.print("  • Ensure the CLI is authenticated (e.g., 'codex auth login')")
+            raise typer.Exit(1)
+        elif "permission denied" in error_msg.lower():
+            console.print("[red bold]Adapter Permission Error:[/]")
+            console.print(f"[red]{error_msg}[/]")
+            console.print()
+            console.print("[yellow]Suggestions:[/]")
+            console.print("  • Check file permissions for CLI executables")
+            console.print("  • For testing, use provider: 'echo' in .duet/duet.yaml")
+            raise typer.Exit(1)
+        else:
+            raise
+
+    if facet_id in result.canceled_facets:
+        console.print(f"[green]✓ Facet '{facet_id}' canceled[/]")
+        if result.waiting_facets:
+            console.print(
+                f"[yellow]Remaining waiting facets:[/] {', '.join(result.waiting_facets)}"
+            )
+        else:
+            console.print("[dim]No remaining waiting facets[/]")
+        return
+
+    if facet_id in result.waiting_facets:
+        console.print(f"[red]Facet '{facet_id}' remains waiting after cancellation attempt[/]")
+        raise typer.Exit(1)
+
+    console.print(
+        f"[yellow]Facet '{facet_id}' was not waiting; no cancellation performed[/]"
+    )
+    if result.waiting_facets:
+        console.print(
+            f"[dim]Waiting facets: {', '.join(result.waiting_facets)}[/]"
+        )
 
 @app.command()
 def lint(

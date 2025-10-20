@@ -10,11 +10,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Set
-from collections import deque
+from collections import deque, defaultdict
 
 from rich.console import Console
 
-from .dataspace import Dataspace, FactPattern, Handle
+from .dataspace import Dataspace, FactPattern, FactEvent, MessageEvent, MessagePattern
 from .dsl.workflow import Phase
 
 
@@ -121,6 +121,9 @@ class FacetScheduler:
         self.waiting: Set[str] = set()  # facet_ids waiting for facts
         self.executing: Optional[str] = None
         self.approval_requests: Dict[str, str] = {}  # facet_id -> request_id mapping
+        self.waiting_facet_state: Dict[str, Dict[str, Any]] = {}
+        self.message_patterns: Dict[str, List[MessagePattern]] = {}
+        self.pending_messages: Dict[str, List[MessageEvent]] = defaultdict(list)
 
     def register_facet(self, facet_id: str, phase: Phase, input_patterns: Optional[List[FactPattern]] = None) -> None:
         """
@@ -145,15 +148,25 @@ class FacetScheduler:
 
         self.facets[facet_id] = subscription
 
-        # Check if inputs already available
-        if self._check_inputs_ready(subscription):
+        # Register fact interests
+        for pattern in input_patterns:
+            self.dataspace.register_interest(
+                pattern,
+                facet_id,
+                lambda event, fid=facet_id: self._on_fact_event(fid, event),
+            )
+
+        # Subscribe to message triggers
+        message_patterns = phase.get_message_patterns()
+        self._subscribe_message_patterns(facet_id, message_patterns)
+
+        inputs_ready = self._check_inputs_ready(subscription) if subscription.input_patterns else True
+        messages_ready = self._messages_ready(facet_id)
+
+        if inputs_ready and messages_ready:
             self.ready_queue.append(facet_id)
         else:
             self.waiting.add(facet_id)
-
-        # Subscribe to dataspace for future facts
-        for pattern in input_patterns:
-            self.dataspace.subscribe(pattern, lambda fact: self._on_fact_asserted(facet_id, fact))
 
     def register(self, registration: FacetRegistration) -> None:
         """
@@ -166,14 +179,17 @@ class FacetScheduler:
         """
         self.registrations[registration.facet_id] = registration
 
-        # Check if triggers already satisfied
-        if self._check_triggers_ready(registration):
-            # Query trigger facts to pass to guard
+        message_patterns = registration.phase.get_message_patterns()
+        self._subscribe_message_patterns(registration.facet_id, message_patterns)
+
+        triggers_ready = self._check_triggers_ready(registration)
+        messages_ready = self._messages_ready(registration.facet_id)
+
+        if triggers_ready and messages_ready:
             trigger_facts = []
             for pattern in registration.trigger_patterns:
                 trigger_facts.extend(self.dataspace.query(pattern, latest_only=True))
 
-            # Additional check: should_execute based on policy/guard
             if registration.should_execute(trigger_facts if trigger_facts else None):
                 self.ready_queue.append(registration.facet_id)
             else:
@@ -181,13 +197,12 @@ class FacetScheduler:
         else:
             self.waiting.add(registration.facet_id)
 
-        # Subscribe to dataspace for future facts
+        # Register fact interests for future triggers
         for pattern in registration.trigger_patterns:
-            # Capture registration in closure
-            reg = registration
-            self.dataspace.subscribe(
+            self.dataspace.register_interest(
                 pattern,
-                lambda fact, r=reg: self._on_fact_asserted_new(r.facet_id, fact)
+                registration.facet_id,
+                lambda event, fid=registration.facet_id: self._on_fact_event_new(fid, event),
             )
 
     def _check_triggers_ready(self, registration: FacetRegistration) -> bool:
@@ -202,12 +217,83 @@ class FacetScheduler:
                 return False  # Missing required fact
         return True
 
-    def _on_fact_asserted_new(self, facet_id: str, fact) -> None:
+    def _subscribe_message_patterns(
+        self, facet_id: str, message_patterns: Optional[List[MessagePattern]]
+    ) -> None:
+        """Subscribe facet to dataspace message patterns."""
+        if not message_patterns:
+            return
+
+        self.message_patterns[facet_id] = message_patterns
+
+        for pattern in message_patterns:
+            self.dataspace.subscribe_message(
+                pattern,
+                lambda event, fid=facet_id: self._on_message_event(fid, event),
+            )
+
+    def _messages_ready(self, facet_id: str) -> bool:
+        """Check if facet has pending messages or no message patterns."""
+        patterns = self.message_patterns.get(facet_id)
+        if not patterns:
+            return True
+        return bool(self.pending_messages.get(facet_id))
+
+    def _legacy_facet_ready(self, facet_id: str) -> bool:
+        """Determine if legacy registered facet has all inputs satisfied."""
+        subscription = self.facets.get(facet_id)
+        if subscription is None:
+            return False
+        if not subscription.input_patterns:
+            return True
+        return self._check_inputs_ready(subscription)
+
+    def _registration_ready_to_execute(self, facet_id: str) -> bool:
+        """Determine if a new-style registration can execute."""
+        registration = self.registrations.get(facet_id)
+        if registration is None:
+            return False
+        if registration.policy == ExecutionPolicy.RUN_ONCE and registration.completed:
+            return False
+        if not self._check_triggers_ready(registration):
+            return False
+
+        trigger_facts: List[Any] = []
+        for pattern in registration.trigger_patterns:
+            trigger_facts.extend(self.dataspace.query(pattern, latest_only=True))
+
+        return registration.should_execute(trigger_facts if trigger_facts else None)
+
+    def _queue_for_messages_if_ready(self, facet_id: str) -> None:
+        """Queue facet if both message and fact prerequisites satisfied."""
+        if not self._messages_ready(facet_id):
+            return
+
+        can_run = False
+        if facet_id in self.registrations and self._registration_ready_to_execute(facet_id):
+            can_run = True
+        elif facet_id in self.facets and self._legacy_facet_ready(facet_id):
+            can_run = True
+
+        if not can_run:
+            return
+
+        if facet_id in self.waiting:
+            self.waiting.remove(facet_id)
+
+        if facet_id not in self.ready_queue and self.executing != facet_id:
+            self.ready_queue.append(facet_id)
+            self.console.log(f"[dim]Facet {facet_id} ready (message received)[/]")
+
+    def _on_fact_event_new(self, facet_id: str, event: FactEvent) -> None:
         """
         Callback for new registration system.
 
         Checks policy and guard before queuing.
         """
+        if event.action != "asserted":
+            return
+
         if facet_id not in self.registrations:
             return
 
@@ -224,7 +310,7 @@ class FacetScheduler:
                 for pattern in registration.trigger_patterns:
                     trigger_facts.extend(self.dataspace.query(pattern, latest_only=True))
 
-                if registration.should_execute(trigger_facts):
+                if registration.should_execute(trigger_facts) and self._messages_ready(facet_id):
                     self.waiting.remove(facet_id)
                     self.ready_queue.append(facet_id)
                     self.console.log(f"[dim]Facet {facet_id} ready (triggers satisfied)[/]")
@@ -237,15 +323,18 @@ class FacetScheduler:
                 return False  # Missing required input
         return True
 
-    def _on_fact_asserted(self, facet_id: str, fact) -> None:
+    def _on_fact_event(self, facet_id: str, event: FactEvent) -> None:
         """
         Callback when fact matching facet's patterns is asserted.
 
         Moves facet from waiting to ready if all inputs now available.
         """
+        if event.action != "asserted":
+            return
+
         if facet_id in self.waiting:
             subscription = self.facets[facet_id]
-            if self._check_inputs_ready(subscription):
+            if self._check_inputs_ready(subscription) and self._messages_ready(facet_id):
                 self.waiting.remove(facet_id)
                 self.ready_queue.append(facet_id)
                 self.console.log(f"[dim]Facet {facet_id} ready (inputs available)[/]")
@@ -265,6 +354,10 @@ class FacetScheduler:
             return self.ready_queue.popleft()
         return None
 
+    def pop_pending_messages(self, facet_id: str) -> List[MessageEvent]:
+        """Retrieve and clear pending message events for a facet."""
+        return self.pending_messages.pop(facet_id, [])
+
     def mark_executing(self, facet_id: str) -> None:
         """Mark facet as currently executing."""
         self.executing = facet_id
@@ -278,12 +371,20 @@ class FacetScheduler:
         """
         if self.executing == facet_id:
             self.executing = None
+        self.waiting_facet_state.pop(facet_id, None)
+        self.approval_requests.pop(facet_id, None)
 
         # Mark registration as completed if RUN_ONCE
         if facet_id in self.registrations:
             registration = self.registrations[facet_id]
             if registration.policy == ExecutionPolicy.RUN_ONCE:
                 registration.completed = True
+                self.dataspace.unregister_interests_for_facet(facet_id)
+        elif facet_id in self.facets:
+            self.dataspace.unregister_interests_for_facet(facet_id)
+
+        if self.pending_messages.get(facet_id):
+            self._queue_for_messages_if_ready(facet_id)
 
     def get_phase(self, facet_id: str) -> Optional[Phase]:
         """
@@ -314,6 +415,7 @@ class FacetScheduler:
         self.waiting.add(facet_id)
         if self.executing == facet_id:
             self.executing = None
+        self.waiting_facet_state.setdefault(facet_id, {})
 
     def mark_waiting_for_approval(self, facet_id: str, request_id: str) -> None:
         """
@@ -334,14 +436,17 @@ class FacetScheduler:
 
         # Track approval request mapping
         self.approval_requests[facet_id] = request_id
+        self.waiting_facet_state.setdefault(facet_id, {})
 
         # Subscribe to ApprovalGrant for this request
         pattern = FactPattern(
             fact_type=ApprovalGrant, constraints={"request_id": request_id}
         )
 
-        def on_approval_granted(fact):
+        def on_approval_granted(event: FactEvent):
             """Callback when approval is granted."""
+            if event.action != "asserted":
+                return
             if facet_id in self.waiting:
                 self.waiting.remove(facet_id)
                 self.ready_queue.append(facet_id)
@@ -392,4 +497,33 @@ class FacetScheduler:
 
         return resumed
 
+    def _on_message_event(self, facet_id: str, event: MessageEvent) -> None:
+        """Handle message delivery for a facet."""
+        if facet_id in self.registrations:
+            registration = self.registrations[facet_id]
+            if registration.policy == ExecutionPolicy.RUN_ONCE and registration.completed:
+                return
 
+        self.pending_messages[facet_id].append(event)
+        self._queue_for_messages_if_ready(facet_id)
+
+    def cancel_facet(self, facet_id: str) -> bool:
+        """Cancel a waiting facet, retracting its assertions."""
+        if facet_id not in self.waiting:
+            return False
+        state = self.waiting_facet_state.pop(facet_id, {})
+        child = state.get("child_dataspace")
+        if child and child.parent:
+            child.parent.remove_child(child.name, retract=True)
+
+        self.waiting.remove(facet_id)
+        self.approval_requests.pop(facet_id, None)
+        self.pending_messages.pop(facet_id, None)
+        self.dataspace.unregister_interests_for_facet(facet_id)
+        if facet_id in self.registrations:
+            self.registrations[facet_id].completed = True
+        return True
+
+    def set_waiting_child_dataspace(self, facet_id: str, child: Dataspace) -> None:
+        state = self.waiting_facet_state.setdefault(facet_id, {})
+        state["child_dataspace"] = child

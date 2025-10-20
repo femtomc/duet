@@ -4,12 +4,22 @@ Tests for FacetBuilder DSL API.
 Validates facet construction, validation, and Phase conversion.
 """
 
+from dataclasses import dataclass
+
 import pytest
 
-from duet.dataspace import ApprovalRequest, CodeArtifact, PlanDoc, ReviewVerdict
+from duet.dataspace import ApprovalRequest, CodeArtifact, Message, PlanDoc, ReviewVerdict
 from duet.dsl import FacetBuilder, facet
 from duet.dsl.facet import FacetDefinition
-from duet.dsl.steps import AgentStep, HumanStep, ReadStep, ToolStep, WriteStep
+from duet.dsl.steps import (
+    AgentStep,
+    HumanStep,
+    ReadStep,
+    ReceiveMessageStep,
+    SendMessageStep,
+    ToolStep,
+    WriteStep,
+)
 from duet.dsl.tools import GitChangeTool
 
 
@@ -96,7 +106,72 @@ class TestFacetBuilder:
             "content": "$agent_response",
             "task_id": "task_123"
         }
+        assert definition.steps[0].relay is True
         assert PlanDoc in definition.emitted_facts
+
+    def test_emit_local_method(self):
+        """Test .emit_local() adds WriteStep without relaying to parent."""
+        definition = (
+            facet("planner")
+            .emit_local(PlanDoc, values={"content": "local"})
+            .build()
+        )
+
+        assert len(definition.steps) == 1
+        step = definition.steps[0]
+        assert isinstance(step, WriteStep)
+        assert step.relay is False
+
+    def test_on_message_method(self):
+        """Test .on_message() adds ReceiveMessageStep with alias."""
+
+        @dataclass
+        class TestMessage(Message):
+            __test__ = False
+            topic: str
+            payload: str
+
+        definition = (
+            facet("listener")
+            .on_message(TestMessage, alias="incoming", constraints={"topic": "updates"})
+            .build()
+        )
+
+        assert len(definition.steps) == 1
+        step = definition.steps[0]
+        assert isinstance(step, ReceiveMessageStep)
+        assert step.message_type is TestMessage
+        assert step.alias == "incoming"
+        assert step.constraints == {"topic": "updates"}
+        assert definition.alias_map["incoming"] is TestMessage
+
+    def test_send_message_method(self):
+        """Test .send_message() adds SendMessageStep."""
+
+        @dataclass
+        class TestMessage(Message):
+            __test__ = False
+            topic: str
+            payload: str
+
+        definition = (
+            facet("speaker")
+            .send_message(
+                TestMessage,
+                values={"topic": "updates", "payload": "hello"},
+                store_as="sent_message",
+                relay=True,
+            )
+            .build()
+        )
+
+        assert len(definition.steps) == 1
+        step = definition.steps[0]
+        assert isinstance(step, SendMessageStep)
+        assert step.message_type is TestMessage
+        assert step.values == {"topic": "updates", "payload": "hello"}
+        assert step.store_as == "sent_message"
+        assert step.relay is True
 
     def test_human_method(self):
         """Test .human() adds HumanStep."""

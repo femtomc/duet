@@ -46,20 +46,23 @@ class DuetInitializer:
             return str(path)
 
     def _is_git_repo(self) -> bool:
-        """Check if workspace is already a Git repository."""
-        import subprocess
+        """Check if workspace is already a Git repository without invoking git."""
+        git_dir = self.workspace_root / ".git"
 
-        try:
-            result = subprocess.run(
-                ["git", "-C", str(self.workspace_root), "rev-parse", "--git-dir"],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            return result.returncode == 0
-        except FileNotFoundError:
-            # Git not installed
-            return False
+        if git_dir.is_dir():
+            return True
+
+        if git_dir.is_file():
+            try:
+                contents = git_dir.read_text().strip()
+            except OSError:
+                return False
+
+            if contents.startswith("gitdir:"):
+                target = contents.split("gitdir:", 1)[1].strip()
+                return bool((self.workspace_root / target).exists())
+
+        return False
 
     def _initialize_git_repo(self) -> None:
         """

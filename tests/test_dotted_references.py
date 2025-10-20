@@ -18,7 +18,7 @@ class TestDottedReferenceResolution:
     def test_simple_reference_no_dots(self):
         """Test simple $alias reference (no dots)."""
         ds = Dataspace()
-        context = FacetContext(phase_name="test", run_id="run_1", iteration=0)
+        context = FacetContext(facet_id="test", phase_name="test", run_id="run_1", iteration=0)
 
         # Set simple value in context
         context.set("content", "test content")
@@ -43,7 +43,7 @@ class TestDottedReferenceResolution:
     def test_dotted_reference_resolution(self):
         """Test $task.fact_id resolves to task object's fact_id attribute."""
         ds = Dataspace()
-        context = FacetContext(phase_name="test", run_id="run_1", iteration=0)
+        context = FacetContext(facet_id="test", phase_name="test", run_id="run_1", iteration=0)
 
         # Store TaskRequest fact in context
         task = TaskRequest(fact_id="task_123", description="Build feature", priority=1)
@@ -70,7 +70,7 @@ class TestDottedReferenceResolution:
     def test_nested_dotted_reference(self):
         """Test deeply nested dotted references."""
         ds = Dataspace()
-        context = FacetContext(phase_name="test", run_id="run_1", iteration=0)
+        context = FacetContext(facet_id="test", phase_name="test", run_id="run_1", iteration=0)
 
         # Store complex object in context
         from dataclasses import dataclass
@@ -105,7 +105,7 @@ class TestDottedReferenceResolution:
     def test_dotted_reference_missing_attribute(self):
         """Test dotted reference with missing attribute returns None."""
         ds = Dataspace()
-        context = FacetContext(phase_name="test", run_id="run_1", iteration=0)
+        context = FacetContext(facet_id="test", phase_name="test", run_id="run_1", iteration=0)
 
         task = TaskRequest(fact_id="task_789", description="Test", priority=1)
         context.set("task", task)
@@ -130,7 +130,7 @@ class TestDottedReferenceResolution:
     def test_dotted_reference_undefined_base(self):
         """Test dotted reference with undefined base returns None."""
         ds = Dataspace()
-        context = FacetContext(phase_name="test", run_id="run_1", iteration=0)
+        context = FacetContext(facet_id="test", phase_name="test", run_id="run_1", iteration=0)
 
         # Don't set "task" in context
         step = WriteStep(

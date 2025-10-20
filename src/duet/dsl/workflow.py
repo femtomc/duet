@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-from .steps import PhaseStep, ReadStep
+from .steps import PhaseStep, ReadStep, ReceiveMessageStep
 
 
 @dataclass
@@ -47,6 +47,25 @@ class Phase:
                 pattern = FactPattern(
                     fact_type=step.fact_type,
                     constraints=step.constraints or {}
+                )
+                patterns.append(pattern)
+        return patterns
+
+    def get_message_patterns(self) -> List:
+        """
+        Extract message patterns from ReceiveMessageSteps for scheduler wiring.
+
+        Returns:
+            List of MessagePattern objects
+        """
+        from ..dataspace import MessagePattern
+
+        patterns = []
+        for step in self.steps:
+            if isinstance(step, ReceiveMessageStep):
+                pattern = MessagePattern(
+                    message_type=step.message_type,
+                    constraints=step.constraints or {},
                 )
                 patterns.append(pattern)
         return patterns

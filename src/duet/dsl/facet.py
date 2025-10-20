@@ -11,7 +11,15 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Type
 
-from .steps import AgentStep, HumanStep, ReadStep, ToolStep, WriteStep
+from .steps import (
+    AgentStep,
+    HumanStep,
+    ReadStep,
+    ReceiveMessageStep,
+    SendMessageStep,
+    ToolStep,
+    WriteStep,
+)
 from .tools import Tool
 from .workflow import Phase
 
@@ -63,26 +71,34 @@ class FacetDefinition:
         has_agent = any(isinstance(s, AgentStep) for s in self.steps)
         has_tool = any(isinstance(s, ToolStep) for s in self.steps)
         has_human = any(isinstance(s, HumanStep) for s in self.steps)
+        has_receive = any(isinstance(s, ReceiveMessageStep) for s in self.steps)
+        has_send = any(isinstance(s, SendMessageStep) for s in self.steps)
 
-        if not (has_needs or has_emit or has_agent or has_tool or has_human):
+        if not (has_needs or has_emit or has_agent or has_tool or has_human or has_receive or has_send):
             errors.append(f"Facet '{self.name}' must have at least one step")
 
         # Check WriteSteps reference valid aliases
         for step in self.steps:
+            value_map = None
+            step_name = ""
             if isinstance(step, WriteStep):
-                if step.values:
-                    for key, value in step.values.items():
-                        # Check for $alias references (extract just the first part before '.')
-                        if isinstance(value, str) and value.startswith("$"):
-                            # Extract base alias (before any dots)
-                            alias_full = value[1:]
-                            alias_base = alias_full.split('.')[0] if '.' in alias_full else alias_full
+                value_map = step.values
+                step_name = "WriteStep"
+            elif isinstance(step, SendMessageStep):
+                value_map = step.values
+                step_name = "SendMessageStep"
 
-                            if alias_base not in self.alias_map and alias_base not in ["agent_response"]:
-                                errors.append(
-                                    f"WriteStep references undefined alias '${alias_base}' "
-                                    f"(available: {list(self.alias_map.keys())})"
-                                )
+            if value_map:
+                for _, value in value_map.items():
+                    if isinstance(value, str) and value.startswith("$"):
+                        alias_full = value[1:]
+                        alias_base = alias_full.split('.')[0] if '.' in alias_full else alias_full
+
+                        if alias_base not in self.alias_map and alias_base not in ["agent_response"]:
+                            errors.append(
+                                f"{step_name} references undefined alias '${alias_base}' "
+                                f"(available: {list(self.alias_map.keys())})"
+                            )
 
         return errors
 
@@ -166,6 +182,99 @@ class FacetBuilder:
 
         return self
 
+    def emit_local(
+        self,
+        fact_type: Type,
+        *,
+        values: Optional[Dict[str, Any]] = None,
+        fact_id_from: Optional[str] = None,
+        store_handle_as: Optional[str] = None,
+    ) -> FacetBuilder:
+        """
+        Emit fact scoped to the current dataspace (no relay to parent).
+
+        Convenience wrapper around emit(..., relay=False).
+        """
+        return self.emit(
+            fact_type,
+            values=values,
+            fact_id_from=fact_id_from,
+            store_handle_as=store_handle_as,
+            relay=False,
+        )
+
+    def on_message(
+        self,
+        message_type: Type,
+        alias: Optional[str] = None,
+        *,
+        constraints: Optional[Dict[str, Any]] = None,
+        store_event_as: Optional[str] = None,
+        consume: bool = True,
+    ) -> FacetBuilder:
+        """
+        Declare interest in an ephemeral message - adds ReceiveMessageStep.
+
+        The scheduler delivers matching message events to the facet, which
+        become available in the execution context under ``alias``.
+
+        Args:
+            message_type: Message class to match
+            alias: Context key to store the message (defaults to lowercase type)
+            constraints: Optional attribute equality constraints
+            store_event_as: Optional metadata key to retain the MessageEvent
+            consume: Whether to consume the event once read (default True)
+
+        Returns:
+            Self for chaining
+        """
+        if alias is None:
+            alias = message_type.__name__.lower()
+
+        self._alias_map[alias] = message_type
+
+        step = ReceiveMessageStep(
+            message_type=message_type,
+            alias=alias,
+            constraints=constraints or None,
+            store_event_as=store_event_as,
+            consume=consume,
+        )
+        self._steps.append(step)
+
+        return self
+
+    def send_message(
+        self,
+        message_type: Type,
+        *,
+        values: Optional[Dict[str, Any]] = None,
+        store_as: Optional[str] = None,
+        relay: bool = False,
+    ) -> FacetBuilder:
+        """
+        Send an ephemeral message - adds SendMessageStep.
+
+        Values follow the same $alias resolution rules as .emit().
+
+        Args:
+            message_type: Message class to construct
+            values: Message field values (supports $alias references)
+            store_as: Optional context key to retain the constructed message
+            relay: Whether to relay message to the parent dataspace
+
+        Returns:
+            Self for chaining
+        """
+        step = SendMessageStep(
+            message_type=message_type,
+            values=values,
+            store_as=store_as,
+            relay=relay,
+        )
+        self._steps.append(step)
+        return self
+
     def agent(
         self,
         name: str,
@@ -224,7 +333,8 @@ class FacetBuilder:
         *,
         values: Optional[Dict[str, Any]] = None,
         fact_id_from: Optional[str] = None,
-        store_handle_as: Optional[str] = None
+        store_handle_as: Optional[str] = None,
+        relay: bool = True,
     ) -> FacetBuilder:
         """
         Emit typed fact to dataspace - adds WriteStep.
@@ -259,7 +369,8 @@ class FacetBuilder:
             fact_type=fact_type,
             values=values,
             fact_id_key=fact_id_from,
-            store_handle_as=store_handle_as
+            store_handle_as=store_handle_as,
+            relay=relay,
         )
         self._steps.append(step)
 

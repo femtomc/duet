@@ -8,7 +8,7 @@ channel updates with explicit dataflow.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from rich.console import Console
 
@@ -17,13 +17,17 @@ from .dsl.steps import (
     FacetContext,
     HumanStep,
     ReadStep,
+    ReceiveMessageStep,
     StepResult,
+    SendMessageStep,
     ToolStep,
     WriteStep,
 )
 from .dsl.workflow import Phase
 from .models import AssistantRequest, AssistantResponse
 
+if TYPE_CHECKING:
+    from .dataspace import Dataspace, MessageEvent
 
 @dataclass
 class FacetExecutionResult:
@@ -48,6 +52,7 @@ class FacetExecutionResult:
     success: bool = True
     error: Optional[str] = None
     step_logs: List[Dict[str, Any]] = None
+    child_dataspace: Optional["Dataspace"] = None
 
     def __post_init__(self):
         if self.step_logs is None:
@@ -74,6 +79,7 @@ class FacetRunner:
         workspace_root: str,
         adapter=None,  # AssistantAdapter for AgentStep execution
         db=None,  # DuetDatabase for persisting facts
+        message_events: Optional[List["MessageEvent"]] = None,
     ) -> FacetExecutionResult:
         """
         Execute a facet script (phase with steps).
@@ -91,107 +97,139 @@ class FacetRunner:
         Returns:
             FacetExecutionResult with context, writes, and execution info
         """
-        # Initialize facet context (facts loaded on-demand by ReadStep)
-        context = FacetContext(
-            phase_name=phase.name,
-            run_id=run_id,
-            iteration=iteration,
-            workspace_root=workspace_root,
-        )
+        if dataspace is None:
+            return FacetExecutionResult(
+                context=FacetContext(
+                    facet_id=phase.name,
+                    phase_name=phase.name,
+                    run_id=run_id,
+                    iteration=iteration,
+                    workspace_root=workspace_root,
+                ),
+                channel_writes={},
+                success=False,
+                error="Dataspace is required for facet execution",
+            )
 
-        # Track step execution logs
-        step_logs = []
+        child_space = dataspace.ensure_child(phase.name)
+        result: Optional[FacetExecutionResult] = None
+        cleanup_mode = "remove_retract"
 
-        # Execute steps in order
-        for i, step in enumerate(phase.steps):
-            step_name = f"{step.__class__.__name__}[{i}]"
-            self.console.log(f"[dim]Executing step {i+1}/{len(phase.steps)}: {step_name}[/]")
-
-            try:
-                if isinstance(step, ReadStep):
-                    result = self._execute_read_step(step, context, dataspace)
-                elif isinstance(step, ToolStep):
-                    result = self._execute_tool_step(step, context)
-                elif isinstance(step, AgentStep):
-                    result = self._execute_agent_step(step, context, adapter)
-                elif isinstance(step, HumanStep):
-                    result = self._execute_human_step(step, context, dataspace)
-                elif isinstance(step, WriteStep):
-                    result = self._execute_write_step(step, context, dataspace)
+        try:
+            with child_space.in_turn():
+                context = FacetContext(
+                    facet_id=phase.name,
+                    phase_name=phase.name,
+                    run_id=run_id,
+                    iteration=iteration,
+                    workspace_root=workspace_root,
+                )
+                if message_events:
+                    context.metadata["message_events"] = list(message_events)
                 else:
-                    result = StepResult.fail(f"Unknown step type: {type(step)}")
+                    context.metadata.setdefault("message_events", [])
+                step_logs: List[Dict[str, Any]] = []
 
-                # Log step execution
-                step_logs.append({
-                    "step_index": i,
-                    "step_type": step.__class__.__name__,
-                    "success": result.success,
-                    "blocked": result.blocked,
-                    "error": result.error,
-                    "notes": result.notes,
-                })
+                for i, step in enumerate(phase.steps):
+                    step_name = f"{step.__class__.__name__}[{i}]"
+                    self.console.log(f"[dim]Executing step {i+1}/{len(phase.steps)}: {step_name}[/]")
 
-                # Check for blocked state (human approval pause)
-                if result.blocked:
-                    # Extract approval request ID from metadata
-                    request_id = result.metadata.get("approval_request_id")
+                    try:
+                        if isinstance(step, ReadStep):
+                            step_result = self._execute_read_step(step, context, dataspace)
+                        elif isinstance(step, ReceiveMessageStep):
+                            step_result = self._execute_receive_message_step(step, context, child_space)
+                        elif isinstance(step, SendMessageStep):
+                            step_result = self._execute_send_message_step(step, context, child_space)
+                        elif isinstance(step, ToolStep):
+                            step_result = self._execute_tool_step(step, context)
+                        elif isinstance(step, AgentStep):
+                            step_result = self._execute_agent_step(step, context, adapter)
+                        elif isinstance(step, HumanStep):
+                            step_result = self._execute_human_step(step, context, child_space)
+                        elif isinstance(step, WriteStep):
+                            step_result = self._execute_write_step(step, context, child_space)
+                        else:
+                            step_result = StepResult.fail(f"Unknown step type: {type(step)}")
 
-                    # Persist ApprovalRequest to database if available
-                    if db and request_id:
-                        from .dataspace import ApprovalRequest, FactPattern
+                        step_logs.append({
+                            "step_index": i,
+                            "step_type": step.__class__.__name__,
+                            "success": step_result.success,
+                            "blocked": step_result.blocked,
+                            "error": step_result.error,
+                            "notes": step_result.notes,
+                        })
 
-                        # Query for ApprovalRequest facts created by this execution
-                        pattern = FactPattern(fact_type=ApprovalRequest)
-                        requests = dataspace.query(pattern)
+                        if step_result.blocked:
+                            request_id = step_result.metadata.get("approval_request_id")
 
-                        # Persist all approval requests for this run
-                        for req in requests:
-                            if req.context.get("run_id") == run_id:
-                                db.save_fact(run_id, req)
+                            if db and request_id:
+                                from .dataspace import ApprovalRequest, FactPattern
 
-                    # Not a failure, execution paused for human
-                    return FacetExecutionResult(
+                                pattern = FactPattern(fact_type=ApprovalRequest)
+                                requests = dataspace.query(pattern)
+                                for req in requests:
+                                    if req.context.get("run_id") == run_id:
+                                        db.save_fact(run_id, req)
+
+                            result = FacetExecutionResult(
+                                context=context,
+                                channel_writes={},
+                                human_approval_needed=True,
+                                approval_reason=step_result.notes or "Approval required",
+                                approval_request_id=request_id,
+                                success=True,
+                                step_logs=step_logs,
+                                child_dataspace=child_space,
+                            )
+                            cleanup_mode = "keep"
+                            break
+
+                        if not step_result.success:
+                            result = FacetExecutionResult(
+                                context=context,
+                                channel_writes={},
+                                success=False,
+                                error=step_result.error or f"Step {step_name} failed",
+                                step_logs=step_logs,
+                            )
+                            cleanup_mode = "remove_retract"
+                            break
+
+                        for key, value in step_result.context_updates.items():
+                            context.set(key, value)
+
+                    except Exception as exc:
+                        self.console.log(f"[red]Step {step_name} raised exception: {exc}[/]")
+                        result = FacetExecutionResult(
+                            context=context,
+                            channel_writes={},
+                            success=False,
+                            error=f"Step {step_name} exception: {exc}",
+                            step_logs=step_logs,
+                        )
+                        cleanup_mode = "remove_retract"
+                        break
+                else:
+                    result = FacetExecutionResult(
                         context=context,
                         channel_writes={},
-                        human_approval_needed=True,
-                        approval_reason=result.notes or "Approval required",
-                        approval_request_id=request_id,
                         success=True,
                         step_logs=step_logs,
                     )
+                    cleanup_mode = "remove_no_retract"
 
-                # Check for failure
-                if not result.success:
-                    # Step failed - return early
-                    return FacetExecutionResult(
-                        context=context,
-                        channel_writes={},
-                        success=False,
-                        error=result.error or f"Step {step_name} failed",
-                        step_logs=step_logs,
-                    )
+        finally:
+            if cleanup_mode == "remove_retract":
+                dataspace.remove_child(phase.name, retract=True)
+            elif cleanup_mode == "remove_no_retract":
+                dataspace.remove_child(phase.name, retract=False)
 
-                # Merge step results into context
-                for key, value in result.context_updates.items():
-                    context.set(key, value)
+        if result is None:
+            raise RuntimeError("Facet execution did not produce a result")
 
-            except Exception as exc:
-                self.console.log(f"[red]Step {step_name} raised exception: {exc}[/]")
-                return FacetExecutionResult(
-                    context=context,
-                    channel_writes={},
-                    success=False,
-                    error=f"Step {step_name} exception: {exc}",
-                    step_logs=step_logs,
-                )
-
-        # All steps completed successfully
-        return FacetExecutionResult(
-            context=context,
-            channel_writes={},  # Empty - facts asserted directly by WriteStep
-            success=True,
-            step_logs=step_logs,
-        )
+        return result
 
     def _execute_read_step(
         self, step: ReadStep, context: FacetContext, dataspace
@@ -201,6 +239,18 @@ class FacetRunner:
 
         Supports both typed fact queries (new API) and legacy channel reads.
         """
+        return step.execute(context, dataspace)
+
+    def _execute_receive_message_step(
+        self, step: ReceiveMessageStep, context: FacetContext, dataspace
+    ) -> StepResult:
+        """Execute ReceiveMessageStep - load delivered message into context."""
+        return step.execute(context, dataspace)
+
+    def _execute_send_message_step(
+        self, step: SendMessageStep, context: FacetContext, dataspace
+    ) -> StepResult:
+        """Execute SendMessageStep - emit message through dataspace."""
         return step.execute(context, dataspace)
 
     def _execute_tool_step(self, step: ToolStep, context: FacetContext) -> StepResult:

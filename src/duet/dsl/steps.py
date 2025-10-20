@@ -11,7 +11,9 @@ execution and clear dataflow.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Protocol
+from typing import Any, Dict, List, Optional, Protocol, Type
+
+from ..dataspace import Message, MessageEvent, MessagePattern
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -29,6 +31,7 @@ class FacetContext:
     in local context, then assert facts back to dataspace.
 
     Attributes:
+        facet_id: Identifier of the facet executing
         phase_name: Name of the phase executing
         run_id: Current run identifier
         iteration: Current iteration number
@@ -39,6 +42,7 @@ class FacetContext:
         handles: Handles for facts asserted by this facet (for retraction)
     """
 
+    facet_id: str
     phase_name: str
     run_id: str
     iteration: int
@@ -354,7 +358,7 @@ class HumanStep:
             },
         )
 
-        handle = dataspace.assert_fact(request_fact)
+        handle = dataspace.assert_fact(request_fact, facet_id=context.facet_id, relay=True)
         context.add_handle(handle)
 
         # Return pause with request_id in metadata for scheduler tracking
@@ -387,6 +391,7 @@ class WriteStep:
     values: Optional[Dict[str, Any]] = None
     fact_id_key: Optional[str] = None
     store_handle_as: Optional[str] = None
+    relay: bool = False
 
     def execute(self, context: FacetContext, dataspace) -> StepResult:
         """
@@ -454,7 +459,7 @@ class WriteStep:
             return StepResult.fail(f"Failed to construct {self.fact_type.__name__}: {e}")
 
         # Assert fact to dataspace
-        handle = dataspace.assert_fact(fact)
+        handle = dataspace.assert_fact(fact, facet_id=context.facet_id, relay=self.relay)
 
         # Track handle in context
         context.add_handle(handle)
@@ -465,3 +470,130 @@ class WriteStep:
             context_updates[self.store_handle_as] = handle
 
         return StepResult(context_updates=context_updates, success=True)
+
+
+@dataclass
+class ReceiveMessageStep:
+    """
+    Step that consumes a pending message delivered to the facet.
+
+    Scheduler supplies message events when waking the facet. The first
+    matching event is optionally consumed and the message payload is
+    stored in the facet context under ``alias``.
+    """
+
+    message_type: Type[Message]
+    alias: str
+    constraints: Optional[Dict[str, Any]] = None
+    store_event_as: Optional[str] = None
+    consume: bool = True
+
+    def execute(self, context: FacetContext, dataspace) -> StepResult:
+        """
+        Move a delivered message into local context.
+
+        Args:
+            context: Facet execution context
+            dataspace: Dataspace reference (unused, kept for signature compatibility)
+
+        Returns:
+            StepResult with message payload stored in local context
+        """
+        events: List[MessageEvent] = context.metadata.get("message_events", [])
+        pattern = MessagePattern(
+            message_type=self.message_type,
+            constraints=self.constraints or {},
+        )
+
+        match_index: Optional[int] = None
+        matched_event: Optional[MessageEvent] = None
+
+        for idx, event in enumerate(events):
+            if pattern.matches(event.message):
+                match_index = idx
+                matched_event = event
+                break
+
+        if matched_event is None:
+            return StepResult.fail(
+                f"No pending message for {self.message_type.__name__} matching constraints"
+            )
+
+        if self.consume and match_index is not None:
+            remaining = events[:match_index] + events[match_index + 1 :]
+            context.metadata["message_events"] = remaining
+        else:
+            context.metadata["message_events"] = events
+
+        if self.store_event_as:
+            context.metadata.setdefault("message_event_store", {})[self.store_event_as] = matched_event
+
+        return StepResult.ok(**{self.alias: matched_event.message})
+
+
+@dataclass
+class SendMessageStep:
+    """
+    Step that sends an ephemeral message via the dataspace.
+
+    Mirrors fact emission semantics, including optional relay to the
+    parent dataspace for cross-scope delivery.
+    """
+
+    message_type: Type[Message]
+    values: Optional[Dict[str, Any]] = None
+    store_as: Optional[str] = None
+    relay: bool = False
+
+    def execute(self, context: FacetContext, dataspace) -> StepResult:
+        """
+        Construct and send the configured message.
+
+        Args:
+            context: Facet execution context
+            dataspace: Dataspace used for delivery
+
+        Returns:
+            StepResult reflecting success or failure
+        """
+        if not dataspace:
+            return StepResult.fail("SendMessageStep requires dataspace")
+
+        message_values: Dict[str, Any] = {}
+        if self.values:
+            for key, value in self.values.items():
+                if isinstance(value, str) and value.startswith("$"):
+                    context_key = value[1:]
+                    if "." in context_key:
+                        parts = context_key.split(".")
+                        base_value = context.get(parts[0])
+                        if base_value is None:
+                            resolved = None
+                        else:
+                            resolved = base_value
+                            for part in parts[1:]:
+                                if hasattr(resolved, part):
+                                    resolved = getattr(resolved, part)
+                                else:
+                                    resolved = None
+                                    break
+                        message_values[key] = resolved
+                    else:
+                        message_values[key] = context.get(context_key)
+                else:
+                    message_values[key] = value
+
+        try:
+            message = self.message_type(**message_values)
+        except TypeError as exc:
+            return StepResult.fail(
+                f"Failed to construct {self.message_type.__name__}: {exc}"
+            )
+
+        dataspace.send_message(message, facet_id=context.facet_id, relay=self.relay)
+
+        updates: Dict[str, Any] = {}
+        if self.store_as:
+            updates[self.store_as] = message
+
+        return StepResult.ok(**updates)

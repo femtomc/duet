@@ -4,7 +4,11 @@ Tests for Sprint DSL-5 dataspace model.
 Verifies structured fact storage, subscriptions, and reactive patterns.
 """
 
+from typing import List
+
 import pytest
+
+from dataclasses import dataclass
 
 from duet.dataspace import (
     ApprovalGrant,
@@ -12,6 +16,11 @@ from duet.dataspace import (
     CodeArtifact,
     Dataspace,
     FactPattern,
+    FactEvent,
+    Message,
+    MessageEvent,
+    MessagePattern,
+    FactInterest,
     PlanDoc,
     ReviewVerdict,
 )
@@ -27,6 +36,7 @@ def test_dataspace_assert_and_query():
     # assert_fact returns Handle
     assert handle is not None
     assert handle.fact_id == "plan-1"
+    assert handle.facet_id == "__anon__"
 
     # Query by type
     pattern = FactPattern(fact_type=PlanDoc)
@@ -94,8 +104,8 @@ def test_dataspace_subscription():
     ds = Dataspace()
     triggered = []
 
-    def callback(fact):
-        triggered.append(fact)
+    def callback(event: FactEvent):
+        triggered.append(event.fact)
 
     # Subscribe before asserting
     pattern = FactPattern(fact_type=PlanDoc)
@@ -120,8 +130,8 @@ def test_dataspace_subscription_existing_facts():
 
     triggered = []
 
-    def callback(fact):
-        triggered.append(fact)
+    def callback(event: FactEvent):
+        triggered.append(event.fact)
 
     # Subscribe after asserting
     pattern = FactPattern(fact_type=PlanDoc)
@@ -156,7 +166,10 @@ def test_dataspace_approval_conversation():
     approved = []
 
     # Facet subscribes to approval requests
-    def handle_approval_request(fact):
+    def handle_approval_request(event: FactEvent):
+        if event.action != "asserted":
+            return
+        fact = event.fact
         # Simulates human/tool granting approval
         grant = ApprovalGrant(
             fact_id=f"grant-{fact.fact_id}",
@@ -168,8 +181,9 @@ def test_dataspace_approval_conversation():
     ds.subscribe(FactPattern(fact_type=ApprovalRequest), handle_approval_request)
 
     # Another facet subscribes to approvals
-    def handle_approval_grant(fact):
-        approved.append(fact)
+    def handle_approval_grant(event: FactEvent):
+        if event.action == "asserted":
+            approved.append(event.fact)
 
     ds.subscribe(FactPattern(fact_type=ApprovalGrant), handle_approval_grant)
 
@@ -220,3 +234,148 @@ def test_fact_pattern_matching():
     # Wrong type
     pattern4 = FactPattern(fact_type=CodeArtifact)
     assert not pattern4.matches(plan)
+
+
+def test_nested_dataspace_local_scope():
+    """Facts asserted in child dataspace remain local by default."""
+    root = Dataspace()
+    child = root.spawn_child("child")
+
+    plan = PlanDoc(fact_id="plan-1", task_id="task-1", content="Nested Plan")
+    child.assert_fact(plan, facet_id="planner")
+
+    # Child sees fact, parent does not
+    child_results = child.query(FactPattern(fact_type=PlanDoc))
+    root_results = root.query(FactPattern(fact_type=PlanDoc))
+
+    assert len(child_results) == 1
+    assert child_results[0].fact_id == "plan-1"
+    assert root_results == []
+
+
+def test_nested_dataspace_relay_to_parent():
+    """Facts can be relayed from child to parent dataspace."""
+    root = Dataspace()
+    child = root.spawn_child("child")
+
+    triggered: List[FactEvent] = []
+    root.subscribe(FactPattern(fact_type=PlanDoc), lambda event: triggered.append(event))
+
+    plan = PlanDoc(fact_id="plan-2", task_id="task-2", content="Relayed Plan")
+    handle = child.assert_fact(plan, facet_id="planner", relay=True)
+
+    # Root should receive relayed event with namespaced facet id
+    assert len(triggered) == 1
+    assert triggered[0].action == "asserted"
+    assert triggered[0].facet_id == "child.planner"
+
+    # Both child and parent see the fact
+    assert child.query(FactPattern(fact_type=PlanDoc))
+    assert root.query(FactPattern(fact_type=PlanDoc))
+
+    # Retracting from child removes from parent
+    child.retract(handle)
+    assert child.query(FactPattern(fact_type=PlanDoc)) == []
+    assert root.query(FactPattern(fact_type=PlanDoc)) == []
+
+
+def test_dataspace_interest_registration():
+    """Registering interests asserts FactInterest and triggers callbacks."""
+    ds = Dataspace()
+    triggered: List[FactEvent] = []
+
+    pattern = FactPattern(fact_type=PlanDoc, constraints={"task_id": "task-42"})
+    handle = ds.register_interest(pattern, facet_id="listener", callback=lambda event: triggered.append(event))
+
+    plan = PlanDoc(fact_id="plan-42", task_id="task-42", content="Interested")
+    ds.assert_fact(plan, facet_id="planner")
+
+    assert len(triggered) == 1
+    assert triggered[0].fact.fact_id == "plan-42"
+
+    interest_records = ds.query(
+        FactPattern(fact_type=FactInterest, constraints={"facet_id": "listener"})
+    )
+    assert interest_records
+
+    ds.unregister_interest(handle)
+
+    interest_records_after = ds.query(
+        FactPattern(fact_type=FactInterest, constraints={"facet_id": "listener"})
+    )
+    assert interest_records_after == []
+
+
+def test_dataspace_unregister_all_interests_for_facet():
+    ds = Dataspace()
+    pattern = FactPattern(fact_type=PlanDoc, constraints={"task_id": "x"})
+    ds.register_interest(pattern, facet_id="listener", callback=lambda event: None)
+    ds.unregister_interests_for_facet("listener")
+    interest_records_after = ds.query(
+        FactPattern(fact_type=FactInterest, constraints={"facet_id": "listener"})
+    )
+    assert interest_records_after == []
+
+
+def test_write_step_relay_from_child():
+    """WriteStep with relay=True mirrors assertion to parent dataspace."""
+    from duet.dsl.steps import FacetContext, WriteStep
+
+    root = Dataspace()
+    child = root.spawn_child("child")
+
+    context = FacetContext(
+        facet_id="writer",
+        phase_name="writer",
+        run_id="run-1",
+        iteration=0,
+        workspace_root=".",
+    )
+
+    step = WriteStep(
+        fact_type=PlanDoc,
+        values={"content": "Relay", "task_id": "t-1"},
+        relay=True,
+    )
+
+    result = step.execute(context, child)
+    assert result.success
+
+    # Fact visible in child and parent
+    assert child.query(FactPattern(fact_type=PlanDoc))
+    relayed = root.query(FactPattern(fact_type=PlanDoc))
+    assert relayed and relayed[0].content == "Relay"
+
+
+@dataclass
+class TestMessage(Message):
+    __test__ = False
+    topic: str
+    payload: str
+
+
+def test_message_subscription():
+    ds = Dataspace()
+    received: List[MessageEvent] = []
+
+    ds.subscribe_message(MessagePattern(message_type=TestMessage, constraints={"topic": "test"}), lambda event: received.append(event))
+
+    ds.send_message(TestMessage(topic="test", payload="hello"), facet_id="sender")
+
+    assert len(received) == 1
+    assert received[0].message.payload == "hello"
+    assert received[0].facet_id == "sender"
+
+
+def test_message_relay_to_parent():
+    root = Dataspace()
+    child = root.spawn_child("child")
+    events: List[MessageEvent] = []
+
+    root.subscribe_message(MessagePattern(message_type=TestMessage), lambda event: events.append(event))
+
+    child.send_message(TestMessage(topic="info", payload="ping"), facet_id="child_facet", relay=True)
+
+    assert len(events) == 1
+    assert events[0].facet_id == "child.child_facet"
+    assert events[0].message.payload == "ping"

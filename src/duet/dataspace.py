@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Type
+from typing import Any, Callable, Dict, Generic, Iterable, Iterator, List, Optional, Set, Tuple, Type, TypeVar, Union, Literal
 from collections import defaultdict
 
 
@@ -28,7 +28,9 @@ class Handle:
     """
 
     fact_id: str
+    facet_id: str
     handle_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    relay_handles: List[Tuple["Dataspace", "Handle"]] = field(default_factory=list)
 
     def __repr__(self) -> str:
         return f"Handle({self.fact_id[:8]}...)"
@@ -141,6 +143,18 @@ class Fact:
         return pattern.matches(self)
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Message Types (Ephemeral Actions)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class Message:
+    """Base class for messages sent through the dataspace."""
+
+    def matches(self, pattern: "MessagePattern") -> bool:
+        return pattern.matches(self)
+
+
 @fact
 @dataclass
 class TaskRequest(Fact):
@@ -232,6 +246,10 @@ class FactPattern:
     fact_type: type
     constraints: Dict[str, Any] = field(default_factory=dict)
 
+    def key(self) -> Tuple[type, Tuple[Tuple[str, Any], ...]]:
+        """Return canonical key representation for trie indexing."""
+        return self.fact_type, tuple(sorted(self.constraints.items()))
+
     def matches(self, fact: Fact) -> bool:
         """Check if fact matches this pattern."""
         if not isinstance(fact, self.fact_type):
@@ -248,8 +266,142 @@ class FactPattern:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Fact Events (Subscription Notifications)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class FactEvent:
+    """
+    Event delivered to subscription callbacks.
+
+    Attributes:
+        fact: Fact involved in the event
+        facet_id: Facet that asserted/retracted the fact
+        action: Literal describing the change ("asserted" or "retracted")
+    """
+
+    fact: Fact
+    facet_id: str
+    action: Literal["asserted", "retracted"]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Message Patterns & Events
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+@dataclass
+class MessagePattern:
+    """Pattern for matching messages in subscriptions."""
+
+    message_type: type
+    constraints: Dict[str, Any] = field(default_factory=dict)
+
+    def matches(self, message: Message) -> bool:
+        if not isinstance(message, self.message_type):
+            return False
+
+        for key, value in self.constraints.items():
+            if not hasattr(message, key):
+                return False
+            if getattr(message, key) != value:
+                return False
+
+        return True
+
+
+@dataclass(frozen=True)
+class MessageEvent:
+    """Event delivered to message subscription callbacks."""
+
+    message: Message
+    facet_id: str
+
+
+@fact
+@dataclass
+class FactInterest(Fact):
+    """Interest assertion indicating a facet's desire for facts matching a pattern."""
+
+    fact_id: str
+    facet_id: str
+    fact_type: str
+    constraints: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class InterestRegistration:
+    """Runtime record linking an interest to its callback and handle."""
+
+    facet_id: str
+    pattern: FactPattern
+    callback: Callable[[FactEvent], None]
+    handle: Handle
+    key: Tuple[Any, ...]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Dataspace (Fact Storage & Subscriptions)
 # ──────────────────────────────────────────────────────────────────────────────
+
+
+T = TypeVar("T")
+
+
+class PatternTrieNode(Generic[T]):
+    __slots__ = ("value", "children")
+
+    def __init__(self) -> None:
+        self.value: List[T] = []
+        self.children: Dict[Any, PatternTrieNode[T]] = {}
+
+
+class PatternTrie(Generic[T]):
+    def __init__(self) -> None:
+        self.root: PatternTrieNode[T] = PatternTrieNode()
+
+    def insert(self, key: Iterable[Any], item: T) -> None:
+        node = self.root
+        for component in key:
+            node = node.children.setdefault(component, PatternTrieNode())
+        if item not in node.value:
+            node.value.append(item)
+
+    def remove(self, key: Iterable[Any], item: T) -> None:
+        path: List[Tuple[Any, PatternTrieNode[T]]] = []
+        node = self.root
+        for component in key:
+            child = node.children.get(component)
+            if child is None:
+                return
+            path.append((component, node))
+            node = child
+        if item in node.value:
+            node.value.remove(item)
+        if node.value or node.children:
+            return
+        for component, parent in reversed(path):
+            del parent.children[component]
+            if parent.value or parent.children:
+                break
+
+    def lookup(self, key: Iterable[Any]) -> List[T]:
+        node = self.root
+        for component in key:
+            child = node.children.get(component)
+            if child is None:
+                return []
+            node = child
+        result: List[T] = []
+        stack = [node]
+        while stack:
+            current = stack.pop()
+            if current.value:
+                result.extend(current.value)
+            if current.children:
+                stack.extend(current.children.values())
+        return result
 
 
 class Dataspace:
@@ -267,43 +419,120 @@ class Dataspace:
     - in_turn() context manager batches fact assertions
     """
 
-    def __init__(self):
+    def __init__(self, *, name: str = "root", parent: Optional["Dataspace"] = None):
         self.facts: Dict[str, Fact] = {}  # fact_id -> Fact
         self.facts_by_type: Dict[type, Set[str]] = defaultdict(set)  # type -> {fact_ids}
-        self.subscriptions: List[Tuple[FactPattern, Callable]] = []
+        self.subscriptions: List[Tuple[FactPattern, Callable[[FactEvent], None]]] = []
+        self.message_subscriptions: List[Tuple[MessagePattern, Callable[[MessageEvent], None]]] = []
+        self._facet_assertions: Dict[str, Dict[str, Fact]] = defaultdict(dict)  # facet_id -> {fact_id: Fact}
+        self._fact_index: Dict[str, str] = {}  # fact_id -> facet_id
+        self.name = name
+        self.parent = parent
+        self.children: Dict[str, "Dataspace"] = {}
+        self._facet_retractions: Dict[str, List[Handle]] = defaultdict(list)
+        self._subscription_trie: PatternTrie[int] = PatternTrie()
+        self._interest_trie: PatternTrie["InterestRegistration"] = PatternTrie()
+        self._interest_registry: Dict[str, List["InterestRegistration"]] = defaultdict(list)
+        self._interest_handle_map: Dict[str, "InterestRegistration"] = {}
 
         # Turn batching
         self._in_turn: bool = False
-        self._pending_notifications: List[Tuple[Callable, Fact]] = []
+        self._pending_notifications: List[Tuple[Callable[[FactEvent], None], FactEvent]] = []
 
-    def assert_fact(self, fact: Fact) -> Handle:
+    def spawn_child(self, name: str) -> "Dataspace":
+        """Create a child dataspace nested within this dataspace."""
+        if name in self.children:
+            raise ValueError(f"Child dataspace '{name}' already exists")
+
+        child = Dataspace(name=name, parent=self)
+        self.children[name] = child
+        return child
+
+    def _build_pattern_path(self, pattern: FactPattern) -> Tuple[Any, ...]:
+        components: List[Any] = [pattern.fact_type]
+        for key, value in sorted(pattern.constraints.items()):
+            components.append((key, value))
+        return tuple(components)
+
+    def get_child(self, name: str) -> Optional["Dataspace"]:
+        """Retrieve a child dataspace by name."""
+        return self.children.get(name)
+
+    def ensure_child(self, name: str) -> "Dataspace":
+        """Retrieve child dataspace, creating it if necessary."""
+        child = self.get_child(name)
+        if child is None:
+            child = self.spawn_child(name)
+        return child
+
+    def remove_child(self, name: str, *, retract: bool = True) -> None:
+        """Remove a child dataspace, optionally retracting its assertions."""
+        child = self.children.pop(name, None)
+        if child and retract:
+            child.clear(retract=True)
+
+    def assert_fact(self, fact: Fact, facet_id: Optional[str] = None, relay: bool = False) -> Handle:
         """
         Assert a fact into the dataspace (like Syndicate's publish).
 
         Args:
             fact: Fact to assert
+            facet_id: Facet asserting the fact (default: "__anon__")
+
+            relay: Relay assertion to parent dataspace if True
 
         Returns:
             Handle for later retraction
 
         Triggers callbacks for matching subscriptions (atomic within turn).
         """
+        facet = facet_id or "__anon__"
+
         # Store fact
         self.facts[fact.fact_id] = fact
         self.facts_by_type[type(fact)].add(fact.fact_id)
+        self._facet_assertions[facet][fact.fact_id] = fact
+        self._fact_index[fact.fact_id] = facet
 
         # Create handle for retraction
-        handle = Handle(fact_id=fact.fact_id)
+        handle = Handle(fact_id=fact.fact_id, facet_id=facet)
+        self._facet_retractions[facet].append(handle)
+
+        event = FactEvent(fact=fact, facet_id=facet, action="asserted")
 
         # Trigger subscriptions (defer if in turn)
-        for pattern, callback in self.subscriptions:
-            if pattern.matches(fact):
-                if self._in_turn:
-                    # Defer until turn end (atomic publication)
-                    self._pending_notifications.append((callback, fact))
-                else:
-                    # Immediate delivery
-                    callback(fact)
+        subscription_indices = self._subscription_trie.lookup([type(fact)])
+        if subscription_indices:
+            for index in set(subscription_indices):
+                if index >= len(self.subscriptions):
+                    continue
+                patt, callback = self.subscriptions[index]
+                if patt.matches(fact):
+                    if self._in_turn:
+                        self._pending_notifications.append((callback, event))
+                    else:
+                        callback(event)
+
+        # Trigger interest registrations (scheduler)
+        interest_records = self._interest_trie.lookup([type(fact)])
+        if interest_records:
+            seen_interest_handles: Set[str] = set()
+            for record in interest_records:
+                handle_id = record.handle.handle_id
+                if handle_id in seen_interest_handles:
+                    continue
+                if record.pattern.matches(fact):
+                    if self._in_turn:
+                        self._pending_notifications.append((record.callback, event))
+                    else:
+                        record.callback(event)
+                seen_interest_handles.add(handle_id)
+
+        # Relay to parent dataspace if requested
+        if relay and self.parent:
+            parent_facet = f"{self.name}.{facet}"
+            relay_handle = self.parent.assert_fact(fact, facet_id=parent_facet, relay=False)
+            handle.relay_handles.append((self.parent, relay_handle))
 
         return handle
 
@@ -317,7 +546,14 @@ class Dataspace:
         Returns:
             Retracted fact if found, None otherwise
         """
-        return self.retract_fact(handle.fact_id)
+        fact = self.retract_fact(handle.fact_id)
+
+        # Retract any relayed assertions upstream
+        for dataspace, relay_handle in list(handle.relay_handles):
+            dataspace.retract(relay_handle)
+        handle.relay_handles.clear()
+
+        return fact
 
     def retract_fact(self, fact_id: str) -> Optional[Fact]:
         """
@@ -334,10 +570,24 @@ class Dataspace:
         fact = self.facts.pop(fact_id, None)
         if fact:
             self.facts_by_type[type(fact)].discard(fact_id)
-            # TODO: Notify subscriptions of retraction
+            facet = self._fact_index.pop(fact_id, "__anon__")
+            facet_facts = self._facet_assertions.get(facet)
+            if facet_facts and fact_id in facet_facts:
+                del facet_facts[fact_id]
+                if not facet_facts:
+                    del self._facet_assertions[facet]
+
+            event = FactEvent(fact=fact, facet_id=facet, action="retracted")
+
+            for pattern, callback in self.subscriptions:
+                if pattern.matches(fact):
+                    if self._in_turn:
+                        self._pending_notifications.append((callback, event))
+                    else:
+                        callback(event)
         return fact
 
-    def subscribe(self, pattern: FactPattern, callback: Callable[[Fact], None]) -> None:
+    def subscribe(self, pattern: FactPattern, callback: Callable[[FactEvent], None]) -> None:
         """
         Subscribe to facts matching a pattern.
 
@@ -348,10 +598,95 @@ class Dataspace:
         Immediately calls callback for existing matching facts.
         """
         self.subscriptions.append((pattern, callback))
+        index = len(self.subscriptions) - 1
+        self._subscription_trie.insert(self._build_pattern_path(pattern), index)
 
         # Trigger for existing facts
         for fact in self.query(pattern):
-            callback(fact)
+            facet_id = self._fact_index.get(fact.fact_id, "__anon__")
+            callback(FactEvent(fact=fact, facet_id=facet_id, action="asserted"))
+
+    # ────────────────────────────────────────────────────────────────────────
+    # Message actions
+    # ────────────────────────────────────────────────────────────────────────
+
+    def subscribe_message(self, pattern: MessagePattern, callback: Callable[[MessageEvent], None]) -> None:
+        """Subscribe to messages matching a pattern."""
+        self.message_subscriptions.append((pattern, callback))
+
+    def send_message(self, message: Message, facet_id: Optional[str] = None, relay: bool = False) -> None:
+        """Send a message through the dataspace."""
+        facet = facet_id or "__anon__"
+        event = MessageEvent(message=message, facet_id=facet)
+
+        for pattern, callback in self.message_subscriptions:
+            if pattern.matches(message):
+                callback(event)
+
+        if relay and self.parent:
+            parent_facet = f"{self.name}.{facet}"
+            self.parent.send_message(message, facet_id=parent_facet, relay=False)
+
+    def register_interest(
+        self,
+        pattern: FactPattern,
+        facet_id: str,
+        callback: Callable[[FactEvent], None],
+        *,
+        relay: bool = True,
+    ) -> Handle:
+        """Register an interest in facts matching pattern on behalf of a facet."""
+
+        interest_fact = FactInterest(
+            fact_id=f"interest:{facet_id}:{uuid.uuid4().hex[:8]}",
+            facet_id=facet_id,
+            fact_type=f"{pattern.fact_type.__module__}.{pattern.fact_type.__qualname__}",
+            constraints=dict(pattern.constraints),
+        )
+
+        handle = self.assert_fact(interest_fact, facet_id=facet_id, relay=relay)
+        key = self._build_pattern_path(pattern)
+        record = InterestRegistration(
+            facet_id=facet_id,
+            pattern=pattern,
+            callback=callback,
+            handle=handle,
+            key=key,
+        )
+        self._interest_trie.insert(key, record)
+        self._interest_registry[facet_id].append(record)
+        self._interest_handle_map[handle.handle_id] = record
+
+        # Deliver existing facts to new interest
+        for fact in self.query(pattern):
+            facet_origin = self._fact_index.get(fact.fact_id, "__anon__")
+            event = FactEvent(fact=fact, facet_id=facet_origin, action="asserted")
+            callback(event)
+
+        return handle
+
+    def unregister_interest(self, handle: Handle) -> None:
+        """Remove a previously registered interest by handle."""
+
+        record = self._interest_handle_map.pop(handle.handle_id, None)
+        if not record:
+            return
+
+        self._interest_trie.remove(record.key, record)
+        registry = self._interest_registry.get(record.facet_id)
+        if registry and record in registry:
+            registry.remove(record)
+            if not registry:
+                del self._interest_registry[record.facet_id]
+
+        self.retract(handle)
+
+    def unregister_interests_for_facet(self, facet_id: str) -> None:
+        """Remove all interests registered by a facet."""
+
+        records = list(self._interest_registry.get(facet_id, []))
+        for record in records:
+            self.unregister_interest(record.handle)
 
     def query(self, pattern: FactPattern, latest_only: bool = False) -> List[Fact]:
         """
@@ -439,21 +774,42 @@ class Dataspace:
         self._in_turn = False
 
         # Deliver all pending notifications atomically
-        for callback, fact in self._pending_notifications:
+        for callback, event in self._pending_notifications:
             try:
-                callback(fact)
+                callback(event)
             except Exception as exc:
                 # Don't let callback errors break turn delivery
                 print(f"Subscription callback error: {exc}")
 
         self._pending_notifications.clear()
 
-    def clear(self) -> None:
+    def clear(self, *, retract: bool = True) -> None:
         """Clear all facts and subscriptions."""
+        for name, child in list(self.children.items()):
+            child.clear(retract=retract)
+            self.children.pop(name, None)
+
+        if retract:
+            for handles in list(self._facet_retractions.values()):
+                for handle in list(handles):
+                    self.retract(handle)
+
+        for records in list(self._interest_registry.values()):
+            for record in list(records):
+                self.unregister_interest(record.handle)
+        self._interest_registry.clear()
+        self._interest_handle_map.clear()
+        self._subscription_trie = PatternTrie()
+        self._interest_trie = PatternTrie()
+
         self.facts.clear()
         self.facts_by_type.clear()
+        self._facet_retractions.clear()
         self.subscriptions.clear()
+        self.message_subscriptions.clear()
         self._pending_notifications.clear()
+        self._facet_assertions.clear()
+        self._fact_index.clear()
 
 
 class TurnContext:

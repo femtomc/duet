@@ -42,6 +42,7 @@ class OrchestrationResult:
     error: Optional[str] = None
     completed_facets: list[str] = field(default_factory=list)
     waiting_facets: list[str] = field(default_factory=list)
+    canceled_facets: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -76,6 +77,7 @@ class Orchestrator:
         adapter=None,
         max_iterations: int = 100,
         initial_facts: Optional[list] = None,
+        cancel_facet_id: Optional[str] = None,
     ) -> OrchestrationResult:
         """
         Execute a facet program reactively.
@@ -89,6 +91,7 @@ class Orchestrator:
             adapter: Assistant adapter for AgentSteps
             max_iterations: Maximum total iterations (safety limit)
             initial_facts: Optional list of facts to seed dataspace before execution
+            cancel_facet_id: Optional facet identifier to cancel if it becomes waiting
 
         Returns:
             OrchestrationResult with execution summary
@@ -116,12 +119,15 @@ class Orchestrator:
         scheduler = FacetScheduler(dataspace, console=self.console)
         runner = FacetRunner(console=self.console)
 
+        canceled_facets: list[str] = []
+
         # Seed initial facts
         if initial_facts:
             self.console.log(f"Seeding {len(initial_facts)} initial fact(s)")
-            for fact in initial_facts:
-                dataspace.assert_fact(fact)
-                self.console.log(f"  - {fact.__class__.__name__}: {fact.fact_id}")
+            with dataspace.in_turn():
+                for fact in initial_facts:
+                    dataspace.assert_fact(fact, facet_id="__seed__")
+                    self.console.log(f"  - {fact.__class__.__name__}: {fact.fact_id}")
 
         # Compile program to registrations
         try:
@@ -162,6 +168,7 @@ class Orchestrator:
                 )
 
             # Execute facet
+            message_events = scheduler.pop_pending_messages(facet_id)
             result = runner.execute_facet(
                 phase=phase,
                 dataspace=dataspace,
@@ -169,7 +176,8 @@ class Orchestrator:
                 iteration=iteration_count,
                 workspace_root=self.workspace_root,
                 adapter=adapter,
-                db=self.db
+                db=self.db,
+                message_events=message_events,
             )
 
             iteration_count += 1
@@ -190,6 +198,15 @@ class Orchestrator:
                     scheduler.mark_waiting_for_approval(facet_id, result.approval_request_id)
                 else:
                     scheduler.mark_waiting(facet_id)
+                if result.child_dataspace:
+                    scheduler.set_waiting_child_dataspace(facet_id, result.child_dataspace)
+
+                if cancel_facet_id and facet_id == cancel_facet_id:
+                    if scheduler.cancel_facet(facet_id):
+                        canceled_facets.append(facet_id)
+                        self.console.log(f"[cyan]Facet '{facet_id}' canceled by request[/]")
+                        continue
+
                 continue
 
             # Mark completed
@@ -201,6 +218,13 @@ class Orchestrator:
         # Determine final status
         completed_facets = list(executed_facet_ids)
         waiting_facets = list(scheduler.waiting)
+
+        if cancel_facet_id and cancel_facet_id in scheduler.waiting:
+            if scheduler.cancel_facet(cancel_facet_id):
+                if cancel_facet_id not in canceled_facets:
+                    canceled_facets.append(cancel_facet_id)
+                self.console.log(f"[cyan]Facet '{cancel_facet_id}' canceled by request[/]")
+            waiting_facets = [fid for fid in scheduler.waiting if fid != cancel_facet_id]
 
         if iteration_count >= max_iterations:
             error_msg = f"Max iterations ({max_iterations}) reached"
@@ -237,7 +261,8 @@ class Orchestrator:
             facets_executed=facets_executed,
             iterations=iteration_count,
             completed_facets=completed_facets,
-            waiting_facets=waiting_facets
+            waiting_facets=waiting_facets,
+            canceled_facets=canceled_facets,
         )
 
     def run_next_phase(self, *args, **kwargs) -> OrchestrationResult:  # type: ignore[no-untyped-def]
@@ -249,3 +274,7 @@ class Orchestrator:
         raise NotImplementedError(
             "run_next_phase() is deprecated. Use run(program: FacetProgram) instead."
         )
+
+    def cancel_waiting_facet(self, scheduler: FacetScheduler, facet_id: str) -> bool:
+        """Cancel a waiting facet safely, retracting its outstanding assertions."""
+        return scheduler.cancel_facet(facet_id)

@@ -4,7 +4,7 @@ Tests for Turn-based atomic publication (Syndicate-style).
 Verifies that subscription callbacks are deferred until turn end.
 """
 
-from duet.dataspace import Dataspace, PlanDoc, CodeArtifact, FactPattern
+from duet.dataspace import Dataspace, PlanDoc, CodeArtifact, FactPattern, FactEvent
 
 
 def test_turn_batches_notifications():
@@ -12,8 +12,8 @@ def test_turn_batches_notifications():
     ds = Dataspace()
     triggered = []
 
-    def callback(fact):
-        triggered.append(fact)
+    def callback(event: FactEvent):
+        triggered.append(event)
 
     # Subscribe
     ds.subscribe(FactPattern(fact_type=PlanDoc), callback)
@@ -28,8 +28,10 @@ def test_turn_batches_notifications():
 
     # After turn ends, all notifications delivered
     assert len(triggered) == 2
-    assert triggered[0].fact_id == "plan-1"
-    assert triggered[1].fact_id == "plan-2"
+    assert triggered[0].action == "asserted"
+    assert triggered[1].action == "asserted"
+    assert triggered[0].fact.fact_id == "plan-1"
+    assert triggered[1].fact.fact_id == "plan-2"
 
 
 def test_immediate_delivery_outside_turn():
@@ -37,8 +39,8 @@ def test_immediate_delivery_outside_turn():
     ds = Dataspace()
     triggered = []
 
-    def callback(fact):
-        triggered.append(fact)
+    def callback(event: FactEvent):
+        triggered.append(event)
 
     ds.subscribe(FactPattern(fact_type=PlanDoc), callback)
 
@@ -46,6 +48,7 @@ def test_immediate_delivery_outside_turn():
     ds.assert_fact(PlanDoc(fact_id="plan-1", task_id="task-1", content="Plan A"))
 
     assert len(triggered) == 1
+    assert triggered[0].action == "asserted"
 
 
 def test_nested_turns_not_supported():
@@ -53,8 +56,8 @@ def test_nested_turns_not_supported():
     ds = Dataspace()
     triggered = []
 
-    def callback(fact):
-        triggered.append(fact)
+    def callback(event: FactEvent):
+        triggered.append(event)
 
     ds.subscribe(FactPattern(fact_type=PlanDoc), callback)
 
@@ -71,8 +74,14 @@ def test_turn_with_multiple_fact_types():
     plan_triggered = []
     code_triggered = []
 
-    ds.subscribe(FactPattern(fact_type=PlanDoc), lambda f: plan_triggered.append(f))
-    ds.subscribe(FactPattern(fact_type=CodeArtifact), lambda f: code_triggered.append(f))
+    ds.subscribe(
+        FactPattern(fact_type=PlanDoc),
+        lambda event: plan_triggered.append(event),
+    )
+    ds.subscribe(
+        FactPattern(fact_type=CodeArtifact),
+        lambda event: code_triggered.append(event),
+    )
 
     with ds.in_turn():
         ds.assert_fact(PlanDoc(fact_id="plan-1", task_id="task-1", content="Plan"))
@@ -93,11 +102,11 @@ def test_turn_callback_error_doesnt_break_delivery():
     ds = Dataspace()
     triggered = []
 
-    def bad_callback(fact):
+    def bad_callback(event: FactEvent):
         raise RuntimeError("Callback error")
 
-    def good_callback(fact):
-        triggered.append(fact)
+    def good_callback(event: FactEvent):
+        triggered.append(event)
 
     # Subscribe both
     ds.subscribe(FactPattern(fact_type=PlanDoc), bad_callback)
