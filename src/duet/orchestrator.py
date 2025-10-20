@@ -1,34 +1,241 @@
-"""Placeholder orchestrator for upcoming facet-based runtime."""
+"""
+Facet-based orchestrator for reactive workflow execution.
+
+Orchestrates facet execution using compiled FacetProgram, reactive scheduler,
+and dataspace for fact-based coordination.
+"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 from rich.console import Console
 
 from .artifacts import ArtifactStore
 from .config import DuetConfig
+from .dataspace import Dataspace
+from .dsl.combinators import FacetProgram
+from .dsl.compiler import compile_program
+from .facet_runner import FacetRunner
 from .persistence import DuetDatabase
+from .scheduler import FacetScheduler
+
+
+@dataclass
+class OrchestrationResult:
+    """
+    Result of orchestration execution.
+
+    Attributes:
+        success: Whether orchestration completed successfully
+        facets_executed: Number of facets that ran
+        iterations: Total iterations across all facets
+        error: Error message if failed
+        completed_facets: List of facet IDs that completed
+        waiting_facets: List of facet IDs still waiting
+    """
+
+    success: bool
+    facets_executed: int = 0
+    iterations: int = 0
+    error: Optional[str] = None
+    completed_facets: list[str] = field(default_factory=list)
+    waiting_facets: list[str] = field(default_factory=list)
 
 
 @dataclass
 class Orchestrator:
     """
-    Temporary stub orchestrator.
+    Facet-based orchestrator for reactive workflows.
 
-    The legacy channel-based orchestrator has been removed. A new implementation
-    targeting the facet/combinator DSL will replace this placeholder.
+    Coordinates facet execution using:
+    - FacetProgram: Compiled from DSL (seq, loop, etc.)
+    - Dataspace: Fact storage and subscriptions
+    - Scheduler: Reactive facet scheduling
+    - FacetRunner: Step-by-step facet execution
+
+    Attributes:
+        config: Duet configuration
+        artifact_store: Storage for run artifacts
+        console: Rich console for output
+        db: Database for persistence
+        workspace_root: Workspace directory path
     """
 
     config: DuetConfig
     artifact_store: ArtifactStore
-    console: Console = Console()
+    console: Console = field(default_factory=Console)
     db: Optional[DuetDatabase] = None
-    workflow_path: Optional[str] = None
+    workspace_root: str = "."
 
-    def run(self, *args, **kwargs):  # type: ignore[no-untyped-def]
-        raise RuntimeError("Facet-based orchestrator not implemented yet.")
+    def run(
+        self,
+        program: FacetProgram,
+        run_id: str,
+        adapter=None,
+        max_iterations: int = 100,
+        initial_facts: Optional[list] = None,
+    ) -> OrchestrationResult:
+        """
+        Execute a facet program reactively.
 
-    def run_next_phase(self, *args, **kwargs):  # type: ignore[no-untyped-def]
-        raise RuntimeError("Facet-based orchestrator not implemented yet.")
+        Compiles the program, registers facets with the scheduler, and executes
+        the reactive loop until completion or max iterations.
+
+        Args:
+            program: FacetProgram from combinators
+            run_id: Unique run identifier
+            adapter: Assistant adapter for AgentSteps
+            max_iterations: Maximum total iterations (safety limit)
+            initial_facts: Optional list of facts to seed dataspace before execution
+
+        Returns:
+            OrchestrationResult with execution summary
+
+        Example:
+            program = seq(
+                facet("plan").needs(TaskRequest).emit(PlanDoc).build(),
+                facet("implement").needs(PlanDoc).emit(CodeArtifact).build()
+            )
+
+            task = TaskRequest(fact_id="task_1", description="Build feature", priority=1)
+
+            orchestrator = Orchestrator(config, artifact_store)
+            result = orchestrator.run(
+                program,
+                run_id="run_1",
+                adapter=echo_adapter,
+                initial_facts=[task]
+            )
+        """
+        self.console.log(f"[bold]Starting orchestration: {run_id}[/]")
+
+        # Initialize components
+        dataspace = Dataspace()
+        scheduler = FacetScheduler(dataspace, console=self.console)
+        runner = FacetRunner(console=self.console)
+
+        # Seed initial facts
+        if initial_facts:
+            self.console.log(f"Seeding {len(initial_facts)} initial fact(s)")
+            for fact in initial_facts:
+                dataspace.assert_fact(fact)
+                self.console.log(f"  - {fact.__class__.__name__}: {fact.fact_id}")
+
+        # Compile program to registrations
+        try:
+            registrations = compile_program(program)
+            self.console.log(f"Compiled {len(registrations)} facet(s)")
+        except ValueError as e:
+            self.console.log(f"[red]Compilation failed: {e}[/]")
+            return OrchestrationResult(success=False, error=str(e))
+
+        # Register facets with scheduler
+        for reg in registrations:
+            scheduler.register(reg)
+            self.console.log(f"Registered facet: {reg.facet_id} (policy: {reg.policy.value})")
+
+        # Execute reactive loop
+        iteration_count = 0
+        facets_executed = 0
+        executed_facet_ids = set()
+
+        while scheduler.has_ready_facets() and iteration_count < max_iterations:
+            facet_id = scheduler.next_ready()
+            if not facet_id:
+                break
+
+            self.console.log(f"\n[cyan]→ Executing facet: {facet_id}[/]")
+            scheduler.mark_executing(facet_id)
+
+            # Get phase from scheduler
+            phase = scheduler.get_phase(facet_id)
+            if not phase:
+                error_msg = f"Phase not found for facet: {facet_id}"
+                self.console.log(f"[red]{error_msg}[/]")
+                return OrchestrationResult(
+                    success=False,
+                    error=error_msg,
+                    facets_executed=facets_executed,
+                    iterations=iteration_count
+                )
+
+            # Execute facet
+            result = runner.execute_facet(
+                phase=phase,
+                dataspace=dataspace,
+                run_id=run_id,
+                iteration=iteration_count,
+                workspace_root=self.workspace_root,
+                adapter=adapter,
+                db=self.db
+            )
+
+            iteration_count += 1
+
+            if not result.success:
+                self.console.log(f"[red]✗ Facet '{facet_id}' failed: {result.error}[/]")
+                scheduler.mark_completed(facet_id)
+                return OrchestrationResult(
+                    success=False,
+                    error=result.error,
+                    facets_executed=facets_executed,
+                    iterations=iteration_count
+                )
+
+            if result.human_approval_needed:
+                self.console.log(f"[yellow]⏸ Facet '{facet_id}' waiting for approval[/]")
+                if result.approval_request_id:
+                    scheduler.mark_waiting_for_approval(facet_id, result.approval_request_id)
+                else:
+                    scheduler.mark_waiting(facet_id)
+                continue
+
+            # Mark completed
+            scheduler.mark_completed(facet_id)
+            executed_facet_ids.add(facet_id)
+            facets_executed += 1
+            self.console.log(f"[green]✓ Facet '{facet_id}' completed[/]")
+
+        # Determine final status
+        completed_facets = list(executed_facet_ids)
+        waiting_facets = list(scheduler.waiting)
+
+        if iteration_count >= max_iterations:
+            error_msg = f"Max iterations ({max_iterations}) reached"
+            self.console.log(f"[yellow]{error_msg}[/]")
+            return OrchestrationResult(
+                success=False,
+                error=error_msg,
+                facets_executed=facets_executed,
+                iterations=iteration_count,
+                completed_facets=completed_facets,
+                waiting_facets=waiting_facets
+            )
+
+        # Success if no facets waiting (or only approval-waiting facets)
+        success = len(waiting_facets) == 0 or facets_executed > 0
+
+        self.console.log(f"\n[bold green]Orchestration complete[/]")
+        self.console.log(f"  Facets executed: {facets_executed}")
+        self.console.log(f"  Total iterations: {iteration_count}")
+        self.console.log(f"  Waiting: {len(waiting_facets)}")
+
+        return OrchestrationResult(
+            success=success,
+            facets_executed=facets_executed,
+            iterations=iteration_count,
+            completed_facets=completed_facets,
+            waiting_facets=waiting_facets
+        )
+
+    def run_next_phase(self, *args, **kwargs) -> OrchestrationResult:  # type: ignore[no-untyped-def]
+        """
+        Legacy method for compatibility.
+
+        Use run() with FacetProgram instead.
+        """
+        raise NotImplementedError(
+            "run_next_phase() is deprecated. Use run(program: FacetProgram) instead."
+        )

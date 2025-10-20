@@ -233,10 +233,10 @@ class FacetRunner:
         # Build prompt from context
         prompt_parts = [f"Phase: {context.phase_name}"]
 
-        # Include channel reads
-        if context.channel_reads:
-            prompt_parts.append("\n──── Channel Inputs ────")
-            for key, value in context.channel_reads.items():
+        # Include fact reads
+        if context.fact_reads:
+            prompt_parts.append("\n──── Fact Inputs ────")
+            for key, value in context.fact_reads.items():
                 value_str = str(value)[:500]  # Truncate long values
                 prompt_parts.append(f"{key}: {value_str}")
 
