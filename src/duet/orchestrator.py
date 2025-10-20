@@ -435,26 +435,7 @@ class Orchestrator:
                 # Human approval or error - already handled
                 break
 
-            # ──── Extract Verdict from Metadata (if phase writes verdict channel) ────
-            publishes_verdict = phase_def and any(ch.name == "verdict" for ch in phase_def.get_writes())
-            if publishes_verdict and "verdict" in response.metadata:
-                verdict_str = response.metadata["verdict"]
-                if isinstance(verdict_str, str):
-                    # Normalize verdict string (handle case variations)
-                    verdict_lower = verdict_str.lower().strip()
-                    if verdict_lower in ("approve", "approved"):
-                        response.verdict = ReviewVerdict.APPROVE
-                    elif verdict_lower in ("changes_requested", "changes requested", "revise"):
-                        response.verdict = ReviewVerdict.CHANGES_REQUESTED
-                    elif verdict_lower in ("blocked", "block"):
-                        response.verdict = ReviewVerdict.BLOCKED
-                    else:
-                        self.console.log(
-                            f"[yellow]Unknown verdict in metadata: {verdict_str}[/]"
-                        )
-
-            # ──── Update Channels ────
-            self._update_channels_from_response(current_phase, response)
+            # Facts are asserted directly by WriteStep - no channel updates needed
 
             # ──── Permission Check ────
             permission_denials = response.metadata.get("permission_denials") if response.metadata else None
@@ -466,14 +447,6 @@ class Orchestrator:
                 permission_message = "Claude Code requested permission to proceed with implementation."
             else:
                 permission_message = None
-
-            # ──── Persist Channel Messages ────
-            if self.db and self.workflow_executor:
-                self._persist_channel_messages(
-                    run_id=snapshot.run_id,
-                    phase=current_phase,
-                    iteration=iteration,
-                )
 
             # ──── Edge Case: Empty Response ────
             if not response.content or not response.content.strip():
