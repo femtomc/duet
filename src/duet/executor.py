@@ -1,8 +1,7 @@
 """
-Workflow executor for graph-driven orchestration.
+Guard evaluation for typed fact-based transitions.
 
-Executes workflows defined in the DSL with channel-based message passing
-and guard-controlled transitions.
+Evaluates transition guards by querying the dataspace for facts.
 """
 
 from __future__ import annotations
@@ -13,11 +12,8 @@ from typing import Any, Dict, Optional
 
 from rich.console import Console
 
-from .channels import ChannelStore
 from .dsl.compiler import WorkflowGraph
 from .dsl.workflow import Guard, Transition
-from .models import AssistantResponse, ReviewVerdict
-from .prompt_builder import PromptContext, get_builder
 
 
 @dataclass
@@ -42,58 +38,11 @@ class GuardEvaluator:
     """
     Evaluates guards for transition decisions.
 
-    Builds guard context from channel payloads, response metadata, and
-    runtime state, then evaluates transitions in priority order.
+    Queries dataspace for facts to evaluate guard predicates.
     """
 
     def __init__(self, console: Optional[Console] = None):
         self.console = console or Console()
-
-    def build_guard_context(
-        self,
-        channel_store_or_dataspace,  # ChannelStore or Dataspace
-        response: Optional[AssistantResponse] = None,
-        git_changes: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        """
-        Build context dictionary for guard evaluation.
-
-        Queries dataspace for latest ChannelFacts to build context.
-
-        Args:
-            channel_store_or_dataspace: Dataspace for fact queries (or ChannelStore for compat)
-            response: Assistant response (if available)
-            git_changes: Git change metadata
-
-        Returns:
-            Context dictionary for guard evaluation (channel_name -> value)
-        """
-        # Check if dataspace
-        if hasattr(channel_store_or_dataspace, 'query'):
-            # Query dataspace for all latest ChannelFacts
-            from .dataspace import ChannelFact, FactPattern
-
-            pattern = FactPattern(fact_type=ChannelFact)
-            facts = channel_store_or_dataspace.query(pattern, latest_only=True)
-
-            # Build context from facts
-            context = {fact.channel_name: fact.value for fact in facts}
-        else:
-            # Legacy ChannelStore (backward compat)
-            context = dict(channel_store_or_dataspace.get_all())
-
-        # Add verdict from response if available
-        if response:
-            if response.verdict:
-                context["verdict"] = response.verdict.value
-            elif "verdict" in response.metadata:
-                context["verdict"] = response.metadata["verdict"]
-
-        # Add git changes
-        if git_changes:
-            context["git_changes"] = git_changes
-
-        return context
 
     def evaluate_transitions(
         self,
@@ -167,40 +116,12 @@ class GuardEvaluator:
         )
 
 
-@dataclass
-class PhaseExecutionResult:
-    """
-    Result of executing a single phase.
-
-    Attributes:
-        phase_name: Name of phase executed
-        response: Assistant response
-        next_phase: Next phase determined by guards (None if blocked)
-        guard_evaluation: Guard evaluation result
-        channel_updates: Channels published by this phase
-        error: Error message if execution failed
-    """
-
-    phase_name: str
-    response: Optional[AssistantResponse]
-    next_phase: Optional[str]
-    guard_evaluation: GuardEvaluationResult
-    channel_updates: Dict[str, Any]
-    error: Optional[str] = None
-
-
 class WorkflowExecutor:
     """
-    Executes workflow graphs with channel-based message passing.
+    Workflow guard evaluator (legacy wrapper).
 
-    Replaces the hardcoded orchestrator loop with a graph-driven executor
-    that uses DSL workflow definitions.
-
-    Attributes:
-        workflow_graph: Compiled workflow definition
-        channel_store: Channel payload storage
-        guard_evaluator: Guard evaluation engine
-        console: Rich console for logging
+    Maintains guard_evaluator for transition evaluation.
+    All execution logic removed - use FacetRunner + Scheduler.
     """
 
     def __init__(
@@ -211,207 +132,3 @@ class WorkflowExecutor:
         self.workflow_graph = workflow_graph
         self.console = console or Console()
         self.guard_evaluator = GuardEvaluator(console=self.console)
-
-        # Initialize channel store from workflow
-        self.channel_store = ChannelStore(channels=workflow_graph.channels)
-
-    def seed_channel(self, channel_name: str, value: Any) -> None:
-        """
-        Seed a channel with an initial value (e.g., task from CLI).
-
-        Args:
-            channel_name: Name of channel to seed
-            value: Initial value
-        """
-        self.channel_store.set(channel_name, value)
-
-    def execute_phase(
-        self,
-        phase_name: str,
-        adapter,  # AssistantAdapter
-        context: PromptContext,
-        git_changes: Optional[Dict[str, Any]] = None,
-    ) -> PhaseExecutionResult:
-        """
-        Execute a single phase.
-
-        Args:
-            phase_name: Name of phase to execute
-            adapter: Adapter to invoke for this phase
-            context: Prompt context with run metadata
-            git_changes: Git change metadata (if available)
-
-        Returns:
-            PhaseExecutionResult with response and next phase
-        """
-        phase_def = self.workflow_graph.phases.get(phase_name)
-        if not phase_def:
-            return PhaseExecutionResult(
-                phase_name=phase_name,
-                response=None,
-                next_phase=None,
-                guard_evaluation=GuardEvaluationResult(
-                    transition=None,
-                    next_phase=None,
-                    rationale=f"Phase '{phase_name}' not found in workflow",
-                    guard_results={},
-                ),
-                channel_updates={},
-                error=f"Unknown phase: {phase_name}",
-            )
-
-        # Update context with consumed channels
-        for channel in phase_def.get_reads():
-            channel_name = channel.name  # Extract name from Channel object
-            value = self.channel_store.get(channel_name)
-            context.channel_payloads[channel_name] = value
-
-        # Build prompt using builder (pass phase definition for metadata access)
-        try:
-            builder = get_builder(phase_name, phase_def)
-            request = builder.build(context)
-        except Exception as exc:
-            return PhaseExecutionResult(
-                phase_name=phase_name,
-                response=None,
-                next_phase=None,
-                guard_evaluation=GuardEvaluationResult(
-                    transition=None,
-                    next_phase=None,
-                    rationale=f"Prompt builder failed: {exc}",
-                    guard_results={},
-                ),
-                channel_updates={},
-                error=f"Prompt build error: {exc}",
-            )
-
-        # Execute adapter
-        try:
-            # Use stream() method (adapters don't have execute())
-            # Streaming events handled by caller if needed
-            response = adapter.stream(request, on_event=lambda e: None)
-        except Exception as exc:
-            return PhaseExecutionResult(
-                phase_name=phase_name,
-                response=None,
-                next_phase=None,
-                guard_evaluation=GuardEvaluationResult(
-                    transition=None,
-                    next_phase=None,
-                    rationale=f"Adapter execution failed: {exc}",
-                    guard_results={},
-                ),
-                channel_updates={},
-                error=f"Adapter error: {exc}",
-            )
-
-        # Extract channel outputs (published channels)
-        channel_updates = self._extract_channel_outputs(
-            response, phase_def.get_writes()
-        )
-
-        # Update channel store with published values
-        self.channel_store.update(channel_updates)
-
-        # Build guard context
-        guard_context = self.guard_evaluator.build_guard_context(
-            self.channel_store,
-            response=response,
-            git_changes=git_changes,
-        )
-
-        # Evaluate transitions
-        guard_result = self.guard_evaluator.evaluate_transitions(
-            current_phase=phase_name,
-            workflow_graph=self.workflow_graph,
-            guard_context=guard_context,
-        )
-
-        return PhaseExecutionResult(
-            phase_name=phase_name,
-            response=response,
-            next_phase=guard_result.next_phase,
-            guard_evaluation=guard_result,
-            channel_updates=channel_updates,
-        )
-
-    def _extract_channel_outputs(
-        self,
-        response: AssistantResponse,
-        publishes: list[str],
-    ) -> Dict[str, Any]:
-        """
-        Extract channel outputs from assistant response.
-
-        Maps response content and metadata to published channels using a generic strategy:
-        1. Check if metadata has the channel name as a key (explicit mapping)
-        2. Special handling for 'verdict' (from response.verdict or metadata)
-        3. Fallback: use response.content for the first published channel
-
-        Args:
-            response: Assistant response
-            publishes: List of channels this phase publishes to
-
-        Returns:
-            Dictionary of channel_name -> value
-        """
-        outputs = {}
-
-        for channel_name in publishes:
-            # Strategy 1: Check metadata for explicit channel mapping
-            if channel_name in response.metadata:
-                outputs[channel_name] = response.metadata[channel_name]
-                continue
-
-            # Strategy 2: Special handling for verdict
-            if channel_name == "verdict":
-                if response.verdict:
-                    outputs["verdict"] = response.verdict.value
-                elif "verdict" in response.metadata:
-                    outputs["verdict"] = response.metadata["verdict"]
-                else:
-                    outputs["verdict"] = "unknown"
-                continue
-
-            # Strategy 3: Fallback to content for first non-verdict channel
-            if not outputs or channel_name == publishes[0]:
-                outputs[channel_name] = response.content
-
-        return outputs
-
-    def get_current_channels(self) -> Dict[str, Any]:
-        """Get current channel payloads (for persistence)."""
-        return self.channel_store.get_all()
-
-    def restore_channels(self, snapshot: Dict[str, Any]) -> None:
-        """Restore channel state from snapshot."""
-        self.channel_store.restore(snapshot)
-
-    def replay_from_messages(self, messages: list[Dict[str, Any]]) -> None:
-        """
-        Rebuild channel state from message history.
-
-        Applies messages in chronological order to reconstruct channel state.
-        Useful for duet back when snapshot missing or for deterministic replay.
-
-        Args:
-            messages: List of message dicts from database (chronologically ordered)
-        """
-        from .channels import deserialize_channel_message
-
-        # Clear current state
-        self.channel_store.clear()
-
-        # Apply messages in order
-        for message in messages:
-            channel_name = message["channel"]
-
-            # Deserialize payload
-            payload = deserialize_channel_message(message)
-
-            # Update channel
-            try:
-                self.channel_store.set(channel_name, payload)
-            except ValueError:
-                # Channel not declared in workflow (skip)
-                continue
