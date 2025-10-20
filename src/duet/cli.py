@@ -266,7 +266,7 @@ def status(
     config: Optional[Path] = typer.Option(None, "--config", "-c", help="Config file path."),
     show_states: bool = typer.Option(True, "--show-states/--no-states", help="Show state history"),
 ) -> None:
-    """Display the current status of a run with state history and channel updates."""
+    """Display the current status of a run with state history and active facts."""
     from rich.table import Table
 
     duet_config = find_config(config)
@@ -353,38 +353,30 @@ def status(
                     f"{iteration.get('decision_rationale', 'No decision recorded')[:60]}"
                 )
 
-        # Show channel updates (latest per channel)
+        # Show facts (latest per fact type)
         try:
-            # Get unique channels from recent messages (optimized: limit query)
-            recent_messages = db.list_messages(run_id, limit=50)
-            if recent_messages:
-                console.print(f"\n[bold]Channel Updates:[/]")
-                channel_table = Table()
-                channel_table.add_column("Channel", style="cyan")
-                channel_table.add_column("Latest Value", style="green")
-                channel_table.add_column("Phase", style="magenta")
-                channel_table.add_column("Updated", style="dim")
+            facts = db.get_facts(run_id, active_only=True)
+            if facts:
+                console.print(f"\n[bold]Active Facts:[/] {len(facts)} facts")
+                fact_table = Table()
+                fact_table.add_column("Fact Type", style="cyan")
+                fact_table.add_column("Fact ID", style="green")
+                fact_table.add_column("Created", style="dim")
 
-                # Since messages are DESC ordered, iterate normally to get latest first
-                channels_seen = set()
-                for msg in recent_messages:  # Already DESC ordered
-                    if msg["channel"] not in channels_seen:
-                        channels_seen.add(msg["channel"])
-                        # Trim to first line and limit to 50 chars for compact display
-                        payload_str = str(msg["payload"])
-                        first_line = payload_str.split("\n")[0]
-                        payload_preview = first_line[:50]
-                        if len(payload_str) > 50 or "\n" in payload_str:
-                            payload_preview += "..."
-                        channel_table.add_row(
-                            msg["channel"],
-                            payload_preview,
-                            msg["phase"] or "-",
-                            msg["created_at"][:19] if msg["created_at"] else "-",
-                        )
-                console.print(channel_table)
+                for fact_record in facts[:10]:  # Show first 10
+                    fact_table.add_row(
+                        fact_record["fact_type"],
+                        fact_record["fact_id"][:16] + "..." if len(fact_record["fact_id"]) > 16 else fact_record["fact_id"],
+                        fact_record["created_at"][:19] if fact_record["created_at"] else "-",
+                    )
+
+                console.print(fact_table)
+
+                if len(facts) > 10:
+                    console.print(f"[dim]  ... and {len(facts) - 10} more facts[/]")
+                    console.print(f"[dim]  Use 'duet facts {run_id}' to see all facts[/]")
         except Exception as exc:
-            console.log(f"[dim]Channel history unavailable: {exc}[/]")
+            console.log(f"[dim]Facts unavailable: {exc}[/]")
 
     else:
         # Database required for status

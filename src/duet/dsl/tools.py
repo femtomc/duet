@@ -26,24 +26,34 @@ class ToolContext:
     Context provided to tools during execution.
 
     Provides access to:
-    - Channel state (current values)
+    - Fact state (current values)
     - Workspace information (git, paths)
-    - Run metadata (iteration, phase, etc.)
+    - Run metadata (iteration, facet, etc.)
     - Policy information
     """
 
     run_id: str
     iteration: int
-    phase_name: str
-    channel_state: Dict[str, Any]  # channel name -> current value
+    phase_name: str  # Represents facet_id in new model
+    fact_state: Dict[str, Any]  # fact alias -> fact object
     workspace_root: str
     git_available: bool = False
     baseline_commit: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
 
+    def get_fact(self, name: str, default: Any = None) -> Any:
+        """Get current value of a fact."""
+        return self.fact_state.get(name, default)
+
+    # Backward compatibility
+    @property
+    def channel_state(self) -> Dict[str, Any]:
+        """Deprecated: Use fact_state instead."""
+        return self.fact_state
+
     def get_channel(self, name: str, default: Any = None) -> Any:
-        """Get current value of a channel."""
-        return self.channel_state.get(name, default)
+        """Deprecated: Use get_fact() instead."""
+        return self.get_fact(name, default)
 
 
 @dataclass
@@ -53,33 +63,39 @@ class ToolResult:
 
     Contains:
     - Context updates (enrich local facet context, e.g. for prompt building)
-    - Channel updates (write to global dataspace/channels)
+    - Fact updates (write to global dataspace as facts)
     - Metadata to merge into response
     - Optional notes/logs
     - Success/failure status
 
-    Sprint DSL-5: Separated context vs channel updates to avoid conflation.
+    Sprint DSL-5: Separated context vs fact updates to avoid conflation.
     """
 
     context_updates: Dict[str, Any] = field(default_factory=dict)
-    channel_updates: Dict[str, Any] = field(default_factory=dict)
+    fact_updates: Dict[str, Any] = field(default_factory=dict)
     metadata: Dict[str, Any] = field(default_factory=dict)
     notes: Optional[str] = None
     success: bool = True
     error: Optional[str] = None
 
+    # Backward compatibility
+    @property
+    def channel_updates(self) -> Dict[str, Any]:
+        """Deprecated: Use fact_updates instead."""
+        return self.fact_updates
+
     @classmethod
-    def ok(cls, context_updates: Optional[Dict[str, Any]] = None, channel_updates: Optional[Dict[str, Any]] = None) -> ToolResult:
+    def ok(cls, context_updates: Optional[Dict[str, Any]] = None, fact_updates: Optional[Dict[str, Any]] = None) -> ToolResult:
         """
         Create a successful result with updates.
 
         Args:
             context_updates: Updates to local facet context (for prompt building)
-            channel_updates: Writes to global dataspace channels
+            fact_updates: Writes to global dataspace as facts
         """
         return cls(
             context_updates=context_updates or {},
-            channel_updates=channel_updates or {},
+            fact_updates=fact_updates or {},
             success=True
         )
 
@@ -199,7 +215,7 @@ class GitChangeTool(BaseTool):
             # No git repo - skip validation
             return ToolResult.ok(
                 context_updates={"git_info": {"available": False}},
-                channel_updates={},
+                fact_updates={},
             )
 
         # Check git status via subprocess
@@ -241,7 +257,7 @@ class GitChangeTool(BaseTool):
 
             return ToolResult.ok(
                 context_updates={"git_info": git_info},
-                channel_updates={},  # Can write to channel if outputs declared
+                fact_updates={},  # Can write facts if outputs declared
             )
 
         except Exception as exc:

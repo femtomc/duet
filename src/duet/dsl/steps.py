@@ -243,7 +243,7 @@ class ToolStep:
             run_id=context.run_id,
             iteration=context.iteration,
             phase_name=context.phase_name,
-            channel_state=context.fact_reads,
+            fact_state=context.fact_reads,
             workspace_root=context.workspace_root,
             metadata=context.metadata,
         )
