@@ -137,6 +137,13 @@ class Orchestrator:
         self.scheduler = FacetScheduler(self.dataspace, console=self.console)
         self.console.log("[dim]Reactive facet scheduler initialized[/]")
 
+        # Register all workflow phases as facets with the scheduler
+        for phase_name, phase_def in self.workflow_graph.phases.items():
+            if not phase_def.is_terminal:
+                facet_id = f"facet_{phase_name}"
+                self.scheduler.register_facet(facet_id, phase_def)
+                self.console.log(f"[dim]Registered facet:[/] {facet_id} with {len(phase_def.get_fact_reads())} dependencies")
+
     def load_persisted_facts(self, run_id: str) -> int:
         """
         Load persisted facts from database into dataspace.
@@ -312,36 +319,32 @@ class Orchestrator:
         return handle_event
 
     def run(self, run_id: Optional[str] = None) -> RunSnapshot:
-        """Execute orchestration loop until termination."""
+        """
+        Execute reactive scheduler-driven workflow loop.
+
+        Facets are executed from the ready queue based on fact availability.
+        Loop continues until no facets are ready or terminal state reached.
+        """
         # Check for workflow updates and reload if needed
         self._check_and_reload_workflow()
 
         iteration = 0
 
-        # Use workflow's initial phase instead of hardcoded PLAN
-        initial_phase_name = self.workflow_graph.initial_phase
-        initial_phase = initial_phase_name
-
         snapshot = RunSnapshot(
             run_id=run_id or self._derive_run_id(),
             iteration=iteration,
-            phase=initial_phase,
+            phase="initializing",
             metadata={
                 "started_at": dt.datetime.now(dt.timezone.utc).isoformat(),
-                "consecutive_replans": 0,
+                "execution_mode": "scheduler_driven",
             },
         )
         self.console.rule(f"Starting Duet run {snapshot.run_id}")
         self.artifacts.checkpoint(snapshot)
 
-        # ──── Seed Dataspace with Task Fact ────
         # Clear dataspace for new run
         self.dataspace.clear()
-
-        # Task seeding is now workflow-specific
-        # Workflows should define their own initial fact in steps or via custom initialization
-        self.console.log("[dim]Dataspace cleared for new run[/]")
-        self.console.log("[dim]Initial facts should be asserted by workflow or via CLI[/]")
+        self.console.log("[dim]Dataspace cleared[/]")
 
         # ──── Database: Insert Run Record ────
         if self.db:
@@ -350,349 +353,180 @@ class Orchestrator:
             except Exception as exc:
                 self.console.log(f"[yellow]DB write failed: {exc}[/]")
 
-        # ──── Git Baseline Commit (for change detection) ────
+        # ──── Load Seed Facts ────
+        if self.db and run_id:
+            loaded = self.load_persisted_facts(run_id)
+            if loaded == 0:
+                self.console.print()
+                self.console.print("[yellow]⚠ No seed facts found[/]")
+                self.console.print(f"Use: [white]duet seed FACT_TYPE --run-id {snapshot.run_id} --data '{{...}}'[/]")
+                snapshot.phase = "awaiting_seed"
+                snapshot.notes = "Waiting for seed facts"
+                return snapshot
+        else:
+            self.console.print()
+            self.console.print("[cyan]Seed facts required to start execution[/]")
+            self.console.print(f"Use: [white]duet seed FACT_TYPE --run-id {snapshot.run_id} --data '{{...}}'[/]")
+            snapshot.phase = "awaiting_seed"
+            snapshot.notes = "Waiting for seed facts"
+            return snapshot
+
+        # ──── Git Baseline ────
         baseline_commit = None
         if self.git.is_git_repo():
             baseline_commit = self.git.get_current_commit()
             if baseline_commit:
                 snapshot.metadata["baseline_commit"] = baseline_commit
-                self.console.log(f"[dim]Baseline commit: {baseline_commit[:8]}[/]")
-            else:
-                # No commits yet (fresh repository) - warn about missing time travel
-                self.console.print()
-                self.console.print("[yellow bold]⚠ Warning: No git commits found[/]")
-                self.console.print(
-                    "[yellow]Workspace changes won't be reverted when using 'duet back'.[/]"
-                )
-                self.console.print("[dim]Run: [cyan]duet init --init-git --force[/dim] [dim]or commit manually[/]")
-                self.console.print()
+                self.console.log(f"[dim]Git baseline: {baseline_commit[:8]}[/]")
 
-        # ──── Git Feature Branch Creation ────
-        original_branch = None
-        if self.config.workflow.use_feature_branches and self.git.is_git_repo():
-            try:
-                original_branch = self.git.get_current_branch()
-                snapshot.metadata["original_branch"] = original_branch
+        # ──── Reactive Scheduler Loop ────
+        self.console.print()
+        self.console.print("[bold cyan]═══ Reactive Execution ═══[/]")
+        self.console.print(f"[dim]Ready facets: {len(self.scheduler.ready_queue)}[/]")
+        self.console.print(f"[dim]Waiting facets: {len(self.scheduler.waiting)}[/]")
+        self.console.print()
 
-                # Create and checkout feature branch
-                feature_branch = f"duet/{snapshot.run_id}"
-                if self.git.branch_exists(feature_branch):
-                    self.console.log(
-                        f"[yellow]Feature branch already exists:[/] {feature_branch}"
-                    )
-                    self.git.checkout_branch(feature_branch)
-                else:
-                    self.git.checkout_branch(feature_branch, create=True)
+        facets_executed = 0
 
-                snapshot.metadata["feature_branch"] = feature_branch
-                self.console.log(f"[green]Working on feature branch:[/] {feature_branch}")
-            except Exception as exc:
-                self.console.log(f"[yellow]Git branch setup failed: {exc}[/]")
-                self.console.log("[yellow]Continuing on current branch[/]")
-
-        # Start with initial phase from workflow
-        current_phase = self.workflow_graph.initial_phase
-        consecutive_replans = 0
-        while True:
-            # ──── Edge Case: Manual Stop ────
+        while self.scheduler.has_ready_facets():
+            # Stop check
             if self._stop_requested:
+                snapshot.phase = "stopped"
+                snapshot.notes = "Manual stop requested"
+                self.console.log("[yellow]Manual stop detected[/]")
+                break
+
+            # Max iterations guard
+            if facets_executed >= self.max_iterations:
                 snapshot.phase = "blocked"
-                snapshot.notes = "Manual stop requested by user (SIGINT/SIGTERM)."
-                self.console.log("[yellow]Manual stop detected, marking run as BLOCKED[/]")
+                snapshot.notes = f"Max iterations ({self.max_iterations}) reached"
+                self.console.log("[yellow]Max iterations reached[/]")
                 break
 
-            # ──── Edge Case: Max Iterations ────
-            if iteration >= self.max_iterations and not self.workflow_graph.is_terminal(current_phase):
-                snapshot.phase = "blocked"
-                snapshot.notes = f"Max iterations ({self.max_iterations}) reached without completion."
-                self.console.log("[yellow]Max iterations reached, marking run as BLOCKED[/]")
+            # Get next ready facet
+            facet_id = self.scheduler.next_ready()
+            if not facet_id:
                 break
 
-            # ──── Terminal Phase Check ────
-            if self.workflow_graph.is_terminal(current_phase):
-                snapshot.phase = current_phase
-                snapshot.notes = f"Run reached terminal phase: {current_phase}"
-                self.console.log(f"[green]Run completed at terminal phase: {current_phase}[/]")
-                break
+            # Extract phase from facet_id
+            phase_name = facet_id.replace("facet_", "")
+            phase_def = self.workflow_graph.phases.get(phase_name)
 
-            # ──── Begin Iteration ────
-            iteration += 1
-            snapshot.iteration = iteration
-            snapshot.phase = current_phase
-            phase_start_time = dt.datetime.now(dt.timezone.utc)
-            self.logger.log_iteration_start(snapshot.run_id, iteration, current_phase)
-
-            # ──── Execute Facet Script ────
-            phase_def = self.workflow_graph.phases.get(current_phase)
             if not phase_def:
-                snapshot.phase = "blocked"
-                snapshot.notes = f"Phase '{current_phase}' not found in workflow"
+                self.console.log(f"[red]Unknown phase:[/] {phase_name}")
+                continue
+
+            # Check if terminal
+            if phase_def.is_terminal:
+                snapshot.phase = phase_name
+                snapshot.notes = f"Terminal phase reached: {phase_name}"
+                self.console.log(f"[green]✓ Terminal phase:[/] {phase_name}")
                 break
 
-            # All phases must use step-based execution now
-            response = self._execute_facet_script(current_phase, snapshot, phase_def)
-            if response is None:
-                # Human approval or error - already handled
-                break
+            # Mark executing
+            self.scheduler.mark_executing(facet_id)
 
-            # Facts are asserted directly by WriteStep - no channel updates needed
+            # Increment iteration
+            iteration += 1
+            facets_executed += 1
+            snapshot.iteration = iteration
+            snapshot.phase = phase_name
+            current_phase = phase_name
 
-            # ──── Permission Check ────
-            permission_denials = response.metadata.get("permission_denials") if response.metadata else None
-            permission_required = response.metadata.get("permission_required") if response.metadata else False
-            if permission_required and permission_denials:
-                self.console.log(
-                    "[yellow]Claude Code requested permission; review required before continuing.[/]"
+            self.console.print()
+            self.console.rule(f"[cyan]Facet {facets_executed}: {phase_name}[/] (iteration {iteration})")
+
+            # Execute facet within turn
+            from .facet_runner import FacetRunner
+            runner = FacetRunner(console=self.console)
+
+            with self.dataspace.in_turn():
+                facet_result = runner.execute_facet(
+                    phase=phase_def,
+                    dataspace=self.dataspace,
+                    run_id=snapshot.run_id,
+                    iteration=iteration,
+                    workspace_root=str(self.config.storage.workspace_root),
+                    adapter=self._select_adapter(phase_name),
+                    db=self.db,
                 )
-                permission_message = "Claude Code requested permission to proceed with implementation."
-            else:
-                permission_message = None
 
-            # ──── Edge Case: Empty Response ────
-            if not response.content or not response.content.strip():
+            # Handle failure
+            if not facet_result.success:
                 snapshot.phase = "blocked"
-                snapshot.notes = f"Empty response received during {current_phase}."
-                self.console.log("[yellow]Empty response detected, marking run as BLOCKED[/]")
-                self._persist_interaction(snapshot.run_id, current_phase, request, response)
+                snapshot.notes = facet_result.error or "Facet execution failed"
+                self.console.log(f"[red]Facet failed:[/] {facet_result.error}")
                 break
 
-            # ──── Guardrail: Phase Runtime Limit ────
-            if self.config.workflow.max_phase_runtime_seconds:
-                phase_duration = (dt.datetime.now(dt.timezone.utc) - phase_start_time).total_seconds()
-                if phase_duration > self.config.workflow.max_phase_runtime_seconds:
-                    snapshot.phase = "blocked"
-                    snapshot.notes = (
-                        f"Phase {current_phase} exceeded maximum runtime "
-                        f"({self.config.workflow.max_phase_runtime_seconds}s)"
-                    )
-                    self.console.log(
-                        f"[red]Phase runtime limit exceeded: {phase_duration:.1f}s[/]"
-                    )
-                    self._persist_interaction(snapshot.run_id, current_phase, request, response)
-                    break
+            # Handle approval pause
+            if facet_result.human_approval_needed:
+                snapshot.phase = "blocked"
+                snapshot.notes = f"Awaiting approval: {facet_result.approval_reason}"
 
-            # ──── Git Change Detection (for metadata only, no enforcement) ────
-            # Sprint DSL-2+: Git validation moved to tools, but still detect changes for logging
-            if self.git.is_git_repo():
-                try:
-                    # Detect changes for logging and metadata
-                    changes = self.git.detect_changes(baseline_commit=baseline_commit)
-                    current_commit = self.git.get_current_commit()
+                if facet_result.approval_request_id:
+                    self.scheduler.mark_waiting_for_approval(facet_id, facet_result.approval_request_id)
+                    self.console.log(f"[yellow]⏸ Paused for approval:[/] {facet_result.approval_request_id}")
+                else:
+                    self.scheduler.mark_waiting(facet_id)
 
-                    # Check if new commits were created
-                    new_commits_created = (
-                        baseline_commit
-                        and current_commit
-                        and baseline_commit != current_commit
-                    )
+                # Continue to process other ready facets
+                continue
 
-                    # Store change summary in response metadata
-                    response.metadata["git_changes"] = {
-                        "has_changes": changes.has_changes,
-                        "files_changed": changes.files_changed,
-                        "insertions": changes.insertions,
-                        "deletions": changes.deletions,
-                        "staged_files": changes.staged_files,
-                        "commit_sha": changes.commit_sha,
-                        "diff_stat": changes.diff_stat,
-                        "baseline_commit": baseline_commit,
-                        "new_commits_created": new_commits_created,
-                    }
+            # Mark completed
+            self.scheduler.mark_completed(facet_id)
+            self.console.log(f"[green]✓ Facet completed:[/] {facet_id}")
 
-                    # Update baseline if new commits were created
-                    if new_commits_created:
-                        baseline_commit = current_commit
-                        snapshot.metadata["latest_commit"] = current_commit
-
-                    # Log detected changes (informational only - no blocking)
-                    if new_commits_created:
-                        self.console.log(
-                            f"[green]New commit created:[/] {current_commit[:8]} "
-                            f"({changes.files_changed} files, +{changes.insertions}/-{changes.deletions})"
-                        )
-                    elif changes.has_changes:
-                        self.console.log(
-                            f"[green]Detected changes:[/] {changes.files_changed} files, "
-                            f"+{changes.insertions}/-{changes.deletions}"
-                        )
-                except Exception as exc:
-                    # Git detection failure shouldn't block the run, just warn
-                    error_msg = str(exc).replace("[", "\\[").replace("]", "\\]")
-                    self.console.log(f"[yellow]Git change detection failed: {error_msg}[/]")
-                    response.metadata["git_changes"] = {"error": str(exc)}
-
-            # ──── Decide Next Phase ────
-            # Sprint 10: Use WorkflowExecutor guard evaluation (required)
-            if not self.workflow_executor:
-                raise RuntimeError("Workflow executor required (ensure .duet/workflow.py exists)")
-
-            # Build guard context from dataspace
-            guard_context = self.workflow_executor.guard_evaluator.build_guard_context(
-                self.dataspace,
-                response=response,
-                git_changes=response.metadata.get("git_changes"),
-            )
-
-            # Evaluate transitions
+            # Evaluate guards to potentially transition to terminal
             guard_result = self.workflow_executor.guard_evaluator.evaluate_transitions(
-                current_phase=current_phase,
+                current_phase=phase_name,
                 workflow_graph=self.workflow_graph,
-                guard_context=guard_context,
+                dataspace=self.dataspace,
             )
 
-            # Convert to TransitionDecision format
             if guard_result.next_phase:
-                next_phase_name = guard_result.next_phase
-                decision = TransitionDecision(
-                    next_phase=next_phase_name,
-                    rationale=guard_result.rationale,
-                    requires_human=False,  # Guards determine this
-                )
+                next_phase = guard_result.next_phase
+                if self.workflow_graph.is_terminal(next_phase):
+                    snapshot.phase = next_phase
+                    snapshot.notes = f"Terminal phase: {next_phase}"
+                    self.console.log(f"[green]→ Terminal:[/] {next_phase}")
+                    break
+                else:
+                    self.console.log(f"[dim]→ Transition:[/] {next_phase} (may wake new facets)")
+
+        # ──── Completion ────
+        if not self.scheduler.has_ready_facets():
+            if len(self.scheduler.waiting) > 0:
+                snapshot.phase = "waiting"
+                snapshot.notes = f"No ready facets. {len(self.scheduler.waiting)} facets waiting on facts/approvals"
+                self.console.log(f"[yellow]⏸ Workflow paused:[/] {len(self.scheduler.waiting)} facets waiting")
             else:
-                # No guards passed - blocked
-                decision = TransitionDecision(
-                    next_phase="blocked",
-                    rationale=guard_result.rationale,
-                    requires_human=True,
-                )
-
-            # ──── Guardrail Enforcement ────
-            # Sprint DSL-2+: Metadata-based guardrails being phased out
-            # Approvals and validation will be handled by tools attached to phases
-
-            # Global approval requirement for terminal phases (keep for now)
-            if self.workflow_graph.is_terminal(decision.next_phase) and self.config.workflow.require_human_approval:
-                decision = TransitionDecision(
-                    next_phase="blocked",
-                    rationale="Human approval required before completion (global config).",
-                    requires_human=True,
-                )
-
-            self.console.log(f"[blue]Decision:[/] {decision.rationale}")
-
-            # ──── Persist Complete Iteration Record ────
-            # Build dummy request for persistence compatibility
-            dummy_request = AssistantRequest(
-                role=phase_def.agent,
-                prompt=f"Facet execution: {current_phase}",
-                context={"facet": True},
-            )
-            self.artifacts.persist_iteration(
-                run_id=snapshot.run_id,
-                iteration=iteration,
-                phase=current_phase,
-                request=dummy_request,
-                response=response,
-                decision=decision,
-            )
-            # Keep JSON interaction artifacts for debugging
-            self._persist_interaction(snapshot.run_id, current_phase, dummy_request, response)
-
-            # ──── Database: Insert Iteration Record ────
-            if self.db:
-                try:
-                    # Extract git metadata
-                    git_meta = response.metadata.get("git_changes", {})
-
-                    # Extract usage metadata
-                    usage_meta = {}
-                    if "input_tokens" in response.metadata:
-                        usage_meta["input_tokens"] = response.metadata["input_tokens"]
-                    if "output_tokens" in response.metadata:
-                        usage_meta["output_tokens"] = response.metadata["output_tokens"]
-                    if "cached_input_tokens" in response.metadata:
-                        usage_meta["cached_input_tokens"] = response.metadata["cached_input_tokens"]
-
-                    # Extract stream metadata
-                    stream_meta = {}
-                    if "stream_events" in response.metadata:
-                        stream_meta["stream_events"] = response.metadata["stream_events"]
-                    if "thread_id" in response.metadata:
-                        stream_meta["thread_id"] = response.metadata["thread_id"]
-
-                    self.db.insert_iteration(
-                        run_id=snapshot.run_id,
-                        iteration=iteration,
-                        phase=current_phase,
-                        prompt=request.prompt,
-                        response_content=response.content,
-                        verdict=response.verdict,
-                        concluded=response.concluded,
-                        next_phase=decision.next_phase,
-                        requires_human=decision.requires_human,
-                        decision_rationale=decision.rationale,
-                        git_metadata=git_meta if git_meta else None,
-                        usage_metadata=usage_meta if usage_meta else None,
-                        stream_metadata=stream_meta if stream_meta else None,
-                    )
-                except Exception as exc:
-                    self.console.log(f"[yellow]DB iteration write failed: {exc}[/]")
-
-            # ──── Edge Case: Human Approval Required ────
-            if decision.requires_human and self.config.workflow.require_human_approval:
-                snapshot.phase = "blocked"
-                snapshot.notes = "Awaiting human approval."
-                self.approver.request_approval(snapshot, decision.rationale)
-                break
-
-            # ──── Log State Transition ────
-            prev_phase = current_phase
-            current_phase = decision.next_phase
-
-            self.logger.log_state_transition(
-                snapshot.run_id, iteration, prev_phase, current_phase, decision.rationale
-            )
-            self.artifacts.checkpoint(snapshot)
+                # No ready, no waiting - workflow complete
+                snapshot.phase = "done"
+                snapshot.notes = "All facets completed"
+                self.console.log("[green]✓ Workflow complete[/]")
 
         snapshot.metadata["completed_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
+        snapshot.metadata["facets_executed"] = facets_executed
         self.artifacts.checkpoint(snapshot)
 
-        # ──── Database: Update Run with Final State ────
+        # ──── Database: Update Run ────
         if self.db:
             try:
                 self.db.update_run(snapshot)
             except Exception as exc:
-                self.console.log(f"[yellow]DB final update failed: {exc}[/]")
+                self.console.log(f"[yellow]DB update failed: {exc}[/]")
 
-        # ──── Git Branch Cleanup ────
-        if (
-            original_branch
-            and self.config.workflow.restore_branch_on_complete
-            and self.git.is_git_repo()
-        ):
-            try:
-                current_branch = self.git.get_current_branch()
-                if current_branch != original_branch:
-                    self.console.log(
-                        f"[cyan]Restoring original branch:[/] {original_branch}"
-                    )
-                    self.git.checkout_branch(original_branch)
-                    self.console.log(
-                        f"[green]Restored to:[/] {original_branch} "
-                        f"(feature branch '{current_branch}' preserved)"
-                    )
-            except Exception as exc:
-                self.console.log(
-                    f"[yellow]Failed to restore original branch: {exc}[/]"
-                )
-
-        # Generate and save run summary
-        self.artifacts.save_run_summary(snapshot.run_id)
-
-        # Log run completion (handle arbitrary terminal phases)
-        if self.workflow_graph.is_terminal(snapshot.phase):
-            status = "completed"
-        elif snapshot.phase == "blocked":
-            status = "blocked"
-        else:
-            status = "unknown"
+        self.console.print()
+        self.console.print(f"[bold]Run Summary:[/] {snapshot.run_id}")
+        self.console.print(f"  Status: {snapshot.phase}")
+        self.console.print(f"  Facets executed: {facets_executed}")
+        self.console.print(f"  Final iteration: {iteration}")
 
         self.logger.log_run_complete(
-            snapshot.run_id, snapshot.phase, snapshot.iteration, status
+            snapshot.run_id, snapshot.phase, iteration, snapshot.phase
         )
-
-        self._render_summary(snapshot)
         self.logger.close()
+
         return snapshot
 
     def _compose_request(self, phase: str, snapshot: RunSnapshot) -> AssistantRequest:
