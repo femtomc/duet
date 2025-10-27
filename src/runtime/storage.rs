@@ -12,6 +12,7 @@ use super::RuntimeConfig;
 use super::turn::BranchId;
 
 /// Storage manager for runtime persistence
+#[derive(Debug, Clone)]
 pub struct Storage {
     root: PathBuf,
 }
@@ -45,6 +46,11 @@ impl Storage {
     /// Get the snapshots directory path
     pub fn snapshots_dir(&self) -> PathBuf {
         self.root.join("snapshots")
+    }
+
+    /// Get branch-specific meta directory
+    pub fn branch_meta_dir(&self, branch: &BranchId) -> PathBuf {
+        self.meta_dir().join(&branch.0)
     }
 
     /// Get branch-specific journal directory

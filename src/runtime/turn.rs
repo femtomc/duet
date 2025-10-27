@@ -337,17 +337,46 @@ impl TurnRecord {
     }
 
     /// Encode this turn record to bytes using preserves
+    ///
+    /// Format: [4-byte length prefix (little-endian)] + [preserves-packed data]
     pub fn encode(&self) -> anyhow::Result<Vec<u8>> {
         use preserves::PackedWriter;
-        let mut buf = Vec::new();
-        let mut writer = PackedWriter::new(&mut buf);
+        let mut data_buf = Vec::new();
+        let mut writer = PackedWriter::new(&mut data_buf);
         preserves::serde::to_writer(&mut writer, self)?;
-        Ok(buf)
+
+        // Prepend length
+        let len = data_buf.len() as u32;
+        let mut result = Vec::with_capacity(4 + data_buf.len());
+        result.extend_from_slice(&len.to_le_bytes());
+        result.extend_from_slice(&data_buf);
+
+        Ok(result)
     }
 
     /// Decode a turn record from bytes
     pub fn decode(bytes: &[u8]) -> anyhow::Result<Self> {
         Ok(preserves::serde::from_bytes(bytes)?)
+    }
+
+    /// Decode a turn record from a reader
+    ///
+    /// This reads the entire record into memory first, then decodes it.
+    /// For streaming decoding, use a custom approach based on preserves PackedReader.
+    pub fn decode_from_reader<R: std::io::Read>(reader: &mut R) -> anyhow::Result<Self> {
+        use std::io::Read as _;
+
+        // Read length prefix (u32 in little-endian)
+        let mut len_buf = [0u8; 4];
+        reader.read_exact(&mut len_buf)?;
+        let len = u32::from_le_bytes(len_buf) as usize;
+
+        // Read the full record
+        let mut buf = vec![0u8; len];
+        reader.read_exact(&mut buf)?;
+
+        // Decode
+        Self::decode(&buf)
     }
 }
 
@@ -430,7 +459,11 @@ mod tests {
 
         let record = TurnRecord::new(actor, branch, clock, None, inputs, outputs, delta);
         let encoded = record.encode().unwrap();
-        let decoded = TurnRecord::decode(&encoded).unwrap();
+
+        // Use decode_from_reader since encode() adds a length prefix
+        use std::io::Cursor;
+        let mut cursor = Cursor::new(&encoded);
+        let decoded = TurnRecord::decode_from_reader(&mut cursor).unwrap();
 
         assert_eq!(record.turn_id, decoded.turn_id);
         assert_eq!(record.clock, decoded.clock);

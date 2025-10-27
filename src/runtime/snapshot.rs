@@ -54,24 +54,27 @@ impl SnapshotManager {
         Self { storage, interval }
     }
 
-    /// Save a snapshot
+    /// Save a snapshot using preserves encoding
     pub fn save(&self, snapshot: &RuntimeSnapshot) -> Result<()> {
         let snapshot_path = self.snapshot_path(&snapshot.branch, &snapshot.turn_id);
 
-        // Serialize snapshot (using JSON for now, should be preserves)
-        let data = serde_json::to_vec_pretty(snapshot)?;
+        // Serialize snapshot using preserves
+        use preserves::PackedWriter;
+        let mut buf = Vec::new();
+        let mut writer = PackedWriter::new(&mut buf);
+        preserves::serde::to_writer(&mut writer, snapshot)?;
 
-        self.storage.write_atomic(&snapshot_path, &data)?;
+        self.storage.write_atomic(&snapshot_path, &buf)?;
 
         Ok(())
     }
 
-    /// Load a snapshot
+    /// Load a snapshot from preserves encoding
     pub fn load(&self, branch: &BranchId, turn_id: &TurnId) -> Result<RuntimeSnapshot> {
         let snapshot_path = self.snapshot_path(branch, turn_id);
 
         let data = self.storage.read_file(&snapshot_path)?;
-        let snapshot: RuntimeSnapshot = serde_json::from_slice(&data)?;
+        let snapshot: RuntimeSnapshot = preserves::serde::from_bytes(&data)?;
 
         Ok(snapshot)
     }
