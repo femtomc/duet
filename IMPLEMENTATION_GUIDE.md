@@ -218,6 +218,7 @@ All writes must be atomic: write to temporary file and rename; fsync directories
 - Provide read iterators (`iter_from(turn_id)`), random access (`read(turn_id)`), and rebuild-on-startup logic.  
 - Handle crash recovery: detect partial writes, truncate to last valid record (validate preserves decoding and checksum if needed), regenerate indexes from surviving records, and warn callers when truncation occurs.
 - Include peer metadata in turn records so journal replay can reconstruct remote links and message ordering.
+- Provide helper assertions for invariant tests (e.g., turn ID monotonicity, single active facet) used by unit/integration suites.
 
 ### 6.6 `runtime::snapshot`
 - Create snapshots on configurable interval or explicit request.  
@@ -354,7 +355,9 @@ CLI communicates via `runtime::control`, so all behaviour is testable without ru
    - `snapshot`: save/load equivalence, nearest-snapshot lookup.  
    - `branch`: forking, rewinding, merge join semantics.  
    - `schema`: schema registration produces stable IDs; incompatible changes trigger test failures.  
-   - `pattern`: subscription evaluation, incremental updates, and deterministic replay of matches.
+   - `pattern`: subscription evaluation, incremental updates, and deterministic replay of matches.  
+   - `control`: request parsing, response serialization, error codes, protocol version negotiation.  
+   - `link` (when enabled): handshake/teardown, message framing, and idempotent replay of remote inputs.
 
 2. **Integration tests**  
    - Single actor scenario with assertions/messages; run sequence, persist, reload, replay, verify state equality.  
@@ -363,6 +366,7 @@ CLI communicates via `runtime::control`, so all behaviour is testable without ru
    - Crash recovery test: simulate partial journal write / corrupted snapshot and verify graceful truncation and replay.  
    - External service integration test: run a conversation involving an out-of-process helper (or mock), ensure request/response transcripts replay exactly.  
    - Pattern integration test: register a watch, assert/retract facts across branches, ensure match notifications and merges behave as expected.  
+   - Control protocol smoke test: exercise handshake, status, step, watch/unwatch, merge, link commands using recorded transcripts.  
    - Determinism harness: run same inputs twice, compare journal hashes and final state signatures.
 
 3. **Property-based / fuzz testing (stretch goal)**  
@@ -372,7 +376,17 @@ CLI communicates via `runtime::control`, so all behaviour is testable without ru
    - Randomly inject external success/failure responses to validate determinism and circuit-breaking logic.  
    - Property-test pattern subscriptions by randomly generating assertion streams and verifying match sets after joins.
 
-4. **Manual/CLI validation**  
+4. **Core invariant assertions (behavioural unit tests)**  
+   - **Single-active-facet**: during turn execution, assert only one facet is marked `Active`; nested turns must panic in tests.  
+   - **Turn ID monotonicity**: verify `TurnRecord::compute_turn_id` produces strictly increasing IDs per actor/logical clock and matches the IDs stored in the journal.  
+   - **Deterministic commit**: run the same activation twice (with recorded inputs) and assert produced `StateDelta` hashes match and no rollback actions leak.  
+   - **Capability attenuation**: ensure merging two capability states never increases available caveats; unit test join ordering permutations.  
+   - **Subscription lifecycle**: watching/unwatching patterns must not leave stale entries; after branch rewind the subscription table must match the snapshot.  
+   - **Flow-control credit**: borrowing without repayment should block scheduler advance when credit limit reached; repayment unblocks.  
+   - **Journal recovery**: truncate mid-write, restart, ensure runtime discards partial turn and last valid turn remains replayable.  
+   - **Remote input replay** (once links land): injecting identical `TurnInput::RemoteMessage` sequences twice yields identical local state.
+
+5. **Manual/CLI validation**  
    - Scripts under `tests/` executing CLI commands to confirm UX and runtime alignment.
 
 ---
