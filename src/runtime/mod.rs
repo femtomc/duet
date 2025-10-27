@@ -290,6 +290,117 @@ impl Runtime {
         self.scheduler.enqueue(target_actor, input, ScheduleCause::External);
     }
 
+    /// Fork a new branch from the current branch
+    pub fn fork(&mut self, new_branch_name: impl Into<String>, at_turn: Option<TurnId>) -> Result<BranchId> {
+        let current = self.current_branch.clone();
+        let new_branch = BranchId::new(new_branch_name);
+
+        // Use current head if no specific turn specified
+        let base_turn = at_turn.unwrap_or_else(|| {
+            // TODO: Track actual last turn ID
+            TurnId::new(format!("turn_{:08}", self.turn_count))
+        });
+
+        // Create the fork in branch manager
+        self.branch_manager
+            .fork(&current, new_branch.clone(), base_turn.clone())
+            .map_err(|e| RuntimeError::Branch(e))?;
+
+        // Create journal and snapshot directories for new branch
+        let new_journal_dir = self.storage.branch_journal_dir(&new_branch);
+        let new_snapshot_dir = self.storage.branch_snapshot_dir(&new_branch);
+        std::fs::create_dir_all(&new_journal_dir)
+            .map_err(|e| RuntimeError::Init(format!("Failed to create branch journal dir: {}", e)))?;
+        std::fs::create_dir_all(&new_snapshot_dir)
+            .map_err(|e| RuntimeError::Init(format!("Failed to create branch snapshot dir: {}", e)))?;
+
+        Ok(new_branch)
+    }
+
+    /// Switch to a different branch
+    pub fn switch_branch(&mut self, branch: BranchId) -> Result<()> {
+        // Verify branch exists
+        self.branch_manager
+            .switch_branch(branch.clone())
+            .map_err(|e| RuntimeError::Branch(e))?;
+
+        // Update runtime state
+        self.current_branch = branch.clone();
+
+        // Reinitialize journal writer for new branch
+        let journal_reader = JournalReader::new(self.storage.clone(), branch.clone())
+            .unwrap_or_else(|_| JournalReader::new_empty(self.storage.clone(), branch.clone()));
+
+        journal_reader.validate_and_repair()
+            .map_err(|e| RuntimeError::Init(format!("Journal validation failed: {}", e)))?;
+
+        let clean_index = journal_reader.rebuild_index()
+            .map_err(|e| RuntimeError::Init(format!("Index rebuild failed: {}", e)))?;
+
+        let index_path = self.storage.branch_meta_dir(&branch).join("journal.index");
+        std::fs::create_dir_all(self.storage.branch_meta_dir(&branch))
+            .map_err(|e| RuntimeError::Init(format!("Failed to create meta dir: {}", e)))?;
+        clean_index.save(&index_path)
+            .map_err(|e| RuntimeError::Init(format!("Failed to save index: {}", e)))?;
+
+        self.journal_writer = JournalWriter::new_with_index(
+            self.storage.clone(),
+            branch.clone(),
+            clean_index,
+        ).map_err(|e| RuntimeError::Init(format!("Failed to create journal writer: {}", e)))?;
+
+        Ok(())
+    }
+
+    /// Go to a specific turn (time travel)
+    ///
+    /// Loads the nearest snapshot before the target turn, then replays
+    /// journal entries up to the target.
+    pub fn goto(&mut self, target_turn: TurnId) -> Result<()> {
+        // Find nearest snapshot at or before target turn
+        let snapshot_turn = self.snapshot_manager
+            .nearest_snapshot(&self.current_branch, &target_turn)
+            .map_err(|e| RuntimeError::Snapshot(e))?;
+
+        // Reset runtime state
+        self.actors.clear();
+        self.scheduler = Scheduler::new(self.config.flow_control_limit as i64);
+        self.turn_count = 0;
+
+        // Load snapshot if available
+        if let Some(snap_turn) = snapshot_turn {
+            let snapshot = self.snapshot_manager
+                .load(&self.current_branch, &snap_turn)
+                .map_err(|e| RuntimeError::Snapshot(e))?;
+
+            // Restore state from snapshot
+            // TODO: Apply snapshot state to actors
+            self.turn_count = snapshot.metadata.turn_count;
+        }
+
+        // Replay journal from snapshot point to target
+        let journal_reader = JournalReader::new(self.storage.clone(), self.current_branch.clone())
+            .map_err(|e| RuntimeError::Journal(e))?;
+
+        // TODO: Iterate and replay turns up to target_turn
+        // For now, this is a placeholder implementation
+
+        // Update branch head
+        self.branch_manager
+            .update_head(&self.current_branch, target_turn)
+            .map_err(|e| RuntimeError::Branch(e))?;
+
+        Ok(())
+    }
+
+    /// Rewind by N turns
+    pub fn back(&mut self, count: usize) -> Result<()> {
+        // TODO: Calculate target turn ID by going back N turns from current head
+        // For now, this is a placeholder
+
+        Ok(())
+    }
+
     /// Initialize runtime storage directories and metadata
     pub fn init(config: RuntimeConfig) -> Result<()> {
         storage::init_storage(&config.root)

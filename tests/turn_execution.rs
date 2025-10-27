@@ -218,3 +218,47 @@ fn test_flow_control_blocking() {
     let result = runtime.step().unwrap();
     assert!(result.is_some(), "Turn should execute after account reset");
 }
+
+#[test]
+fn test_branch_fork_and_switch() {
+    let temp = TempDir::new().unwrap();
+    let config = RuntimeConfig {
+        root: temp.path().to_path_buf(),
+        snapshot_interval: 10,
+        flow_control_limit: 100,
+        debug: false,
+    };
+
+    Runtime::init(config.clone()).unwrap();
+    let mut runtime = Runtime::new(config).unwrap();
+
+    use duet::runtime::turn::{ActorId, FacetId};
+
+    let actor_id = ActorId::new();
+    let facet_id = FacetId::new();
+
+    // Execute some turns on main branch
+    for i in 0..3 {
+        let payload = preserves::IOValue::new(preserves::SignedInteger::from(i));
+        runtime.send_message(actor_id.clone(), facet_id.clone(), payload);
+    }
+    runtime.step_n(3).unwrap();
+
+    // Fork a new branch
+    let experiment_branch = runtime.fork("experiment", None).unwrap();
+    assert_eq!(experiment_branch.0.as_str(), "experiment");
+
+    // Switch to the new branch
+    runtime.switch_branch(experiment_branch.clone()).unwrap();
+    assert_eq!(runtime.current_branch().0.as_str(), "experiment");
+
+    // Execute a turn on the new branch
+    runtime.send_message(actor_id.clone(), facet_id.clone(), preserves::IOValue::symbol("experiment"));
+    let result = runtime.step().unwrap();
+    assert!(result.is_some(), "Should execute turn on new branch");
+
+    // Switch back to main
+    use duet::runtime::turn::BranchId;
+    runtime.switch_branch(BranchId::main()).unwrap();
+    assert_eq!(runtime.current_branch().0.as_str(), "main");
+}
