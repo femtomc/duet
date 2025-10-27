@@ -45,6 +45,20 @@ impl StateDelta {
             && self.timers.is_empty()
             && self.accounts.is_empty()
     }
+
+    /// Join two state deltas (CRDT merge)
+    ///
+    /// Combines deltas from two diverged branches. This is used during branch merges
+    /// to produce a unified state that incorporates changes from both branches.
+    pub fn join(&self, other: &StateDelta) -> StateDelta {
+        StateDelta {
+            assertions: self.assertions.join(&other.assertions),
+            facets: self.facets.join(&other.facets),
+            capabilities: self.capabilities.join(&other.capabilities),
+            timers: self.timers.join(&other.timers),
+            accounts: self.accounts.join(&other.accounts),
+        }
+    }
 }
 
 // ========== Assertion CRDT (Observed-Remove Set) ==========
@@ -74,6 +88,32 @@ impl AssertionDelta {
     /// Check if empty
     pub fn is_empty(&self) -> bool {
         self.added.is_empty() && self.retracted.is_empty()
+    }
+
+    /// Join two assertion deltas (CRDT merge)
+    ///
+    /// Combines additions and retractions from both deltas.
+    /// Deduplicates by version to handle concurrent operations.
+    pub fn join(&self, other: &AssertionDelta) -> AssertionDelta {
+        let mut result = AssertionDelta::default();
+
+        // Union of all additions (deduplicate by version)
+        let mut seen_versions = HashSet::new();
+        for item in self.added.iter().chain(other.added.iter()) {
+            if seen_versions.insert(item.3) {
+                result.added.push(item.clone());
+            }
+        }
+
+        // Union of all retractions (deduplicate by version)
+        let mut seen_retractions = HashSet::new();
+        for item in self.retracted.iter().chain(other.retracted.iter()) {
+            if seen_retractions.insert(item.2) {
+                result.retracted.push(item.clone());
+            }
+        }
+
+        result
     }
 }
 
@@ -165,6 +205,32 @@ impl FacetDelta {
     pub fn is_empty(&self) -> bool {
         self.spawned.is_empty() && self.terminated.is_empty()
     }
+
+    /// Join two facet deltas (CRDT merge)
+    ///
+    /// Combines spawned and terminated facets from both deltas.
+    /// Deduplicates by facet ID.
+    pub fn join(&self, other: &FacetDelta) -> FacetDelta {
+        let mut result = FacetDelta::default();
+
+        // Union of spawned facets (deduplicate by ID)
+        let mut seen_spawned = HashSet::new();
+        for metadata in self.spawned.iter().chain(other.spawned.iter()) {
+            if seen_spawned.insert(metadata.id.clone()) {
+                result.spawned.push(metadata.clone());
+            }
+        }
+
+        // Union of terminated facets (deduplicate by ID)
+        let mut seen_terminated = HashSet::new();
+        for facet_id in self.terminated.iter().chain(other.terminated.iter()) {
+            if seen_terminated.insert(facet_id.clone()) {
+                result.terminated.push(facet_id.clone());
+            }
+        }
+
+        result
+    }
 }
 
 /// Map of facet IDs to their metadata
@@ -253,6 +319,32 @@ impl CapabilityDelta {
     pub fn is_empty(&self) -> bool {
         self.granted.is_empty() && self.revoked.is_empty()
     }
+
+    /// Join two capability deltas (CRDT merge)
+    ///
+    /// Combines granted and revoked capabilities from both deltas.
+    /// Revoked status dominates (once revoked, stays revoked).
+    pub fn join(&self, other: &CapabilityDelta) -> CapabilityDelta {
+        let mut result = CapabilityDelta::default();
+
+        // Union of granted capabilities (deduplicate by ID)
+        let mut seen_granted = HashSet::new();
+        for metadata in self.granted.iter().chain(other.granted.iter()) {
+            if seen_granted.insert(metadata.id) {
+                result.granted.push(metadata.clone());
+            }
+        }
+
+        // Union of revoked capabilities (deduplicate by ID)
+        let mut seen_revoked = HashSet::new();
+        for cap_id in self.revoked.iter().chain(other.revoked.iter()) {
+            if seen_revoked.insert(*cap_id) {
+                result.revoked.push(*cap_id);
+            }
+        }
+
+        result
+    }
 }
 
 /// Map of capabilities
@@ -322,6 +414,32 @@ impl TimerDelta {
     pub fn is_empty(&self) -> bool {
         self.registered.is_empty() && self.fired.is_empty()
     }
+
+    /// Join two timer deltas (CRDT merge)
+    ///
+    /// Combines registered and fired timers from both deltas.
+    /// Deduplicates by timer ID.
+    pub fn join(&self, other: &TimerDelta) -> TimerDelta {
+        let mut result = TimerDelta::default();
+
+        // Union of registered timers
+        let mut seen_registered = HashSet::new();
+        for timer_id in self.registered.iter().chain(other.registered.iter()) {
+            if seen_registered.insert(*timer_id) {
+                result.registered.push(*timer_id);
+            }
+        }
+
+        // Union of fired timers
+        let mut seen_fired = HashSet::new();
+        for timer_id in self.fired.iter().chain(other.fired.iter()) {
+            if seen_fired.insert(*timer_id) {
+                result.fired.push(*timer_id);
+            }
+        }
+
+        result
+    }
 }
 
 // ========== Flow Control (PN-Counter) ==========
@@ -384,6 +502,16 @@ impl AccountDelta {
     /// Check if empty
     pub fn is_empty(&self) -> bool {
         self.borrowed == 0 && self.repaid == 0
+    }
+
+    /// Join two account deltas (CRDT merge)
+    ///
+    /// Sums borrowed and repaid tokens from both deltas (PN-counter semantics).
+    pub fn join(&self, other: &AccountDelta) -> AccountDelta {
+        AccountDelta {
+            borrowed: self.borrowed + other.borrowed,
+            repaid: self.repaid + other.repaid,
+        }
     }
 }
 
@@ -490,5 +618,126 @@ mod tests {
 
         let joined = counter.join(&counter2);
         assert_eq!(joined.value(), 12);
+    }
+
+    #[test]
+    fn test_state_delta_join() {
+        let actor = ActorId::new();
+        let handle1 = Handle::new();
+        let handle2 = Handle::new();
+        let v1 = Uuid::new_v4();
+        let v2 = Uuid::new_v4();
+
+        // Delta A: adds handle1
+        let delta_a = StateDelta {
+            assertions: AssertionDelta {
+                added: vec![(
+                    actor.clone(),
+                    handle1.clone(),
+                    preserves::IOValue::symbol("value-a"),
+                    v1,
+                )],
+                retracted: vec![],
+            },
+            facets: FacetDelta::default(),
+            capabilities: CapabilityDelta::default(),
+            timers: TimerDelta::default(),
+            accounts: AccountDelta {
+                borrowed: 10,
+                repaid: 5,
+            },
+        };
+
+        // Delta B: adds handle2
+        let delta_b = StateDelta {
+            assertions: AssertionDelta {
+                added: vec![(
+                    actor.clone(),
+                    handle2.clone(),
+                    preserves::IOValue::symbol("value-b"),
+                    v2,
+                )],
+                retracted: vec![],
+            },
+            facets: FacetDelta::default(),
+            capabilities: CapabilityDelta::default(),
+            timers: TimerDelta::default(),
+            accounts: AccountDelta {
+                borrowed: 3,
+                repaid: 7,
+            },
+        };
+
+        // Join should combine both
+        let joined = delta_a.join(&delta_b);
+
+        assert_eq!(joined.assertions.added.len(), 2);
+        assert_eq!(joined.accounts.borrowed, 13); // 10 + 3
+        assert_eq!(joined.accounts.repaid, 12); // 5 + 7
+    }
+
+    #[test]
+    fn test_assertion_delta_join_deduplicates() {
+        let actor = ActorId::new();
+        let handle = Handle::new();
+        let version = Uuid::new_v4();
+
+        // Both deltas add the same assertion (same version)
+        let delta_a = AssertionDelta {
+            added: vec![(
+                actor.clone(),
+                handle.clone(),
+                preserves::IOValue::symbol("value"),
+                version,
+            )],
+            retracted: vec![],
+        };
+
+        let delta_b = AssertionDelta {
+            added: vec![(
+                actor.clone(),
+                handle.clone(),
+                preserves::IOValue::symbol("value"),
+                version,
+            )],
+            retracted: vec![],
+        };
+
+        let joined = delta_a.join(&delta_b);
+
+        // Should deduplicate by version
+        assert_eq!(joined.added.len(), 1, "Should deduplicate same version");
+    }
+
+    #[test]
+    fn test_facet_delta_join() {
+        let facet1 = FacetId::new();
+        let facet2 = FacetId::new();
+        let actor = ActorId::new();
+
+        let delta_a = FacetDelta {
+            spawned: vec![FacetMetadata {
+                id: facet1.clone(),
+                parent: None,
+                status: FacetStatus::Alive,
+                actor: actor.clone(),
+            }],
+            terminated: vec![],
+        };
+
+        let delta_b = FacetDelta {
+            spawned: vec![FacetMetadata {
+                id: facet2.clone(),
+                parent: None,
+                status: FacetStatus::Alive,
+                actor: actor.clone(),
+            }],
+            terminated: vec![facet1.clone()],
+        };
+
+        let joined = delta_a.join(&delta_b);
+
+        assert_eq!(joined.spawned.len(), 2, "Should combine spawned facets");
+        assert_eq!(joined.terminated.len(), 1, "Should include terminations");
     }
 }

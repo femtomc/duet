@@ -118,9 +118,53 @@ impl BranchManager {
     }
 
     /// Find the lowest common ancestor of two branches
-    pub fn find_lca(&self, _branch_a: &BranchId, _branch_b: &BranchId) -> Option<TurnId> {
-        // TODO: Implement LCA search
-        None
+    ///
+    /// Traces ancestry back from both branches to find their common fork point.
+    /// Returns the base_turn of the most recent common ancestor.
+    pub fn find_lca(&self, branch_a: &BranchId, branch_b: &BranchId) -> Option<TurnId> {
+        // Build ancestry path for branch A
+        let mut ancestry_a = HashMap::new();
+        let mut current = branch_a.clone();
+
+        loop {
+            let metadata = self.branches.get(&current)?;
+
+            if let Some(base_turn) = &metadata.base_turn {
+                ancestry_a.insert(current.clone(), base_turn.clone());
+            }
+
+            match &metadata.parent {
+                Some(parent) => current = parent.clone(),
+                None => break, // Reached root (main branch)
+            }
+        }
+
+        // Trace branch B ancestry and find first common point
+        let mut current = branch_b.clone();
+
+        loop {
+            let metadata = self.branches.get(&current)?;
+
+            // Check if this branch is in A's ancestry
+            if let Some(base_turn) = ancestry_a.get(&current) {
+                return Some(base_turn.clone());
+            }
+
+            // Check if B's base turn is in A's ancestry
+            if let Some(base_turn) = &metadata.base_turn {
+                if ancestry_a.values().any(|turn| turn == base_turn) {
+                    return Some(base_turn.clone());
+                }
+            }
+
+            match &metadata.parent {
+                Some(parent) => current = parent.clone(),
+                None => break,
+            }
+        }
+
+        // If branches share no common ancestry, they diverged from main at turn 0
+        Some(TurnId::new("turn_00000000".to_string()))
     }
 
     /// Merge two branches using CRDT join
@@ -232,5 +276,62 @@ mod tests {
         let metadata = manager.get_branch(&experiment).unwrap();
         assert_eq!(metadata.parent, Some(main));
         assert_eq!(metadata.base_turn, Some(base_turn));
+    }
+
+    #[test]
+    fn test_find_lca_direct_fork() {
+        let mut manager = BranchManager::new();
+        let main = BranchId::main();
+        let branch_a = BranchId::new("branch-a");
+        let branch_b = BranchId::new("branch-b");
+
+        let lca_turn = TurnId::new("turn_10".to_string());
+
+        // Fork both branches from main at turn 10
+        manager.fork(&main, branch_a.clone(), lca_turn.clone()).unwrap();
+        manager.fork(&main, branch_b.clone(), lca_turn.clone()).unwrap();
+
+        // LCA should be turn 10
+        let lca = manager.find_lca(&branch_a, &branch_b);
+        assert_eq!(lca, Some(lca_turn));
+    }
+
+    #[test]
+    fn test_find_lca_nested_fork() {
+        let mut manager = BranchManager::new();
+        let main = BranchId::main();
+        let branch_a = BranchId::new("branch-a");
+        let branch_b = BranchId::new("branch-b");
+        let branch_c = BranchId::new("branch-c");
+
+        let turn_10 = TurnId::new("turn_10".to_string());
+        let turn_20 = TurnId::new("turn_20".to_string());
+
+        // Fork A from main at turn 10
+        manager.fork(&main, branch_a.clone(), turn_10.clone()).unwrap();
+
+        // Fork B from A at turn 20
+        manager.fork(&branch_a, branch_b.clone(), turn_20.clone()).unwrap();
+
+        // Fork C from A at turn 20
+        manager.fork(&branch_a, branch_c.clone(), turn_20.clone()).unwrap();
+
+        // LCA of B and C should be turn 20 (both forked from A at that point)
+        let lca = manager.find_lca(&branch_b, &branch_c);
+        assert_eq!(lca, Some(turn_20));
+    }
+
+    #[test]
+    fn test_find_lca_same_branch() {
+        let mut manager = BranchManager::new();
+        let main = BranchId::main();
+        let branch_a = BranchId::new("branch-a");
+
+        let turn_10 = TurnId::new("turn_10".to_string());
+        manager.fork(&main, branch_a.clone(), turn_10.clone()).unwrap();
+
+        // LCA of branch with itself should be its base turn
+        let lca = manager.find_lca(&branch_a, &branch_a);
+        assert_eq!(lca, Some(turn_10));
     }
 }

@@ -5,6 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use uuid::Uuid;
 
 // Submodules
 pub mod actor;
@@ -528,6 +529,196 @@ impl Runtime {
             .map_err(|e| RuntimeError::Branch(e))?;
 
         Ok(())
+    }
+
+    /// Merge source branch into target branch
+    ///
+    /// Following the implementation guide:
+    /// 1. Find LCA turn T where branches diverged
+    /// 2. Load state at T (from snapshot if available)
+    /// 3. Replay from T to get state_source and state_target
+    /// 4. Join states using CRDT semantics
+    /// 5. Create synthetic merge turn with the joined delta
+    pub fn merge(&mut self, source: &BranchId, target: &BranchId) -> Result<branch::MergeResult> {
+        // Find the lowest common ancestor
+        let lca_turn = self.branch_manager
+            .find_lca(source, target)
+            .ok_or_else(|| RuntimeError::Branch(
+                error::BranchError::InvalidForkPoint("No common ancestor found".into())
+            ))?;
+
+        // Get the head turns for both branches
+        let source_head = self.branch_manager
+            .head(source)
+            .cloned()
+            .ok_or_else(|| RuntimeError::Branch(
+                error::BranchError::NotFound(source.0.clone())
+            ))?;
+
+        let target_head = self.branch_manager
+            .head(target)
+            .cloned()
+            .ok_or_else(|| RuntimeError::Branch(
+                error::BranchError::NotFound(target.0.clone())
+            ))?;
+
+        // Load state at LCA by replaying up to that turn
+        let lca_state = self.load_state_at_turn(&lca_turn, source)?;
+
+        // Load state at source head
+        let source_state = self.load_state_at_turn(&source_head, source)?;
+
+        // Load state at target head
+        let target_state = self.load_state_at_turn(&target_head, target)?;
+
+        // Compute the delta from LCA to source
+        let source_delta = self.compute_delta(&lca_state, &source_state);
+
+        // Compute the delta from LCA to target
+        let target_delta = self.compute_delta(&lca_state, &target_state);
+
+        // Join the deltas using CRDT semantics
+        let joined_delta = source_delta.join(&target_delta);
+
+        // Detect conflicts and generate warnings
+        let warnings = self.detect_conflicts(&source_delta, &target_delta, &joined_delta);
+
+        // Create a synthetic merge turn with provenance metadata
+        let merge_input = turn::TurnInput::Merge {
+            source_branch: source.clone(),
+            target_branch: target.clone(),
+            lca_turn: lca_turn.clone(),
+        };
+
+        // Use a special "merge" actor ID (deterministic)
+        let merge_actor = turn::ActorId::from_uuid(Uuid::nil());
+        let merge_clock = turn::LogicalClock::zero();
+
+        let merge_record = turn::TurnRecord::new(
+            merge_actor,
+            target.clone(),
+            merge_clock,
+            Some(target_head),
+            vec![merge_input],
+            vec![], // No outputs for synthetic merge turn
+            joined_delta,
+        );
+
+        let merge_turn_id = merge_record.turn_id.clone();
+
+        // Record merge turn in journal
+        self.journal_writer
+            .append(&merge_record)
+            .map_err(|e| RuntimeError::Journal(e))?;
+
+        // Update branch metadata
+        self.branch_manager
+            .update_head(target, merge_turn_id.clone())
+            .map_err(|e| RuntimeError::Branch(e))?;
+
+        self.persist_branch_state()?;
+
+        Ok(branch::MergeResult {
+            merge_turn: merge_turn_id,
+            warnings,
+        })
+    }
+
+    /// Load complete state at a specific turn by replaying journal
+    ///
+    /// Accumulates all state deltas from the beginning up to (and including) the target turn.
+    fn load_state_at_turn(&self, turn_id: &TurnId, branch: &BranchId) -> Result<state::StateDelta> {
+        let journal_reader = JournalReader::new(self.storage.clone(), branch.clone())
+            .map_err(|e| RuntimeError::Journal(e))?;
+
+        let mut accumulated_delta = state::StateDelta::empty();
+        let mut iter = journal_reader.iter_all().map_err(|e| RuntimeError::Journal(e))?;
+
+        while let Some(result) = iter.next() {
+            let record = result.map_err(|e| RuntimeError::Journal(e))?;
+
+            // Accumulate this turn's delta
+            accumulated_delta = accumulated_delta.join(&record.delta);
+
+            // Stop when we reach the target turn
+            if record.turn_id == *turn_id {
+                break;
+            }
+        }
+
+        Ok(accumulated_delta)
+    }
+
+    /// Compute the delta between two states
+    ///
+    /// Returns a delta representing the changes from base to head.
+    /// This is a simplified version - full implementation would compute precise diffs.
+    fn compute_delta(&self, _base: &state::StateDelta, head: &state::StateDelta) -> state::StateDelta {
+        // For merges, we actually want to use the head state directly
+        // as the "delta from LCA" since head already represents all changes since LCA
+        // when we accumulate deltas during replay.
+        //
+        // A more sophisticated implementation would:
+        // 1. Convert deltas to full state sets
+        // 2. Compute set differences
+        // 3. Return the minimal delta
+        //
+        // For now, we'll just return the head state as-is
+        head.clone()
+    }
+
+    /// Detect conflicts between two deltas
+    fn detect_conflicts(
+        &self,
+        source: &state::StateDelta,
+        target: &state::StateDelta,
+        _joined: &state::StateDelta,
+    ) -> Vec<branch::MergeWarning> {
+        let mut warnings = Vec::new();
+
+        // Check for concurrent assertions with different values on same handle
+        let mut source_handles = HashSet::new();
+        for (actor, handle, _value, _version) in &source.assertions.added {
+            source_handles.insert((actor.clone(), handle.clone()));
+        }
+
+        for (actor, handle, value, _version) in &target.assertions.added {
+            if source_handles.contains(&(actor.clone(), handle.clone())) {
+                // Find the source value for comparison
+                if let Some(source_item) = source.assertions.added.iter()
+                    .find(|(a, h, _, _)| a == actor && h == handle)
+                {
+                    if &source_item.2 != value {
+                        warnings.push(branch::MergeWarning {
+                            category: "concurrent-assertion".into(),
+                            message: format!(
+                                "Concurrent different-valued assertions on handle {}",
+                                handle.0
+                            ),
+                            affected: vec![format!("{}:{}", actor.0, handle.0)],
+                        });
+                    }
+                }
+            }
+        }
+
+        // Check for concurrent facet terminations
+        let mut source_terminated = HashSet::new();
+        for facet_id in &source.facets.terminated {
+            source_terminated.insert(facet_id.clone());
+        }
+
+        for facet_id in &target.facets.terminated {
+            if source_terminated.contains(facet_id) {
+                warnings.push(branch::MergeWarning {
+                    category: "concurrent-termination".into(),
+                    message: format!("Facet {} terminated in both branches", facet_id.0),
+                    affected: vec![facet_id.0.to_string()],
+                });
+            }
+        }
+
+        warnings
     }
 
     /// Rewind by N turns

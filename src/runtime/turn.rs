@@ -212,6 +212,16 @@ pub enum TurnInput {
         /// Message payload
         payload: preserves::IOValue,
     },
+
+    /// Merge of two branches
+    Merge {
+        /// Source branch
+        source_branch: BranchId,
+        /// Target branch
+        target_branch: BranchId,
+        /// LCA turn where branches diverged
+        lca_turn: TurnId,
+    },
 }
 
 /// Output from a turn
