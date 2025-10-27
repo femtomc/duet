@@ -188,17 +188,38 @@ All writes must be atomic: write to temporary file and rename; fsync directories
 - Provide cross-node metadata (node IDs, link checkpoints) so distributed merges can reconcile remote assertions.
 - Maintain indexes required for pattern matching (e.g., attribute maps, trie structures) so subscriptions can be evaluated quickly during turn execution.
 
-### 6.3 `runtime::actor`
-- Define `Actor`, `Facet`, `Entity`, and `Activation` abstractions mirroring Syndicate semantics.  
-- Manage facet lifecycle (creation, termination, stop hooks, child relationships).  
-- Track flow-control accounts and outstanding work (borrow/repay).  
-- Execute turns: construct activation context, deliver inputs to entities, enforce invariants (no nested turns, commit/rollback semantics).  
-- Emit `StateDelta` objects by comparing pre/post CRDT state or by accumulating operations during the turn.  
+### 6.3 `runtime::actor` & `runtime::registry`
+- Define `Actor`, `Facet`, `Entity`, and `Activation` abstractions mirroring Syndicate semantics.
+- Manage facet lifecycle (creation, termination, stop hooks, child relationships).
+- Track flow-control accounts and outstanding work (borrow/repay).
+- Execute turns: construct activation context, deliver inputs to entities, enforce invariants (no nested turns, commit/rollback semantics).
+- Emit `StateDelta` objects by comparing pre/post CRDT state or by accumulating operations during the turn.
 - Ensure any nondeterministic behaviour encountered in entities (timers, IO callbacks, randomness, external services) is routed through the scheduler as persisted `TurnInput`s before being observed inside the activation.
 - Provide APIs for linked tasks, timer registration, and external service requests; their completions must enqueue deterministic scheduler events that capture return values or elapsed durations.
 - Enforce capability attenuation when delivering messages/assertions (including those sourced from external tools) so every action respects the capability model.
 - Support distributed references: outbound Caps can embed `(node_id, actor_id, facet_id)` locators and per-link attenuation data.
 - Allow entities to register/unregister pattern subscriptions; ensure subscriptions run within the activation using the pattern engine and generate events as ordinary turn inputs/outputs.
+
+#### Entity Registration & Hydration
+
+The runtime provides infrastructure for registering entity types and persisting entity instances across restarts and time-travel:
+
+- **Entity Registry** (`runtime::registry`): Global singleton mapping type names to factory functions. Application code registers types at startup via `EntityRegistry::global().register(name, factory)`. Factories take a `preserves::IOValue` config and return `Box<dyn Entity>`.
+
+- **Entity Manager**: Tracks metadata for all entity instances (actor, facet, type, config, pattern subscriptions) in `.duet/meta/entities.json`. Metadata persists independently of turn execution so entities can be reconstructed during replay.
+
+- **Dataspace-First Design**: Entities should express most state via assertions, capabilities, and facets (the CRDT-backed dataspace). This ensures:
+  - State is automatically persisted in snapshots/journal
+  - Time-travel replays state correctly
+  - Branch merges are conflict-free (CRDT semantics)
+  - No manual hydration code needed
+
+- **HydratableEntity Trait** (optional): For rare cases where private state can't live in the dataspace (e.g., expensive caches, ephemeral derived data):
+  - Implement `snapshot_state()` to capture private state as `preserves::IOValue`
+  - Implement `restore_state()` to hydrate from snapshot during replay
+  - **Merge behavior**: If two branches have different private state, a merge warning is generated and one state wins arbitrarily. This is unavoidable for non-CRDT state—prefer dataspace-backed state when possible.
+
+- **Pattern Subscriptions**: Pattern IDs are tracked in entity metadata so they can be re-registered during hydration. Entities rebuilt from metadata restore their subscriptions before replay continues.
 
 ### 6.4 `runtime::scheduler`
 - Maintain ready queues per actor, keyed by logical clock and causal dependencies.  
