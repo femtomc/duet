@@ -6,6 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::{Runtime, RuntimeConfig};
+use super::actor::Actor;
 use super::error::Result;
 use super::turn::{ActorId, BranchId, FacetId, TurnId, TurnRecord};
 
@@ -139,6 +140,107 @@ impl Control {
     pub fn runtime_mut(&mut self) -> &mut Runtime {
         &mut self.runtime
     }
+
+    /// Register a new entity instance
+    pub fn register_entity(
+        &mut self,
+        actor: ActorId,
+        facet: FacetId,
+        entity_type: String,
+        config: preserves::IOValue,
+    ) -> Result<uuid::Uuid> {
+        use super::registry::{EntityMetadata, EntityRegistry};
+
+        // Create the entity instance using the global registry
+        let entity = EntityRegistry::global()
+            .create(&entity_type, &config)
+            .map_err(|e| super::error::RuntimeError::Actor(e))?;
+
+        // Generate entity ID
+        let entity_id = uuid::Uuid::new_v4();
+
+        // Create metadata
+        let metadata = EntityMetadata {
+            id: entity_id,
+            actor: actor.clone(),
+            facet: facet.clone(),
+            entity_type,
+            config,
+            patterns: vec![],
+        };
+
+        // Register metadata
+        self.runtime.entity_manager_mut().register(metadata);
+
+        // Attach entity to actor
+        let actor_obj = self.runtime.actors
+            .entry(actor.clone())
+            .or_insert_with(|| Actor::new(actor.clone()));
+
+        actor_obj.attach_entity(facet, entity);
+
+        // Persist entity metadata
+        self.runtime.persist_entities()?;
+
+        Ok(entity_id)
+    }
+
+    /// Unregister an entity instance
+    pub fn unregister_entity(&mut self, entity_id: uuid::Uuid) -> Result<bool> {
+        let removed = self.runtime.entity_manager_mut().unregister(&entity_id);
+
+        if removed.is_some() {
+            self.runtime.persist_entities()?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// List all registered entities
+    pub fn list_entities(&self) -> Vec<EntityInfo> {
+        self.runtime.entity_manager()
+            .list()
+            .into_iter()
+            .map(|meta| EntityInfo {
+                id: meta.id,
+                actor: meta.actor.clone(),
+                facet: meta.facet.clone(),
+                entity_type: meta.entity_type.clone(),
+                pattern_count: meta.patterns.len(),
+            })
+            .collect()
+    }
+
+    /// List entities for a specific actor
+    pub fn list_entities_for_actor(&self, actor: &ActorId) -> Vec<EntityInfo> {
+        self.runtime.entity_manager()
+            .list_for_actor(actor)
+            .into_iter()
+            .map(|meta| EntityInfo {
+                id: meta.id,
+                actor: meta.actor.clone(),
+                facet: meta.facet.clone(),
+                entity_type: meta.entity_type.clone(),
+                pattern_count: meta.patterns.len(),
+            })
+            .collect()
+    }
+}
+
+/// Entity information for display
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EntityInfo {
+    /// Entity instance ID
+    pub id: uuid::Uuid,
+    /// Actor ID
+    pub actor: ActorId,
+    /// Facet ID
+    pub facet: FacetId,
+    /// Entity type name
+    pub entity_type: String,
+    /// Number of pattern subscriptions
+    pub pattern_count: usize,
 }
 
 /// Convert a TurnRecord to a TurnSummary
@@ -464,5 +566,68 @@ mod tests {
 
         let result = control.merge(experiment, BranchId::main());
         assert!(result.is_ok(), "Merge should succeed even with potential conflicts");
+    }
+
+    #[test]
+    fn test_entity_registration() {
+        use super::super::registry::EntityRegistry;
+        use super::super::actor::Activation;
+
+        struct TestEntity;
+
+        impl super::super::actor::Entity for TestEntity {
+            fn on_message(
+                &self,
+                _activation: &mut Activation,
+                _payload: &preserves::IOValue,
+            ) -> super::super::error::ActorResult<()> {
+                Ok(())
+            }
+        }
+
+        let temp = TempDir::new().unwrap();
+        let config = RuntimeConfig {
+            root: temp.path().to_path_buf(),
+            snapshot_interval: 10,
+            flow_control_limit: 100,
+            debug: false,
+        };
+
+        // Register the entity type in the global registry
+        EntityRegistry::global().register("test-entity", |_config| {
+            Ok(Box::new(TestEntity))
+        });
+
+        let mut control = Control::init(config).unwrap();
+
+        // Register an entity instance
+        let actor_id = ActorId::new();
+        let facet_id = FacetId::new();
+        let entity_config = preserves::IOValue::symbol("test-config");
+
+        let entity_id = control.register_entity(
+            actor_id.clone(),
+            facet_id.clone(),
+            "test-entity".to_string(),
+            entity_config,
+        ).unwrap();
+
+        // List entities
+        let entities = control.list_entities();
+        assert_eq!(entities.len(), 1);
+        assert_eq!(entities[0].id, entity_id);
+        assert_eq!(entities[0].entity_type, "test-entity");
+
+        // List for specific actor
+        let actor_entities = control.list_entities_for_actor(&actor_id);
+        assert_eq!(actor_entities.len(), 1);
+
+        // Unregister
+        let removed = control.unregister_entity(entity_id).unwrap();
+        assert!(removed);
+
+        // Should be gone
+        let entities = control.list_entities();
+        assert_eq!(entities.len(), 0);
     }
 }

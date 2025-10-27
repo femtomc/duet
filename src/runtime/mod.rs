@@ -14,6 +14,7 @@ pub mod control;
 pub mod error;
 pub mod journal;
 pub mod pattern;
+pub mod registry;
 pub mod scheduler;
 pub mod schema;
 pub mod snapshot;
@@ -60,6 +61,7 @@ use storage::Storage;
 use turn::BranchId;
 
 use actor::Actor;
+use registry::EntityManager;
 use std::collections::{HashMap, HashSet};
 
 /// The main runtime orchestrator
@@ -76,6 +78,9 @@ pub struct Runtime {
 
     /// Active actors in this runtime
     actors: HashMap<turn::ActorId, Actor>,
+
+    /// Entity metadata manager
+    entity_manager: EntityManager,
 
     /// Turn counter for snapshot interval
     turn_count: u64,
@@ -159,6 +164,11 @@ impl Runtime {
                     RuntimeError::Init(format!("Failed to create journal writer: {}", e))
                 })?;
 
+        // Load entity metadata
+        let entity_meta_path = storage.meta_dir().join("entities.json");
+        let entity_manager = EntityManager::load(&entity_meta_path)
+            .unwrap_or_else(|_| EntityManager::new());
+
         Ok(Self {
             config,
             storage,
@@ -168,6 +178,7 @@ impl Runtime {
             branch_manager,
             current_branch,
             actors: HashMap::new(),
+            entity_manager,
             turn_count: 0,
             last_turn_per_actor: HashMap::new(),
         })
@@ -842,6 +853,22 @@ impl Runtime {
     pub fn journal_reader(&self, branch: &BranchId) -> Result<JournalReader> {
         JournalReader::new(self.storage.clone(), branch.clone())
             .map_err(|e| RuntimeError::Journal(e))
+    }
+
+    /// Get reference to entity manager
+    pub fn entity_manager(&self) -> &EntityManager {
+        &self.entity_manager
+    }
+
+    /// Get mutable reference to entity manager
+    pub fn entity_manager_mut(&mut self) -> &mut EntityManager {
+        &mut self.entity_manager
+    }
+
+    /// Persist entity metadata to disk
+    pub fn persist_entities(&self) -> Result<()> {
+        let entity_meta_path = self.storage.meta_dir().join("entities.json");
+        self.entity_manager.save(&entity_meta_path)
     }
 
     /// Get the global schema registry

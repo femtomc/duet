@@ -150,6 +150,7 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "chrono",
+ "once_cell",
  "parking_lot",
  "preserves",
  "proptest",
