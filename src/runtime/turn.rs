@@ -154,7 +154,7 @@ pub enum TurnInput {
         /// Target facet
         facet: FacetId,
         /// Message payload
-        payload: preserves::value::IOValue,
+        payload: preserves::IOValue,
     },
 
     /// Assertion added to the dataspace
@@ -164,7 +164,7 @@ pub enum TurnInput {
         /// Unique handle for this assertion
         handle: Handle,
         /// Assertion value
-        value: preserves::value::IOValue,
+        value: preserves::IOValue,
     },
 
     /// Retraction of a previous assertion
@@ -200,7 +200,7 @@ pub enum TurnInput {
         /// Actor that made the request
         actor: ActorId,
         /// Response payload
-        response: preserves::value::IOValue,
+        response: preserves::IOValue,
     },
 
     /// Remote message from another node (future)
@@ -210,7 +210,7 @@ pub enum TurnInput {
         /// Source turn ID
         source_turn: TurnId,
         /// Message payload
-        payload: preserves::value::IOValue,
+        payload: preserves::IOValue,
     },
 }
 
@@ -222,7 +222,7 @@ pub enum TurnOutput {
         /// Handle for the assertion
         handle: Handle,
         /// Assertion value
-        value: preserves::value::IOValue,
+        value: preserves::IOValue,
     },
 
     /// Retraction made during this turn
@@ -238,7 +238,7 @@ pub enum TurnOutput {
         /// Target facet
         target_facet: FacetId,
         /// Message payload
-        payload: preserves::value::IOValue,
+        payload: preserves::IOValue,
     },
 
     /// Sync acknowledgment
@@ -276,7 +276,7 @@ pub enum TurnOutput {
         /// Service endpoint
         service: String,
         /// Request payload
-        request: preserves::value::IOValue,
+        request: preserves::IOValue,
     },
 }
 
@@ -338,21 +338,16 @@ impl TurnRecord {
 
     /// Encode this turn record to bytes using preserves
     pub fn encode(&self) -> anyhow::Result<Vec<u8>> {
-        use preserves::value::{PackedWriter, Writer, NoEmbeddedDomainCodec};
+        use preserves::PackedWriter;
         let mut buf = Vec::new();
         let mut writer = PackedWriter::new(&mut buf);
-        let value = preserves::value::to_value(self);
-        writer.write(&mut NoEmbeddedDomainCodec, &value)?;
+        preserves::serde::to_writer(&mut writer, self)?;
         Ok(buf)
     }
 
     /// Decode a turn record from bytes
     pub fn decode(bytes: &[u8]) -> anyhow::Result<Self> {
-        use preserves::value::{PackedReader, Reader, NoEmbeddedDomainCodec, BytesBinarySource};
-        let mut source = BytesBinarySource::new(bytes);
-        let mut reader = PackedReader::new(&mut source, NoEmbeddedDomainCodec);
-        let value = reader.demand_next(true)?;
-        Ok(preserves::value::from_value(&value)?)
+        Ok(preserves::serde::from_bytes(bytes)?)
     }
 }
 
@@ -360,7 +355,7 @@ impl TurnRecord {
 ///
 /// Uses Blake3 to hash the canonical representation of (actor, clock, inputs)
 pub fn compute_turn_id(actor: &ActorId, clock: &LogicalClock, inputs: &[TurnInput]) -> TurnId {
-    use preserves::value::{PackedWriter, Writer};
+    use preserves::PackedWriter;
 
     let mut hasher = Hasher::new();
 
@@ -372,11 +367,9 @@ pub fn compute_turn_id(actor: &ActorId, clock: &LogicalClock, inputs: &[TurnInpu
 
     // Hash inputs (using preserves canonical encoding)
     for input in inputs {
-        use preserves::value::NoEmbeddedDomainCodec;
-        let value = preserves::value::to_value(input);
         let mut buf = Vec::new();
         let mut writer = PackedWriter::new(&mut buf);
-        if writer.write(&mut NoEmbeddedDomainCodec, &value).is_ok() {
+        if preserves::serde::to_writer(&mut writer, input).is_ok() {
             hasher.update(&buf);
         }
     }
@@ -396,7 +389,7 @@ mod tests {
         let inputs = vec![TurnInput::ExternalMessage {
             actor: actor.clone(),
             facet: FacetId::new(),
-            payload: preserves::value::Value::symbol("test-data").wrap(),
+            payload: preserves::IOValue::symbol("test-data"),
         }];
 
         let id1 = compute_turn_id(&actor, &clock, &inputs);
@@ -412,12 +405,12 @@ mod tests {
         let inputs1 = vec![TurnInput::ExternalMessage {
             actor: actor.clone(),
             facet: FacetId::new(),
-            payload: preserves::value::Value::symbol("test-data1").wrap(),
+            payload: preserves::IOValue::symbol("test-data1"),
         }];
         let inputs2 = vec![TurnInput::ExternalMessage {
             actor: actor.clone(),
             facet: FacetId::new(),
-            payload: preserves::value::Value::symbol("test-data2").wrap(),
+            payload: preserves::IOValue::symbol("test-data2"),
         }];
 
         let id1 = compute_turn_id(&actor, &clock, &inputs1);

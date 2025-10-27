@@ -36,7 +36,7 @@ impl Control {
         &mut self,
         _actor: ActorId,
         _facet: FacetId,
-        _payload: preserves::value::IOValue,
+        _payload: preserves::IOValue,
     ) -> Result<TurnId> {
         // TODO: Implement message sending
         unimplemented!("send_message not yet implemented")

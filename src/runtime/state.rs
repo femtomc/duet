@@ -59,7 +59,7 @@ pub struct AssertionSet {
 }
 
 /// Assertion value (preserves value)
-pub type AssertionValue = preserves::value::IOValue;
+pub type AssertionValue = preserves::IOValue;
 
 /// Delta for assertion changes
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -226,7 +226,7 @@ pub struct CapabilityMetadata {
     /// Capability ID
     pub id: CapId,
     /// Attenuation caveats
-    pub attenuation: Vec<preserves::value::IOValue>,
+    pub attenuation: Vec<preserves::IOValue>,
     /// Status
     pub status: CapabilityStatus,
 }
@@ -381,7 +381,7 @@ mod tests {
         let mut set = AssertionSet::new();
         let actor = ActorId::new();
         let handle = Handle::new();
-        let value: preserves::value::IOValue = preserves::value::Value::symbol("test-value").wrap();
+        let value: preserves::IOValue = preserves::IOValue::symbol("test-value");
         let version = Uuid::new_v4();
 
         // Add assertion
@@ -409,7 +409,7 @@ mod tests {
         let actor = ActorId::new();
         let handle1 = Handle::new();
         let handle2 = Handle::new();
-        let value: preserves::value::IOValue = preserves::value::Value::symbol("test-value").wrap();
+        let value: preserves::IOValue = preserves::IOValue::symbol("test-value");
         let v1 = Uuid::new_v4();
         let v2 = Uuid::new_v4();
 

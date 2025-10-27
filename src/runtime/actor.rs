@@ -184,7 +184,7 @@ pub struct Activation {
     pub outputs: Vec<TurnOutput>,
 
     /// Assertions made
-    pub assertions_added: Vec<(Handle, preserves::value::IOValue)>,
+    pub assertions_added: Vec<(Handle, preserves::IOValue)>,
 
     /// Assertions retracted
     pub assertions_retracted: Vec<Handle>,
@@ -219,7 +219,7 @@ impl Activation {
     }
 
     /// Make an assertion
-    pub fn assert(&mut self, handle: Handle, value: preserves::value::IOValue) {
+    pub fn assert(&mut self, handle: Handle, value: preserves::IOValue) {
         self.assertions_added.push((handle.clone(), value.clone()));
         self.outputs.push(TurnOutput::Assert { handle, value });
     }
@@ -235,7 +235,7 @@ impl Activation {
         &mut self,
         target_actor: ActorId,
         target_facet: FacetId,
-        payload: preserves::value::IOValue,
+        payload: preserves::IOValue,
     ) {
         self.outputs.push(TurnOutput::Message {
             target_actor,
@@ -329,7 +329,7 @@ pub trait Entity: Send + Sync {
     fn on_message(
         &self,
         activation: &mut Activation,
-        payload: &preserves::value::IOValue,
+        payload: &preserves::IOValue,
     ) -> anyhow::Result<()>;
 
     /// Handle a new assertion (pattern match)
@@ -337,7 +337,7 @@ pub trait Entity: Send + Sync {
         &self,
         _activation: &mut Activation,
         _handle: &Handle,
-        _value: &preserves::value::IOValue,
+        _value: &preserves::IOValue,
     ) -> anyhow::Result<()> {
         Ok(())
     }
@@ -367,7 +367,7 @@ mod tests {
         fn on_message(
             &self,
             activation: &mut Activation,
-            payload: &preserves::value::IOValue,
+            payload: &preserves::IOValue,
         ) -> anyhow::Result<()> {
             // Echo the message back
             activation.send_message(
@@ -418,7 +418,7 @@ mod tests {
         let mut activation = Activation::new(actor_id, facet_id);
 
         let handle = Handle::new();
-        let value = preserves::value::Value::symbol("test-data").wrap();
+        let value = preserves::IOValue::symbol("test-data");
 
         activation.assert(handle.clone(), value);
         assert_eq!(activation.assertions_added.len(), 1);
@@ -439,7 +439,7 @@ mod tests {
         let input = TurnInput::ExternalMessage {
             actor: actor.id.clone(),
             facet,
-            payload: preserves::value::Value::symbol("test-message").wrap(),
+            payload: preserves::IOValue::symbol("test-message"),
         };
 
         let result = actor.execute_turn(vec![input]);

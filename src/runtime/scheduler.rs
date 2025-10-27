@@ -146,7 +146,7 @@ mod tests {
         let input = TurnInput::ExternalMessage {
             actor: actor.clone(),
             facet: FacetId::new(),
-            payload: preserves::value::Value::symbol("empty").wrap(),
+            payload: preserves::IOValue::symbol("empty"),
         };
 
         scheduler.enqueue(actor, input, ScheduleCause::External);
@@ -162,7 +162,7 @@ mod tests {
             let input = TurnInput::ExternalMessage {
                 actor: actor.clone(),
                 facet: FacetId::new(),
-                payload: preserves::value::Value::SignedInteger(i.into()).wrap(),
+                payload: preserves::IOValue::new(preserves::SignedInteger::from(i)),
             };
             scheduler.enqueue(actor.clone(), input, ScheduleCause::External);
         }
@@ -182,7 +182,7 @@ mod tests {
         let input = TurnInput::ExternalMessage {
             actor: actor.clone(),
             facet: FacetId::new(),
-            payload: preserves::value::Value::symbol("empty").wrap(),
+            payload: preserves::IOValue::symbol("empty"),
         };
 
         scheduler.enqueue(actor.clone(), input, ScheduleCause::External);

@@ -19,7 +19,7 @@ pub struct Pattern {
     pub id: PatternId,
 
     /// Pattern expression
-    pub pattern: preserves::value::IOValue,
+    pub pattern: preserves::IOValue,
 
     /// Facet that registered this pattern
     pub facet: FacetId,
@@ -35,7 +35,7 @@ pub struct PatternMatch {
     pub handle: Handle,
 
     /// Matched value
-    pub value: preserves::value::IOValue,
+    pub value: preserves::IOValue,
 }
 
 /// Pattern matcher and subscription manager
@@ -71,7 +71,7 @@ impl PatternEngine {
     }
 
     /// Evaluate all patterns against a new assertion
-    pub fn eval_assert(&mut self, _handle: &Handle, _value: &preserves::value::IOValue) -> Vec<PatternMatch> {
+    pub fn eval_assert(&mut self, _handle: &Handle, _value: &preserves::IOValue) -> Vec<PatternMatch> {
         // TODO: Implement pattern matching logic
         Vec::new()
     }
@@ -103,7 +103,7 @@ mod tests {
         let mut engine = PatternEngine::new();
         let pattern = Pattern {
             id: Uuid::new_v4(),
-            pattern: preserves::value::Value::symbol("test-pattern").wrap(),
+            pattern: preserves::IOValue::symbol("test-pattern"),
             facet: FacetId::new(),
         };
 
