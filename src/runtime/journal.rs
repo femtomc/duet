@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write, BufReader};
 use std::collections::HashMap;
-use anyhow::{Result, Context};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use super::turn::{TurnId, TurnRecord, BranchId};
@@ -20,29 +20,47 @@ const MAX_SEGMENT_SIZE: u64 = 10 * 1024 * 1024;
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct JournalIndex {
     /// Map from turn ID to (segment number, byte offset)
-    entries: HashMap<String, (u64, u64)>,
+    pub(crate) entries: HashMap<String, (u64, u64)>,
 }
 
 impl JournalIndex {
     /// Add an entry to the index
-    fn add(&mut self, turn_id: &TurnId, segment: u64, offset: u64) {
+    pub(crate) fn add(&mut self, turn_id: &TurnId, segment: u64, offset: u64) {
         self.entries.insert(turn_id.as_str().to_string(), (segment, offset));
     }
 
     /// Get location for a turn ID
-    fn get(&self, turn_id: &TurnId) -> Option<(u64, u64)> {
+    pub(crate) fn get(&self, turn_id: &TurnId) -> Option<(u64, u64)> {
         self.entries.get(turn_id.as_str()).copied()
     }
 
-    /// Save index to disk
-    fn save(&self, path: &Path) -> Result<()> {
+    /// Save index to disk atomically
+    pub(crate) fn save(&self, path: &Path) -> Result<()> {
         let data = serde_json::to_vec_pretty(self)?;
-        std::fs::write(path, data)?;
+
+        // Write to temp file first
+        let temp_path = path.with_extension("tmp");
+        std::fs::write(&temp_path, &data)?;
+
+        // Fsync the temp file
+        let file = std::fs::File::open(&temp_path)?;
+        file.sync_all()?;
+        drop(file);
+
+        // Atomic rename
+        std::fs::rename(&temp_path, path)?;
+
+        // Fsync parent directory to ensure rename is durable
+        if let Some(parent) = path.parent() {
+            let dir = std::fs::File::open(parent)?;
+            dir.sync_all()?;
+        }
+
         Ok(())
     }
 
     /// Load index from disk
-    fn load(path: &Path) -> Result<Self> {
+    pub(crate) fn load(path: &Path) -> Result<Self> {
         if !path.exists() {
             return Ok(Self::default());
         }
@@ -64,14 +82,36 @@ pub struct JournalWriter {
 
 impl JournalWriter {
     /// Create a new journal writer
+    ///
+    /// IMPORTANT: Caller must ensure validate_and_repair() has been run
+    /// and the index has been rebuilt if needed before calling this.
     pub fn new(storage: Storage, branch: BranchId) -> Result<Self> {
         // Ensure journal directory exists
         let journal_dir = storage.branch_journal_dir(&branch);
         std::fs::create_dir_all(&journal_dir)?;
 
-        // Load or create index
+        // Load index (should be clean after repair)
         let index_path = storage.branch_meta_dir(&branch).join("journal.index");
         let index = JournalIndex::load(&index_path).unwrap_or_default();
+
+        // Find the latest segment
+        let (current_segment, current_segment_size) = Self::find_latest_segment(&journal_dir)?;
+
+        Ok(Self {
+            storage,
+            branch,
+            current_segment,
+            current_segment_size,
+            writer: None,
+            index,
+        })
+    }
+
+    /// Create a new journal writer after recovery with a fresh index
+    pub fn new_with_index(storage: Storage, branch: BranchId, index: JournalIndex) -> Result<Self> {
+        // Ensure journal directory exists
+        let journal_dir = storage.branch_journal_dir(&branch);
+        std::fs::create_dir_all(&journal_dir)?;
 
         // Find the latest segment
         let (current_segment, current_segment_size) = Self::find_latest_segment(&journal_dir)?;
@@ -113,6 +153,14 @@ impl JournalWriter {
     }
 
     /// Append a turn record to the journal
+    ///
+    /// CRITICAL DURABILITY ORDERING:
+    /// 1. Write record to segment
+    /// 2. Flush and fsync segment to disk
+    /// 3. Update in-memory index
+    /// 4. Save and fsync index to disk
+    ///
+    /// This ensures the index never points to uncommitted data.
     pub fn append(&mut self, record: &TurnRecord) -> Result<()> {
         let encoded = record.encode()?;
         let record_size = encoded.len() as u64;
@@ -130,16 +178,22 @@ impl JournalWriter {
         // Record current offset before writing
         let offset = self.current_segment_size;
 
-        // Write the record
+        // Write the record to the segment
         let writer = self.writer.as_mut().unwrap();
         writer.write_all(&encoded)?;
+
+        // Flush buffered writes
         writer.flush()?;
 
-        // Update index
+        // CRITICAL: Fsync the segment to disk BEFORE updating the index
+        // This ensures durability - the index will never point to uncommitted data
+        writer.get_mut().sync_all()?;
+
+        // Now it's safe to update the index
         self.index.add(&record.turn_id, self.current_segment, offset);
         self.current_segment_size += record_size;
 
-        // Periodically save index
+        // Periodically save index (already has its own fsync)
         self.save_index()?;
 
         Ok(())
@@ -158,9 +212,10 @@ impl JournalWriter {
 
     /// Rotate to a new segment
     fn rotate_segment(&mut self) -> Result<()> {
-        // Flush and close current writer
+        // Flush, fsync, and close current writer
         if let Some(mut writer) = self.writer.take() {
             writer.flush()?;
+            writer.get_mut().sync_all()?; // Ensure segment is durable
         }
 
         // Move to next segment
@@ -185,10 +240,11 @@ impl JournalWriter {
             .join(format!("segment-{:06}.turnlog", segment))
     }
 
-    /// Flush any buffered writes
+    /// Flush any buffered writes and ensure durability
     pub fn flush(&mut self) -> Result<()> {
         if let Some(ref mut writer) = self.writer {
             writer.flush()?;
+            writer.get_mut().sync_all()?; // Ensure durability
         }
         self.save_index()?;
         Ok(())
@@ -212,15 +268,27 @@ impl JournalReader {
         Ok(Self { storage, branch, index })
     }
 
+    /// Create a new journal reader with an empty index
+    ///
+    /// Used during crash recovery when the index file doesn't exist yet
+    pub fn new_empty(storage: Storage, branch: BranchId) -> Self {
+        Self {
+            storage,
+            branch,
+            index: JournalIndex::default(),
+        }
+    }
+
     /// Read a specific turn record
     pub fn read(&self, turn_id: &TurnId) -> Result<TurnRecord> {
+        use anyhow::Context;
+
         let (segment, offset) = self.index
             .get(turn_id)
             .context("Turn ID not found in index")?;
 
         let segment_path = self.segment_path(segment);
-        let mut file = File::open(&segment_path)
-            .context("Failed to open segment file")?;
+        let mut file = File::open(&segment_path)?;
 
         // Seek to the offset
         use std::io::Seek;
@@ -235,6 +303,8 @@ impl JournalReader {
 
     /// Iterate from a specific turn
     pub fn iter_from(&self, turn_id: &TurnId) -> Result<JournalIterator> {
+        use anyhow::Context;
+
         let (segment, offset) = self.index
             .get(turn_id)
             .context("Turn ID not found in index")?;
