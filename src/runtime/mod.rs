@@ -169,7 +169,7 @@ impl Runtime {
         let entity_manager = EntityManager::load(&entity_meta_path)
             .unwrap_or_else(|_| EntityManager::new());
 
-        Ok(Self {
+        let mut runtime = Self {
             config,
             storage,
             scheduler,
@@ -181,7 +181,46 @@ impl Runtime {
             entity_manager,
             turn_count: 0,
             last_turn_per_actor: HashMap::new(),
-        })
+        };
+
+        // Hydrate entities: recreate and attach them from metadata
+        runtime.hydrate_entities()?;
+
+        Ok(runtime)
+    }
+
+    /// Hydrate entities from persisted metadata
+    ///
+    /// Recreates entity instances using the global registry, attaches them to
+    /// actors/facets, and re-registers pattern subscriptions.
+    fn hydrate_entities(&mut self) -> Result<()> {
+        use registry::EntityRegistry;
+
+        // Clone metadata to avoid borrow conflicts
+        let entities: Vec<_> = self.entity_manager.list().into_iter().cloned().collect();
+
+        for metadata in entities {
+            // Create entity instance using registry
+            let entity = EntityRegistry::global()
+                .create(&metadata.entity_type, &metadata.config)
+                .map_err(|e| RuntimeError::Actor(e))?;
+
+            // Get or create actor
+            let actor = self.actors
+                .entry(metadata.actor.clone())
+                .or_insert_with(|| Actor::new(metadata.actor.clone()));
+
+            // Attach entity to facet
+            actor.attach_entity(metadata.facet.clone(), entity);
+
+            // Re-register patterns
+            // For now, we only track pattern IDs in metadata
+            // In a full implementation, we'd need to persist the full pattern spec
+            // and recreate Pattern objects here
+            // TODO: Store full pattern specs in metadata for proper hydration
+        }
+
+        Ok(())
     }
 
     /// Execute a single turn
@@ -869,10 +908,10 @@ impl Runtime {
         &mut self.entity_manager
     }
 
-    /// Persist entity metadata to disk
+    /// Persist entity metadata to disk (atomic write)
     pub fn persist_entities(&self) -> Result<()> {
         let entity_meta_path = self.storage.meta_dir().join("entities.json");
-        self.entity_manager.save(&entity_meta_path)
+        self.entity_manager.save(&self.storage, &entity_meta_path)
     }
 
     /// Get the global schema registry

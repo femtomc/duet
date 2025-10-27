@@ -187,8 +187,8 @@ impl Control {
 
     /// Register a pattern subscription for an entity
     ///
-    /// Associates the pattern with the entity in metadata so it can be
-    /// re-registered during hydration/replay.
+    /// Registers the pattern with the actor and persists the pattern ID
+    /// in entity metadata for re-registration during hydration.
     pub fn register_pattern_for_entity(
         &mut self,
         entity_id: uuid::Uuid,
@@ -196,9 +196,27 @@ impl Control {
     ) -> Result<uuid::Uuid> {
         let pattern_id = pattern.id;
 
+        // Get actor from entity metadata
+        let metadata = self.runtime.entity_manager()
+            .get(&entity_id)
+            .ok_or_else(|| super::error::RuntimeError::Actor(
+                super::error::ActorError::NotFound(format!("Entity {}", entity_id))
+            ))?;
+
+        let actor_id = metadata.actor.clone();
+
+        // Register pattern with the actor
+        let actor = self.runtime.actors
+            .get(&actor_id)
+            .ok_or_else(|| super::error::RuntimeError::Actor(
+                super::error::ActorError::NotFound(format!("Actor {}", actor_id.0))
+            ))?;
+
+        actor.register_pattern(pattern);
+
         // Track the pattern ID in entity metadata
-        if let Some(metadata) = self.runtime.entity_manager_mut().entities.get_mut(&entity_id) {
-            metadata.patterns.push(pattern_id);
+        if let Some(meta) = self.runtime.entity_manager_mut().entities.get_mut(&entity_id) {
+            meta.patterns.push(pattern_id);
         }
 
         // Persist entity metadata
@@ -208,15 +226,33 @@ impl Control {
     }
 
     /// Unregister an entity instance
+    ///
+    /// Removes the entity from the actor, unregisters its patterns,
+    /// and deletes its metadata.
     pub fn unregister_entity(&mut self, entity_id: uuid::Uuid) -> Result<bool> {
-        let removed = self.runtime.entity_manager_mut().unregister(&entity_id);
+        // Get metadata before removing
+        let metadata = match self.runtime.entity_manager().get(&entity_id) {
+            Some(meta) => meta.clone(),
+            None => return Ok(false),
+        };
 
-        if removed.is_some() {
-            self.runtime.persist_entities()?;
-            Ok(true)
-        } else {
-            Ok(false)
+        // Remove entity from actor
+        if let Some(actor) = self.runtime.actors.get(&metadata.actor) {
+            actor.remove_entities_from_facet(&metadata.facet);
+
+            // Unregister all patterns
+            for pattern_id in &metadata.patterns {
+                actor.unregister_pattern(*pattern_id);
+            }
         }
+
+        // Remove from entity manager
+        self.runtime.entity_manager_mut().unregister(&entity_id);
+
+        // Persist updated metadata
+        self.runtime.persist_entities()?;
+
+        Ok(true)
     }
 
     /// List all registered entities

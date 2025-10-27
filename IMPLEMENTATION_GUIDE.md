@@ -219,7 +219,7 @@ The runtime provides infrastructure for registering entity types and persisting 
   - Implement `restore_state()` to hydrate from snapshot during replay
   - **Merge behavior**: If two branches have different private state, a merge warning is generated and one state wins arbitrarily. This is unavoidable for non-CRDT state—prefer dataspace-backed state when possible.
 
-- **Pattern Subscriptions**: Pattern IDs are tracked in entity metadata so they can be re-registered during hydration. Entities rebuilt from metadata restore their subscriptions before replay continues.
+- **Pattern Subscriptions**: Pattern IDs are tracked in entity metadata. Full pattern re-registration during hydration requires storing the complete pattern specification (not just IDs) in metadata—this is a TODO for complete hydration support. Current implementation recreates entities and attaches them to actors/facets on startup.
 
 ### 6.4 `runtime::scheduler`
 - Maintain ready queues per actor, keyed by logical clock and causal dependencies.  

@@ -117,15 +117,12 @@ impl SnapshotIndex {
             .map(|e| e.turn_count)
     }
 
-    /// Save index to JSON
-    pub fn save(&self, path: &std::path::Path) -> SnapshotResult<()> {
+    /// Save index to JSON (atomic write)
+    pub fn save(&self, storage: &Storage, path: &std::path::Path) -> SnapshotResult<()> {
         let data = serde_json::to_vec_pretty(self)
             .map_err(|e| SnapshotError::InvalidFormat(e.to_string()))?;
 
-        std::fs::write(path, data)
-            .map_err(|e| SnapshotError::Storage(
-                super::error::StorageError::Io(e)
-            ))?;
+        storage.write_atomic(path, &data)?;
 
         Ok(())
     }
@@ -192,9 +189,9 @@ impl SnapshotManager {
                 snapshot.metadata.turn_count,
             );
 
-            // Persist index
+            // Persist index (atomic write)
             let index_path = self.storage.meta_dir().join("snapshots.json");
-            index.save(&index_path)?;
+            index.save(&self.storage, &index_path)?;
         }
 
         Ok(())
@@ -365,6 +362,7 @@ mod tests {
         use tempfile::TempDir;
 
         let temp = TempDir::new().unwrap();
+        let storage = Storage::new(temp.path().to_path_buf());
         let index_path = temp.path().join("snapshots.json");
 
         let mut index = SnapshotIndex::new();
@@ -373,8 +371,8 @@ mod tests {
 
         index.add(&branch, turn.clone(), 10);
 
-        // Save
-        index.save(&index_path).unwrap();
+        // Save (atomic)
+        index.save(&storage, &index_path).unwrap();
 
         // Load
         let loaded = SnapshotIndex::load(&index_path).unwrap();

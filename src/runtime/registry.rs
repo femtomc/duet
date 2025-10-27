@@ -194,13 +194,12 @@ impl EntityManager {
             .collect()
     }
 
-    /// Save entity metadata to JSON file
-    pub fn save(&self, path: &std::path::Path) -> Result<()> {
+    /// Save entity metadata to JSON file (atomic write)
+    pub fn save(&self, storage: &super::storage::Storage, path: &std::path::Path) -> Result<()> {
         let data = serde_json::to_vec_pretty(&self.entities)
             .map_err(super::error::StorageError::Json)?;
 
-        std::fs::write(path, &data)
-            .map_err(super::error::StorageError::Io)?;
+        storage.write_atomic(path, &data)?;
 
         Ok(())
     }
@@ -231,6 +230,7 @@ impl Default for EntityManager {
 mod tests {
     use super::*;
     use super::super::actor::Activation;
+    use super::super::storage::Storage;
 
     struct TestEntity {
         name: String,
@@ -327,6 +327,7 @@ mod tests {
         use tempfile::TempDir;
 
         let temp = TempDir::new().unwrap();
+        let storage = Storage::new(temp.path().to_path_buf());
         let meta_path = temp.path().join("entities.json");
 
         let mut manager = EntityManager::new();
@@ -343,8 +344,8 @@ mod tests {
         let id = metadata.id;
         manager.register(metadata);
 
-        // Save to disk
-        manager.save(&meta_path).unwrap();
+        // Save to disk (atomic)
+        manager.save(&storage, &meta_path).unwrap();
 
         // Load from disk
         let loaded = EntityManager::load(&meta_path).unwrap();

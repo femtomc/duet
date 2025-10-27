@@ -230,6 +230,18 @@ impl Actor {
         entities.entry(facet).or_insert_with(Vec::new).push(entity);
     }
 
+    /// Remove all entities from a facet
+    ///
+    /// Returns the number of entities removed.
+    pub fn remove_entities_from_facet(&self, facet: &FacetId) -> usize {
+        let mut entities = self.entities.write();
+        if let Some(entity_list) = entities.remove(facet) {
+            entity_list.len()
+        } else {
+            0
+        }
+    }
+
     /// Register a pattern subscription
     pub fn register_pattern(&self, pattern: Pattern) -> uuid::Uuid {
         let mut engine = self.pattern_engine.write();
