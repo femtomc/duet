@@ -483,20 +483,16 @@ impl Runtime {
             let record = result.map_err(|e| RuntimeError::Journal(e))?;
 
             // Stop when we reach the target turn
-            if record.turn_id == target_turn {
-                self.turn_count += 1;
-                self.last_turn_per_actor.insert(record.actor.clone(), record.turn_id.clone());
-                break;
-            }
-
             // Skip turns before the snapshot
-            if start_turn_id != TurnId::new("turn_00000000".to_string())
-                && record.turn_id <= start_turn_id {
+            if (!start_turn_id.as_str().eq("turn_00000000")) && record.turn_id <= start_turn_id {
+                // Even if this is the target turn, we shouldn't apply it yet.
+                if record.turn_id == target_turn {
+                    break;
+                }
                 continue;
             }
 
             // Apply the turn's state delta to runtime
-            // Get or create actor
             let actor = self.actors.entry(record.actor.clone())
                 .or_insert_with(|| Actor::new(record.actor.clone()));
 
@@ -520,6 +516,10 @@ impl Runtime {
 
             self.turn_count += 1;
             self.last_turn_per_actor.insert(record.actor.clone(), record.turn_id.clone());
+
+            if record.turn_id == target_turn {
+                break;
+            }
         }
 
         // Update branch head
