@@ -4,6 +4,7 @@
 //! and time-travel operations.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 use super::error::{SnapshotError, SnapshotResult};
 use super::state::{AssertionSet, CapabilityMap, FacetMap};
@@ -68,16 +69,104 @@ pub struct SnapshotMetadata {
     pub turn_id: TurnId,
 }
 
+/// Snapshot index entry mapping turn_id to turn_count
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotIndexEntry {
+    /// Turn ID
+    pub turn_id: TurnId,
+    /// Turn count (for ordering)
+    pub turn_count: u64,
+}
+
+/// Snapshot index for fast lookups
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SnapshotIndex {
+    /// Map of branch -> list of snapshot entries (sorted by turn_count)
+    pub snapshots: HashMap<String, Vec<SnapshotIndexEntry>>,
+}
+
+impl SnapshotIndex {
+    /// Create a new empty index
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add a snapshot entry
+    pub fn add(&mut self, branch: &BranchId, turn_id: TurnId, turn_count: u64) {
+        let entry = SnapshotIndexEntry { turn_id, turn_count };
+
+        self.snapshots
+            .entry(branch.0.clone())
+            .or_insert_with(Vec::new)
+            .push(entry);
+
+        // Keep sorted by turn_count
+        if let Some(entries) = self.snapshots.get_mut(&branch.0) {
+            entries.sort_by_key(|e| e.turn_count);
+        }
+    }
+
+    /// Find the nearest snapshot <= target turn_id
+    pub fn find_nearest(&self, branch: &BranchId, target: &TurnId) -> Option<u64> {
+        let entries = self.snapshots.get(&branch.0)?;
+
+        // Find the latest snapshot whose turn_id <= target
+        entries.iter()
+            .rev()
+            .find(|e| e.turn_id <= *target)
+            .map(|e| e.turn_count)
+    }
+
+    /// Save index to JSON
+    pub fn save(&self, path: &std::path::Path) -> SnapshotResult<()> {
+        let data = serde_json::to_vec_pretty(self)
+            .map_err(|e| SnapshotError::InvalidFormat(e.to_string()))?;
+
+        std::fs::write(path, data)
+            .map_err(|e| SnapshotError::Storage(
+                super::error::StorageError::Io(e)
+            ))?;
+
+        Ok(())
+    }
+
+    /// Load index from JSON
+    pub fn load(path: &std::path::Path) -> SnapshotResult<Self> {
+        if !path.exists() {
+            return Ok(Self::new());
+        }
+
+        let data = std::fs::read(path)
+            .map_err(|e| SnapshotError::Storage(
+                super::error::StorageError::Io(e)
+            ))?;
+
+        let index = serde_json::from_slice(&data)
+            .map_err(|e| SnapshotError::InvalidFormat(e.to_string()))?;
+
+        Ok(index)
+    }
+}
+
 /// Snapshot manager
 pub struct SnapshotManager {
     storage: Storage,
     interval: u64,
+    index: std::sync::Arc<parking_lot::RwLock<SnapshotIndex>>,
 }
 
 impl SnapshotManager {
     /// Create a new snapshot manager
     pub fn new(storage: Storage, interval: u64) -> Self {
-        Self { storage, interval }
+        // Load snapshot index
+        let index_path = storage.meta_dir().join("snapshots.json");
+        let index = SnapshotIndex::load(&index_path).unwrap_or_default();
+
+        Self {
+            storage,
+            interval,
+            index: std::sync::Arc::new(parking_lot::RwLock::new(index)),
+        }
     }
 
     /// Save a snapshot using preserves encoding
@@ -93,6 +182,20 @@ impl SnapshotManager {
             .map_err(|e| SnapshotError::InvalidFormat(e.to_string()))?;
 
         self.storage.write_atomic(&snapshot_path, &buf)?;
+
+        // Update snapshot index
+        {
+            let mut index = self.index.write();
+            index.add(
+                &snapshot.branch,
+                snapshot.turn_id.clone(),
+                snapshot.metadata.turn_count,
+            );
+
+            // Persist index
+            let index_path = self.storage.meta_dir().join("snapshots.json");
+            index.save(&index_path)?;
+        }
 
         Ok(())
     }
@@ -121,13 +224,23 @@ impl SnapshotManager {
 
     /// Find the nearest snapshot at or before a given turn
     ///
-    /// Loads snapshot metadata to find the best snapshot whose turn_id <= target.
+    /// Uses the snapshot index for fast lookup. Falls back to scanning
+    /// if index is unavailable or incomplete.
     /// Returns the turn_count of the best snapshot, or None if no snapshots exist.
     pub fn nearest_snapshot(
         &self,
         branch: &BranchId,
         turn_id: &TurnId,
     ) -> SnapshotResult<Option<u64>> {
+        // Try index first
+        {
+            let index = self.index.read();
+            if let Some(turn_count) = index.find_nearest(branch, turn_id) {
+                return Ok(Some(turn_count));
+            }
+        }
+
+        // Fallback: scan directory and load snapshots
         let snapshot_dir = self.storage.branch_snapshot_dir(branch);
 
         if !snapshot_dir.exists() {
@@ -160,22 +273,18 @@ impl SnapshotManager {
         // Sort by turn count (oldest first)
         snapshot_counts.sort_unstable();
 
-        // Find the latest snapshot whose turn_id <= target
-        // We need to load each snapshot's metadata to check the turn_id
+        // Find the latest snapshot whose turn_id <= target by loading metadata
         let mut best_count = None;
 
         for count in snapshot_counts.iter().rev() {
-            // Load this snapshot's metadata to check turn_id
             match self.load_by_count(branch, *count) {
                 Ok(snapshot) => {
-                    // Check if this snapshot's turn_id <= target
                     if snapshot.metadata.turn_id <= *turn_id {
                         best_count = Some(*count);
                         break;
                     }
                 }
                 Err(_) => {
-                    // Skip corrupted snapshots
                     continue;
                 }
             }
@@ -219,5 +328,56 @@ mod tests {
         assert!(manager.should_snapshot(50));
         assert!(!manager.should_snapshot(51));
         assert!(manager.should_snapshot(100));
+    }
+
+    #[test]
+    fn test_snapshot_index() {
+        let mut index = SnapshotIndex::new();
+
+        let branch = BranchId::main();
+        let turn1 = TurnId::new("turn_00000001".to_string());
+        let turn2 = TurnId::new("turn_00000002".to_string());
+        let turn3 = TurnId::new("turn_00000003".to_string());
+
+        // Add snapshots
+        index.add(&branch, turn1.clone(), 10);
+        index.add(&branch, turn2.clone(), 20);
+        index.add(&branch, turn3.clone(), 30);
+
+        // Find nearest to turn2
+        assert_eq!(index.find_nearest(&branch, &turn2), Some(20));
+
+        // Find nearest to turn between 2 and 3
+        let turn_between = TurnId::new("turn_00000002a".to_string());
+        assert_eq!(index.find_nearest(&branch, &turn_between), Some(20));
+
+        // Find nearest beyond all snapshots
+        let turn_future = TurnId::new("turn_00000999".to_string());
+        assert_eq!(index.find_nearest(&branch, &turn_future), Some(30));
+
+        // Find nearest before all snapshots
+        let turn_past = TurnId::new("turn_00000000".to_string());
+        assert_eq!(index.find_nearest(&branch, &turn_past), None);
+    }
+
+    #[test]
+    fn test_snapshot_index_persistence() {
+        use tempfile::TempDir;
+
+        let temp = TempDir::new().unwrap();
+        let index_path = temp.path().join("snapshots.json");
+
+        let mut index = SnapshotIndex::new();
+        let branch = BranchId::main();
+        let turn = TurnId::new("turn_00000010".to_string());
+
+        index.add(&branch, turn.clone(), 10);
+
+        // Save
+        index.save(&index_path).unwrap();
+
+        // Load
+        let loaded = SnapshotIndex::load(&index_path).unwrap();
+        assert_eq!(loaded.find_nearest(&branch, &turn), Some(10));
     }
 }

@@ -123,6 +123,7 @@ pub struct EntityMetadata {
 pub mod preserves_text_serde {
     use serde::{Deserialize, Deserializer, Serializer};
 
+    /// Serialize preserves::IOValue as text
     pub fn serialize<S>(value: &preserves::IOValue, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -131,6 +132,7 @@ pub mod preserves_text_serde {
         serializer.serialize_str(&text)
     }
 
+    /// Deserialize preserves::IOValue from text
     pub fn deserialize<'de, D>(deserializer: D) -> Result<preserves::IOValue, D::Error>
     where
         D: Deserializer<'de>,

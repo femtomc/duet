@@ -196,11 +196,7 @@ impl Control {
     ) -> Result<uuid::Uuid> {
         let pattern_id = pattern.id;
 
-        // Register pattern with the actor
-        let actor = &pattern.facet; // Get actor from facet (simplified)
-        // In a full implementation, we'd look up actor from facet in entity metadata
-
-        // For now, just track the pattern ID in entity metadata
+        // Track the pattern ID in entity metadata
         if let Some(metadata) = self.runtime.entity_manager_mut().entities.get_mut(&entity_id) {
             metadata.patterns.push(pattern_id);
         }
