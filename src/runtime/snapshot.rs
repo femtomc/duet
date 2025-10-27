@@ -8,7 +8,27 @@ use serde::{Deserialize, Serialize};
 use super::error::{SnapshotError, SnapshotResult};
 use super::state::{AssertionSet, CapabilityMap, FacetMap};
 use super::storage::Storage;
-use super::turn::{BranchId, TurnId};
+use super::turn::{ActorId, BranchId, FacetId, TurnId};
+
+/// Snapshot of entity private state (for HydratableEntity implementations)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EntityStateSnapshot {
+    /// Entity instance ID
+    pub entity_id: uuid::Uuid,
+
+    /// Actor this entity belongs to
+    pub actor: ActorId,
+
+    /// Facet this entity is attached to
+    pub facet: FacetId,
+
+    /// Entity type name
+    pub entity_type: String,
+
+    /// Private state blob (from HydratableEntity::snapshot_state)
+    #[serde(with = "super::registry::preserves_text_serde")]
+    pub state: preserves::IOValue,
+}
 
 /// Complete runtime snapshot at a specific turn
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,6 +47,9 @@ pub struct RuntimeSnapshot {
 
     /// Capability state
     pub capabilities: CapabilityMap,
+
+    /// Entity private state (for HydratableEntity implementations)
+    pub entity_states: Vec<EntityStateSnapshot>,
 
     /// Metadata
     pub metadata: SnapshotMetadata,

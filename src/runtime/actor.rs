@@ -395,6 +395,14 @@ impl Activation {
 ///
 /// Entities respond to messages, assertions, and other events.
 /// They must be Send + Sync for concurrent access.
+///
+/// # Dataspace-First Design
+///
+/// Entities should express most state via assertions, capabilities, and facets
+/// (the CRDT-backed dataspace). This ensures state is automatically persisted,
+/// replayed during time-travel, and merged conflict-free across branches.
+///
+/// Private state should be rare. If needed, implement HydratableEntity.
 pub trait Entity: Send + Sync {
     /// Handle an incoming message
     fn on_message(
@@ -422,6 +430,55 @@ pub trait Entity: Send + Sync {
     fn on_stop(&self, _activation: &mut Activation) -> ActorResult<()> {
         Ok(())
     }
+}
+
+/// Optional trait for entities with private state that can't live in the dataspace
+///
+/// # When to Use
+///
+/// Most entities should NOT implement this trait. Use it only when:
+/// - State is truly ephemeral/derived and can't be modeled as assertions
+/// - Performance requires caching that's expensive to rebuild from dataspace
+/// - The state is inherently local and non-collaborative
+///
+/// # Merge Behavior
+///
+/// If two branches have different private state for the same entity, a merge
+/// warning is generated. One state wins arbitrarily—this is unavoidable for
+/// non-CRDT state. Prefer dataspace-backed state for conflict-free merges.
+///
+/// # Example
+///
+/// ```ignore
+/// struct CachedEntity {
+///     cache: HashMap<String, Value>,
+/// }
+///
+/// impl HydratableEntity for CachedEntity {
+///     fn snapshot_state(&self) -> preserves::IOValue {
+///         // Serialize cache to preserves
+///         preserves::IOValue::new(self.cache.len())
+///     }
+///
+///     fn restore_state(&mut self, state: &preserves::IOValue) -> ActorResult<()> {
+///         // Restore cache from preserves
+///         self.cache.clear();
+///         Ok(())
+///     }
+/// }
+/// ```
+pub trait HydratableEntity: Entity {
+    /// Capture private state for snapshotting
+    ///
+    /// Returns a preserves value representing this entity's private state.
+    /// Called during snapshot creation.
+    fn snapshot_state(&self) -> preserves::IOValue;
+
+    /// Restore private state from a snapshot
+    ///
+    /// Called during replay/time-travel to restore entity to a previous state.
+    /// Returns an error if restoration fails (e.g., invalid state format).
+    fn restore_state(&mut self, state: &preserves::IOValue) -> ActorResult<()>;
 }
 
 #[cfg(test)]

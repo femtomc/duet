@@ -302,12 +302,16 @@ impl Runtime {
             .cloned()
             .unwrap_or_else(|| TurnId::new(format!("turn_{:08}", self.turn_count)));
 
+        // Capture entity private state (for HydratableEntity implementations)
+        let entity_states = Vec::new(); // TODO: Capture HydratableEntity state when we detect it
+
         let snapshot = RuntimeSnapshot {
             branch: self.current_branch.clone(),
             turn_id: turn_id.clone(),
             assertions: all_assertions,
             facets: all_facets,
             capabilities: all_capabilities,
+            entity_states,
             metadata: snapshot::SnapshotMetadata {
                 created_at: chrono::Utc::now(),
                 turn_count: self.turn_count,

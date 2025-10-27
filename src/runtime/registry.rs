@@ -120,7 +120,7 @@ pub struct EntityMetadata {
 }
 
 /// Custom serde module for preserves::IOValue (serialize as text)
-mod preserves_text_serde {
+pub mod preserves_text_serde {
     use serde::{Deserialize, Deserializer, Serializer};
 
     pub fn serialize<S>(value: &preserves::IOValue, serializer: S) -> Result<S::Ok, S::Error>
@@ -143,7 +143,7 @@ mod preserves_text_serde {
 /// Manager for entity instance metadata and persistence
 pub struct EntityManager {
     /// Registered entities by instance ID
-    entities: HashMap<uuid::Uuid, EntityMetadata>,
+    pub(crate) entities: HashMap<uuid::Uuid, EntityMetadata>,
 }
 
 impl EntityManager {

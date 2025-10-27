@@ -159,7 +159,7 @@ impl Control {
         // Generate entity ID
         let entity_id = uuid::Uuid::new_v4();
 
-        // Create metadata
+        // Create metadata (patterns will be added later via register_pattern_for_entity)
         let metadata = EntityMetadata {
             id: entity_id,
             actor: actor.clone(),
@@ -183,6 +183,32 @@ impl Control {
         self.runtime.persist_entities()?;
 
         Ok(entity_id)
+    }
+
+    /// Register a pattern subscription for an entity
+    ///
+    /// Associates the pattern with the entity in metadata so it can be
+    /// re-registered during hydration/replay.
+    pub fn register_pattern_for_entity(
+        &mut self,
+        entity_id: uuid::Uuid,
+        pattern: super::pattern::Pattern,
+    ) -> Result<uuid::Uuid> {
+        let pattern_id = pattern.id;
+
+        // Register pattern with the actor
+        let actor = &pattern.facet; // Get actor from facet (simplified)
+        // In a full implementation, we'd look up actor from facet in entity metadata
+
+        // For now, just track the pattern ID in entity metadata
+        if let Some(metadata) = self.runtime.entity_manager_mut().entities.get_mut(&entity_id) {
+            metadata.patterns.push(pattern_id);
+        }
+
+        // Persist entity metadata
+        self.runtime.persist_entities()?;
+
+        Ok(pattern_id)
     }
 
     /// Unregister an entity instance
