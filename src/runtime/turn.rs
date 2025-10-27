@@ -49,6 +49,15 @@ impl ActorId {
     pub fn from_uuid(uuid: Uuid) -> Self {
         Self(uuid)
     }
+
+    /// Create an ActorId from a UUID string
+    pub fn new_from_string(s: String) -> Self {
+        // Try to parse as UUID, otherwise generate random
+        match Uuid::parse_str(&s) {
+            Ok(uuid) => Self(uuid),
+            Err(_) => Self::new(),
+        }
+    }
 }
 
 impl Default for ActorId {
@@ -76,6 +85,15 @@ impl FacetId {
     /// Create from a UUID
     pub fn from_uuid(uuid: Uuid) -> Self {
         Self(uuid)
+    }
+
+    /// Create a FacetId from a UUID string
+    pub fn new_from_string(s: String) -> Self {
+        // Try to parse as UUID, otherwise generate random
+        match Uuid::parse_str(&s) {
+            Ok(uuid) => Self(uuid),
+            Err(_) => Self::new(),
+        }
     }
 }
 
