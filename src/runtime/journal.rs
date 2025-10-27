@@ -612,7 +612,7 @@ mod tests {
         let mut writer = JournalWriter::new(storage.clone(), branch.clone()).unwrap();
 
         let actor = ActorId::new();
-        let facet = FacetId::new();
+        let _facet = FacetId::new();
         let clock = LogicalClock::zero();
 
         let record = TurnRecord {
@@ -648,7 +648,7 @@ mod tests {
         let mut writer = JournalWriter::new(storage.clone(), branch.clone()).unwrap();
 
         let actor = ActorId::new();
-        let facet = FacetId::new();
+        let _facet = FacetId::new();
 
         for i in 0..5 {
             let clock = LogicalClock(i);

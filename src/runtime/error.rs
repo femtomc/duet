@@ -55,8 +55,11 @@ pub enum JournalError {
     /// Corrupted journal segment
     #[error("Corrupted segment {segment} at offset {offset}: {detail}")]
     CorruptedSegment {
+        /// Segment number
         segment: u64,
+        /// Byte offset where corruption was found
         offset: u64,
+        /// Description of the corruption
         detail: String,
     },
 
@@ -85,7 +88,12 @@ pub type JournalResult<T> = std::result::Result<T, JournalError>;
 pub enum SnapshotError {
     /// Snapshot not found
     #[error("Snapshot for branch '{branch}' at turn '{turn_id}' not found")]
-    NotFound { branch: String, turn_id: String },
+    NotFound {
+        /// Branch identifier
+        branch: String,
+        /// Turn identifier
+        turn_id: String,
+    },
 
     /// Invalid snapshot format
     #[error("Invalid snapshot format: {0}")]
@@ -120,7 +128,12 @@ pub enum StorageError {
 
     /// Atomic write failed
     #[error("Atomic write failed for {path}: {detail}")]
-    AtomicWriteFailed { path: PathBuf, detail: String },
+    AtomicWriteFailed {
+        /// Path where write failed
+        path: PathBuf,
+        /// Error details
+        detail: String,
+    },
 
     /// Config file error
     #[error("Config file error: {0}")]
@@ -156,8 +169,11 @@ pub enum BranchError {
     /// Merge conflict
     #[error("Merge conflict between '{source_branch}' and '{target_branch}': {detail}")]
     MergeConflict {
+        /// Source branch identifier
         source_branch: String,
+        /// Target branch identifier
         target_branch: String,
+        /// Conflict details
         detail: String,
     },
 }

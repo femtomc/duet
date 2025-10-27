@@ -98,12 +98,12 @@ impl SnapshotManager {
 
     /// Find the nearest snapshot at or before a given turn
     ///
-    /// Searches by turn_count ordering, not turn_id hash comparison.
+    /// Loads snapshot metadata to find the best snapshot whose turn_id <= target.
     /// Returns the turn_count of the best snapshot, or None if no snapshots exist.
     pub fn nearest_snapshot(
         &self,
         branch: &BranchId,
-        _turn_id: &TurnId,
+        turn_id: &TurnId,
     ) -> SnapshotResult<Option<u64>> {
         let snapshot_dir = self.storage.branch_snapshot_dir(branch);
 
@@ -134,14 +134,31 @@ impl SnapshotManager {
             return Ok(None);
         }
 
-        // Sort by turn count
+        // Sort by turn count (oldest first)
         snapshot_counts.sort_unstable();
 
-        // For now, return the latest snapshot since we don't have a way to map
-        // turn_id to turn_count without loading snapshots.
-        // A full implementation would maintain an index mapping turn_id -> turn_count
-        // or load each snapshot's metadata to check the turn_id.
-        Ok(snapshot_counts.last().copied())
+        // Find the latest snapshot whose turn_id <= target
+        // We need to load each snapshot's metadata to check the turn_id
+        let mut best_count = None;
+
+        for count in snapshot_counts.iter().rev() {
+            // Load this snapshot's metadata to check turn_id
+            match self.load_by_count(branch, *count) {
+                Ok(snapshot) => {
+                    // Check if this snapshot's turn_id <= target
+                    if snapshot.metadata.turn_id <= *turn_id {
+                        best_count = Some(*count);
+                        break;
+                    }
+                }
+                Err(_) => {
+                    // Skip corrupted snapshots
+                    continue;
+                }
+            }
+        }
+
+        Ok(best_count)
     }
 
     /// Check if a snapshot should be created based on interval
