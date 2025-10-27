@@ -174,7 +174,10 @@ fn test_no_turns_when_queue_empty() {
     // Try to step with empty queue
     let result = runtime.step().unwrap();
 
-    assert!(result.is_none(), "No turns should execute when queue is empty");
+    assert!(
+        result.is_none(),
+        "No turns should execute when queue is empty"
+    );
 }
 
 #[test]
@@ -253,7 +256,11 @@ fn test_branch_fork_and_switch() {
     assert_eq!(runtime.current_branch().0.as_str(), "experiment");
 
     // Execute a turn on the new branch
-    runtime.send_message(actor_id.clone(), facet_id.clone(), preserves::IOValue::symbol("experiment"));
+    runtime.send_message(
+        actor_id.clone(),
+        facet_id.clone(),
+        preserves::IOValue::symbol("experiment"),
+    );
     let result = runtime.step().unwrap();
     assert!(result.is_some(), "Should execute turn on new branch");
 

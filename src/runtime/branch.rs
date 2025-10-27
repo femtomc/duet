@@ -28,6 +28,15 @@ pub struct BranchMetadata {
     pub snapshot: Option<TurnId>,
 }
 
+/// Serializable branch state used for persistence
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BranchState {
+    /// All known branches
+    pub branches: Vec<BranchMetadata>,
+    /// Active branch identifier
+    pub active: BranchId,
+}
+
 /// Branch manager
 pub struct BranchManager {
     /// All branches
@@ -40,24 +49,7 @@ pub struct BranchManager {
 impl BranchManager {
     /// Create a new branch manager with main branch
     pub fn new() -> Self {
-        let mut branches = HashMap::new();
-        let main_branch = BranchId::main();
-
-        branches.insert(
-            main_branch.clone(),
-            BranchMetadata {
-                id: main_branch.clone(),
-                parent: None,
-                base_turn: None,
-                head_turn: TurnId::new("turn_0".to_string()),
-                snapshot: None,
-            },
-        );
-
-        Self {
-            branches,
-            active_branch: main_branch,
-        }
+        Self::from_state(Self::default_state())
     }
 
     /// Get the active branch
@@ -135,6 +127,50 @@ impl BranchManager {
     /// List all branches
     pub fn list_branches(&self) -> Vec<&BranchMetadata> {
         self.branches.values().collect()
+    }
+
+    /// Return a serializable snapshot of branch state
+    pub fn state(&self) -> BranchState {
+        BranchState {
+            branches: self.branches.values().cloned().collect(),
+            active: self.active_branch.clone(),
+        }
+    }
+
+    /// Construct a branch manager from persisted state
+    pub fn from_state(state: BranchState) -> Self {
+        let mut branches = HashMap::new();
+        for metadata in state.branches.into_iter() {
+            branches.insert(metadata.id.clone(), metadata);
+        }
+
+        let active = if branches.contains_key(&state.active) {
+            state.active
+        } else {
+            BranchId::main()
+        };
+
+        Self {
+            branches,
+            active_branch: active,
+        }
+    }
+
+    /// Default branch state containing only `main`
+    pub fn default_state() -> BranchState {
+        let main_branch = BranchId::main();
+        let metadata = BranchMetadata {
+            id: main_branch.clone(),
+            parent: None,
+            base_turn: None,
+            head_turn: TurnId::new("turn_0".to_string()),
+            snapshot: None,
+        };
+
+        BranchState {
+            branches: vec![metadata],
+            active: main_branch,
+        }
     }
 }
 

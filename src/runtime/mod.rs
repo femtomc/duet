@@ -97,11 +97,28 @@ impl Runtime {
         // Initialize snapshot manager
         let snapshot_manager = SnapshotManager::new(storage.clone(), config.snapshot_interval);
 
-        // Initialize branch manager
-        let branch_manager = BranchManager::new();
+        // Load branch state (or initialize default)
+        let branch_state = match storage::load_branch_state(&storage) {
+            Ok(Some(state)) => state,
+            Ok(None) => {
+                let state = BranchManager::default_state();
+                storage::save_branch_state(&storage, &state).map_err(|e| {
+                    RuntimeError::Init(format!("Failed to write branch state: {}", e))
+                })?;
+                state
+            }
+            Err(e) => {
+                return Err(RuntimeError::Init(format!(
+                    "Failed to load branch state: {}",
+                    e
+                )));
+            }
+        };
 
-        // Use main branch by default
-        let current_branch = BranchId::main();
+        let branch_manager = BranchManager::from_state(branch_state.clone());
+
+        // Use active branch from state
+        let current_branch = branch_state.active.clone();
 
         // CRITICAL: Perform crash recovery BEFORE creating JournalWriter
         // This ensures the index is clean and consistent with actual segment data
@@ -167,7 +184,8 @@ impl Runtime {
         let inputs = scheduled_turn.inputs;
 
         // Get or create actor
-        let actor = self.actors
+        let actor = self
+            .actors
             .entry(actor_id.clone())
             .or_insert_with(|| Actor::new(actor_id.clone()));
 
@@ -192,6 +210,7 @@ impl Runtime {
             outputs,
             delta,
         );
+        let turn_id = turn_record.turn_id.clone();
 
         // Append to journal
         self.journal_writer
@@ -205,6 +224,11 @@ impl Runtime {
         if self.snapshot_manager.should_snapshot(self.turn_count) {
             self.create_snapshot()?;
         }
+
+        self.branch_manager
+            .update_head(&self.current_branch, turn_id.clone())
+            .map_err(|e| RuntimeError::Branch(e))?;
+        self.persist_branch_state()?;
 
         Ok(Some(turn_record))
     }
@@ -231,7 +255,7 @@ impl Runtime {
     /// Create a snapshot of current runtime state
     fn create_snapshot(&mut self) -> Result<()> {
         use snapshot::RuntimeSnapshot;
-        use state::{AssertionSet, FacetMap, CapabilityMap};
+        use state::{AssertionSet, CapabilityMap, FacetMap};
 
         // Collect current state from all actors
         let mut all_assertions = AssertionSet::new();
@@ -287,11 +311,16 @@ impl Runtime {
             payload,
         };
 
-        self.scheduler.enqueue(target_actor, input, ScheduleCause::External);
+        self.scheduler
+            .enqueue(target_actor, input, ScheduleCause::External);
     }
 
     /// Fork a new branch from the current branch
-    pub fn fork(&mut self, new_branch_name: impl Into<String>, at_turn: Option<TurnId>) -> Result<BranchId> {
+    pub fn fork(
+        &mut self,
+        new_branch_name: impl Into<String>,
+        at_turn: Option<TurnId>,
+    ) -> Result<BranchId> {
         let current = self.current_branch.clone();
         let new_branch = BranchId::new(new_branch_name);
 
@@ -309,10 +338,14 @@ impl Runtime {
         // Create journal and snapshot directories for new branch
         let new_journal_dir = self.storage.branch_journal_dir(&new_branch);
         let new_snapshot_dir = self.storage.branch_snapshot_dir(&new_branch);
-        std::fs::create_dir_all(&new_journal_dir)
-            .map_err(|e| RuntimeError::Init(format!("Failed to create branch journal dir: {}", e)))?;
-        std::fs::create_dir_all(&new_snapshot_dir)
-            .map_err(|e| RuntimeError::Init(format!("Failed to create branch snapshot dir: {}", e)))?;
+        std::fs::create_dir_all(&new_journal_dir).map_err(|e| {
+            RuntimeError::Init(format!("Failed to create branch journal dir: {}", e))
+        })?;
+        std::fs::create_dir_all(&new_snapshot_dir).map_err(|e| {
+            RuntimeError::Init(format!("Failed to create branch snapshot dir: {}", e))
+        })?;
+
+        self.persist_branch_state()?;
 
         Ok(new_branch)
     }
@@ -331,23 +364,28 @@ impl Runtime {
         let journal_reader = JournalReader::new(self.storage.clone(), branch.clone())
             .unwrap_or_else(|_| JournalReader::new_empty(self.storage.clone(), branch.clone()));
 
-        journal_reader.validate_and_repair()
+        journal_reader
+            .validate_and_repair()
             .map_err(|e| RuntimeError::Init(format!("Journal validation failed: {}", e)))?;
 
-        let clean_index = journal_reader.rebuild_index()
+        let clean_index = journal_reader
+            .rebuild_index()
             .map_err(|e| RuntimeError::Init(format!("Index rebuild failed: {}", e)))?;
 
         let index_path = self.storage.branch_meta_dir(&branch).join("journal.index");
         std::fs::create_dir_all(self.storage.branch_meta_dir(&branch))
             .map_err(|e| RuntimeError::Init(format!("Failed to create meta dir: {}", e)))?;
-        clean_index.save(&index_path)
+        clean_index
+            .save(&index_path)
             .map_err(|e| RuntimeError::Init(format!("Failed to save index: {}", e)))?;
 
-        self.journal_writer = JournalWriter::new_with_index(
-            self.storage.clone(),
-            branch.clone(),
-            clean_index,
-        ).map_err(|e| RuntimeError::Init(format!("Failed to create journal writer: {}", e)))?;
+        self.journal_writer =
+            JournalWriter::new_with_index(self.storage.clone(), branch.clone(), clean_index)
+                .map_err(|e| {
+                    RuntimeError::Init(format!("Failed to create journal writer: {}", e))
+                })?;
+
+        self.persist_branch_state()?;
 
         Ok(())
     }
@@ -358,7 +396,8 @@ impl Runtime {
     /// journal entries up to the target.
     pub fn goto(&mut self, target_turn: TurnId) -> Result<()> {
         // Find nearest snapshot at or before target turn
-        let snapshot_turn = self.snapshot_manager
+        let snapshot_turn = self
+            .snapshot_manager
             .nearest_snapshot(&self.current_branch, &target_turn)
             .map_err(|e| RuntimeError::Snapshot(e))?;
 
@@ -369,7 +408,8 @@ impl Runtime {
 
         // Load snapshot if available
         if let Some(snap_turn) = snapshot_turn {
-            let snapshot = self.snapshot_manager
+            let snapshot = self
+                .snapshot_manager
                 .load(&self.current_branch, &snap_turn)
                 .map_err(|e| RuntimeError::Snapshot(e))?;
 
@@ -379,7 +419,7 @@ impl Runtime {
         }
 
         // Replay journal from snapshot point to target
-        let journal_reader = JournalReader::new(self.storage.clone(), self.current_branch.clone())
+        let _journal_reader = JournalReader::new(self.storage.clone(), self.current_branch.clone())
             .map_err(|e| RuntimeError::Journal(e))?;
 
         // TODO: Iterate and replay turns up to target_turn
@@ -394,7 +434,7 @@ impl Runtime {
     }
 
     /// Rewind by N turns
-    pub fn back(&mut self, count: usize) -> Result<()> {
+    pub fn back(&mut self, _count: usize) -> Result<()> {
         // TODO: Calculate target turn ID by going back N turns from current head
         // For now, this is a placeholder
 
@@ -407,6 +447,11 @@ impl Runtime {
             .map_err(|e| RuntimeError::Init(format!("Failed to initialize storage: {}", e)))?;
         storage::write_config(&config)
             .map_err(|e| RuntimeError::Config(format!("Failed to write config: {}", e)))?;
+
+        let storage = Storage::new(config.root.clone());
+        let branch_state = BranchManager::default_state();
+        storage::save_branch_state(&storage, &branch_state)
+            .map_err(|e| RuntimeError::Config(format!("Failed to write branch state: {}", e)))?;
         Ok(())
     }
 
@@ -415,6 +460,12 @@ impl Runtime {
         let config = storage::load_config(&root)
             .map_err(|e| RuntimeError::Config(format!("Failed to load config: {}", e)))?;
         Self::new(config)
+    }
+
+    fn persist_branch_state(&self) -> Result<()> {
+        let state = self.branch_manager.state();
+        storage::save_branch_state(&self.storage, &state)
+            .map_err(|e| RuntimeError::Config(format!("Failed to persist branch state: {}", e)))
     }
 
     /// Get the current configuration

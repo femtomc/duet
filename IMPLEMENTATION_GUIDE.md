@@ -59,8 +59,6 @@ duet/
 │   │   ├── pattern.rs        // Pattern matching & subscription engine
 │   │   ├── control.rs        // Runtime control facade used by CLI/tests
 │   │   └── link.rs           // Network links for distributed actors (future)
-│   └── bin/
-│       └── duet-cli.rs       // CLI application driving the runtime
 ├── python/
 │   └── duet_cli/
 │       ├── pyproject.toml    // Python package definition
@@ -326,22 +324,22 @@ To support automatic branch merges, every persistent state component is modelled
 
 ---
 
-## 8. CLI Functionality (`src/bin/duet-cli.rs`)
+## 8. CLI Functionality (Python Textual App)
 
-Command structure built with `clap`:
+Reference command palette (invoked within the Textual UI):
 
 - `init [--root PATH] [--snapshot-interval N]` – create runtime dirs, write config, bootstrap metadata.  
 - `status` – display active branch, head turn, queued inputs, snapshot info.  
 - `history [--branch BRANCH] [--range START..END]` – show concise turn listing (turn id, actor, cause, outputs).  
-- `send --actor ACTOR_ID --facet FACET_ID --payload <preserves text>` – inject message (or optionally use a file).  
+- `send --actor ACTOR_ID --facet FACET_ID --payload <preserves text>` – inject message or schedule work.  
 - `step [--n COUNT]` – advance runtime by COUNT turns (default 1).  
 - `back [--n COUNT]` / `goto --turn TURN_ID` – rewind or jump to a specified turn.  
 - `fork --branch NEW_BRANCH [--from TURN_ID]` – create a new branch.  
 - `merge --source SRC --into DEST [--turn TURN_ID]` – merge SRC into DEST at HEAD or specific turn; report conflicts/resolutions.  
+- `watch --pattern <expr>` / `unwatch <id>` – register or remove pattern subscriptions; updates stream via notifications.  
 - `dump-turn --turn TURN_ID` – optional debugging command to print decoded turn record.
-- `watch --pattern <expr>` / `unwatch <id>` – register or remove pattern subscriptions; updates stream via notifications.
 
-CLI communicates via `runtime::control`, so all behaviour is testable without running the CLI.
+The Textual CLI uses the control protocol defined in Section 11; every command maps to a request on the runtime, and streaming updates (`pattern_match`, `turn_completed`, etc.) update the UI in real time.
 
 ---
 

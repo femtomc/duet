@@ -4,14 +4,13 @@
 //! and state deltas for a single deterministic execution step. Turn IDs are
 //! computed deterministically from inputs using Blake3 hashing.
 
+use super::state::StateDelta;
 use blake3::Hasher;
 use chrono::{DateTime, Utc};
+use preserves::serde::Error as PreservesSerdeError;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use uuid::Uuid;
-
-use super::error::JournalError;
-use super::state::StateDelta;
 
 /// Unique identifier for a turn, deterministically computed
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
@@ -49,15 +48,6 @@ impl ActorId {
     pub fn from_uuid(uuid: Uuid) -> Self {
         Self(uuid)
     }
-
-    /// Create an ActorId from a UUID string
-    pub fn new_from_string(s: String) -> Self {
-        // Try to parse as UUID, otherwise generate random
-        match Uuid::parse_str(&s) {
-            Ok(uuid) => Self(uuid),
-            Err(_) => Self::new(),
-        }
-    }
 }
 
 impl Default for ActorId {
@@ -85,15 +75,6 @@ impl FacetId {
     /// Create from a UUID
     pub fn from_uuid(uuid: Uuid) -> Self {
         Self(uuid)
-    }
-
-    /// Create a FacetId from a UUID string
-    pub fn new_from_string(s: String) -> Self {
-        // Try to parse as UUID, otherwise generate random
-        match Uuid::parse_str(&s) {
-            Ok(uuid) => Self(uuid),
-            Err(_) => Self::new(),
-        }
     }
 }
 
@@ -358,12 +339,11 @@ impl TurnRecord {
     /// Encode this turn record to bytes using preserves
     ///
     /// Format: [4-byte length prefix (little-endian)] + [preserves-packed data]
-    pub fn encode(&self) -> Result<Vec<u8>, JournalError> {
+    pub fn encode(&self) -> Result<Vec<u8>, PreservesSerdeError> {
         use preserves::PackedWriter;
         let mut data_buf = Vec::new();
         let mut writer = PackedWriter::new(&mut data_buf);
-        preserves::serde::to_writer(&mut writer, self)
-            .map_err(|e| JournalError::EncodingError(e.to_string()))?;
+        preserves::serde::to_writer(&mut writer, self)?;
 
         // Prepend length
         let len = data_buf.len() as u32;
@@ -375,26 +355,8 @@ impl TurnRecord {
     }
 
     /// Decode a turn record from bytes
-    pub fn decode(bytes: &[u8]) -> Result<Self, JournalError> {
-        preserves::serde::from_bytes(bytes).map_err(|e| JournalError::DecodingError(e.to_string()))
-    }
-
-    /// Decode a turn record from a reader
-    ///
-    /// This reads the entire record into memory first, then decodes it.
-    /// For streaming decoding, use a custom approach based on preserves PackedReader.
-    pub fn decode_from_reader<R: std::io::Read>(reader: &mut R) -> Result<Self, JournalError> {
-        // Read length prefix (u32 in little-endian)
-        let mut len_buf = [0u8; 4];
-        reader.read_exact(&mut len_buf)?;
-        let len = u32::from_le_bytes(len_buf) as usize;
-
-        // Read the full record
-        let mut buf = vec![0u8; len];
-        reader.read_exact(&mut buf)?;
-
-        // Decode
-        Self::decode(&buf)
+    pub fn decode(bytes: &[u8]) -> Result<Self, PreservesSerdeError> {
+        preserves::serde::from_bytes(bytes)
     }
 }
 

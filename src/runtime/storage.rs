@@ -3,13 +3,13 @@
 //! Manages the .duet/ directory structure, ensures atomic writes via
 //! temp files and renames, and provides utilities for persistence.
 
+use super::RuntimeConfig;
+use super::branch::BranchState;
 use super::error::{StorageError, StorageResult};
+use super::turn::BranchId;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-
-use super::RuntimeConfig;
-use super::turn::BranchId;
 
 /// Storage manager for runtime persistence
 #[derive(Debug, Clone)]
@@ -66,6 +66,11 @@ impl Storage {
     /// Get branch index file path
     pub fn branch_index_path(&self, branch: &BranchId) -> PathBuf {
         self.meta_dir().join(format!("{}.index", branch.0))
+    }
+
+    /// Path of the persisted branch state file
+    pub fn branch_state_path(&self) -> PathBuf {
+        self.meta_dir().join("branches.json")
     }
 
     /// Write data atomically to a file
@@ -186,6 +191,28 @@ pub fn load_config(root: &Path) -> StorageResult<RuntimeConfig> {
     let config: RuntimeConfig = serde_json::from_slice(&data).map_err(StorageError::from)?;
 
     Ok(config)
+}
+
+/// Persist branch state metadata
+pub fn save_branch_state(storage: &Storage, state: &BranchState) -> StorageResult<()> {
+    let path = storage.branch_state_path();
+    if let Some(parent) = path.parent() {
+        storage.create_dir_all(parent)?;
+    }
+    let data = serde_json::to_vec_pretty(state).map_err(StorageError::from)?;
+    storage.write_atomic(&path, &data)?;
+    Ok(())
+}
+
+/// Load branch state metadata if available
+pub fn load_branch_state(storage: &Storage) -> StorageResult<Option<BranchState>> {
+    let path = storage.branch_state_path();
+    if !path.exists() {
+        return Ok(None);
+    }
+    let data = storage.read_file(&path)?;
+    let state = serde_json::from_slice(&data).map_err(StorageError::from)?;
+    Ok(Some(state))
 }
 
 #[cfg(test)]

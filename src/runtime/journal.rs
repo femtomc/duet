@@ -7,7 +7,7 @@ use super::error::{JournalError, JournalResult};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
-use std::io::{BufReader, BufWriter, Write};
+use std::io::{self, BufReader, BufWriter, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 
 use super::storage::Storage;
@@ -71,6 +71,26 @@ impl JournalIndex {
             .map_err(|e| JournalError::IndexCorrupted(e.to_string()))?;
         Ok(index)
     }
+}
+
+fn read_record_from<R: Read>(reader: &mut R) -> JournalResult<Option<TurnRecord>> {
+    let mut len_buf = [0u8; 4];
+    match reader.read_exact(&mut len_buf) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
+            return Ok(None);
+        }
+        Err(e) => return Err(JournalError::Io(e)),
+    }
+
+    let len = u32::from_le_bytes(len_buf) as usize;
+    let mut buf = vec![0u8; len];
+    reader.read_exact(&mut buf)?;
+
+    let record =
+        TurnRecord::decode(&buf).map_err(|e| JournalError::DecodingError(e.to_string()))?;
+
+    Ok(Some(record))
 }
 
 /// Journal writer for appending turn records
@@ -172,7 +192,9 @@ impl JournalWriter {
     ///
     /// This ensures the index never points to uncommitted data.
     pub fn append(&mut self, record: &TurnRecord) -> JournalResult<()> {
-        let encoded = record.encode()?;
+        let encoded = record
+            .encode()
+            .map_err(|e| JournalError::EncodingError(e.to_string()))?;
         let record_size = encoded.len() as u64;
 
         // Check if we need to rotate to a new segment
@@ -308,12 +330,14 @@ impl JournalReader {
         let mut file = File::open(&segment_path)?;
 
         // Seek to the offset
-        use std::io::Seek;
-        file.seek(std::io::SeekFrom::Start(offset))?;
+        file.seek(io::SeekFrom::Start(offset))?;
 
         // Read the record
         let mut reader = BufReader::new(file);
-        let record = TurnRecord::decode_from_reader(&mut reader)?;
+        let record = match read_record_from(&mut reader)? {
+            Some(record) => record,
+            None => return Err(JournalError::DecodingError("unexpected EOF".to_string())),
+        };
 
         Ok(record)
     }
@@ -377,19 +401,12 @@ impl JournalReader {
             loop {
                 let start_offset = offset;
 
-                // Try to read a record
-                match TurnRecord::decode_from_reader(&mut reader) {
-                    Ok(record) => {
+                match read_record_from(&mut reader)? {
+                    Some(record) => {
                         new_index.add(&record.turn_id, segment_num, start_offset);
-
-                        // Calculate how many bytes we read
-                        use std::io::Seek;
                         offset = reader.stream_position()?;
                     }
-                    Err(_) => {
-                        // End of segment or corrupted data
-                        break;
-                    }
+                    None => break,
                 }
             }
         }
@@ -430,15 +447,14 @@ impl JournalReader {
             let mut last_valid_offset = 0u64;
 
             loop {
-                use std::io::Seek;
                 let current_offset = reader.stream_position()?;
 
-                match TurnRecord::decode_from_reader(&mut reader) {
-                    Ok(_) => {
+                match read_record_from(&mut reader) {
+                    Ok(Some(_)) => {
                         last_valid_offset = reader.stream_position()?;
                     }
+                    Ok(None) => break,
                     Err(e) => {
-                        // Corrupted record found
                         tracing::warn!(
                             "Corrupted record found in segment {} at offset {}: {}",
                             segment_num,
@@ -446,7 +462,6 @@ impl JournalReader {
                             e
                         );
 
-                        // Truncate the file to last valid offset
                         if last_valid_offset < current_offset {
                             let file = OpenOptions::new().write(true).open(&segment_path)?;
                             file.set_len(last_valid_offset)?;
@@ -501,10 +516,8 @@ impl JournalIterator {
 
         let mut file = File::open(&segment_path)?;
 
-        // Seek to offset if needed
         if offset > 0 {
-            use std::io::Seek;
-            file.seek(std::io::SeekFrom::Start(offset))?;
+            file.seek(io::SeekFrom::Start(offset))?;
         }
 
         self.reader = Some(BufReader::new(file));
@@ -524,27 +537,23 @@ impl Iterator for JournalIterator {
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            // If no reader, we're done
             let reader = self.reader.as_mut()?;
 
-            // Try to read next record
-            match TurnRecord::decode_from_reader(reader) {
-                Ok(record) => return Some(Ok(record)),
-                Err(_) => {
-                    // End of segment or error - try next segment
+            match read_record_from(reader) {
+                Ok(Some(record)) => return Some(Ok(record)),
+                Ok(None) => {
+                    // End of segment - advance to next segment
                     self.current_segment += 1;
-
                     match self.open_segment(self.current_segment, 0) {
                         Ok(()) => {
                             if self.reader.is_none() {
-                                // No more segments
                                 return None;
                             }
-                            // Continue to next iteration to read from new segment
                         }
                         Err(e) => return Some(Err(e)),
                     }
                 }
+                Err(e) => return Some(Err(e)),
             }
         }
     }
