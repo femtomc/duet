@@ -112,6 +112,11 @@ impl BranchManager {
         Ok(())
     }
 
+    /// Get the head turn for a branch
+    pub fn head(&self, branch: &BranchId) -> Option<&TurnId> {
+        self.branches.get(branch).map(|m| &m.head_turn)
+    }
+
     /// Find the lowest common ancestor of two branches
     pub fn find_lca(&self, _branch_a: &BranchId, _branch_b: &BranchId) -> Option<TurnId> {
         // TODO: Implement LCA search

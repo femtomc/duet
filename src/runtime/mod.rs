@@ -78,6 +78,9 @@ pub struct Runtime {
 
     /// Turn counter for snapshot interval
     turn_count: u64,
+
+    /// Last turn ID for each actor (for causality tracking)
+    last_turn_per_actor: HashMap<turn::ActorId, turn::TurnId>,
 }
 
 impl Runtime {
@@ -165,6 +168,7 @@ impl Runtime {
             current_branch,
             actors: HashMap::new(),
             turn_count: 0,
+            last_turn_per_actor: HashMap::new(),
         })
     }
 
@@ -199,8 +203,8 @@ impl Runtime {
         let repaid = delta.accounts.repaid;
         self.scheduler.update_account(&actor_id, borrowed, repaid);
 
-        // Build turn record
-        let parent = None; // TODO: Track parent turn ID for causality
+        // Build turn record with parent turn tracking
+        let parent = self.last_turn_per_actor.get(&actor_id).cloned();
         let turn_record = TurnRecord::new(
             actor_id.clone(),
             self.current_branch.clone(),
@@ -211,6 +215,10 @@ impl Runtime {
             delta,
         );
         let turn_id = turn_record.turn_id.clone();
+
+        // Update last turn tracker for this actor
+        self.last_turn_per_actor
+            .insert(actor_id.clone(), turn_id.clone());
 
         // Append to journal
         self.journal_writer
@@ -405,25 +413,66 @@ impl Runtime {
         self.actors.clear();
         self.scheduler = Scheduler::new(self.config.flow_control_limit as i64);
         self.turn_count = 0;
+        self.last_turn_per_actor.clear();
 
-        // Load snapshot if available
-        if let Some(snap_turn) = snapshot_turn {
+        let start_turn_id = if let Some(snap_turn) = snapshot_turn.clone() {
             let snapshot = self
                 .snapshot_manager
                 .load(&self.current_branch, &snap_turn)
                 .map_err(|e| RuntimeError::Snapshot(e))?;
 
-            // Restore state from snapshot
-            // TODO: Apply snapshot state to actors
+            // Restore state from snapshot by recreating actors with snapshot data
+            // For now, we'll replay from the beginning or snapshot point
             self.turn_count = snapshot.metadata.turn_count;
-        }
+
+            // We'd need to reconstruct actors from the snapshot state
+            // This is complex as it requires recreating actor objects with the right state
+            // For the initial implementation, we'll just track the turn_count
+            // and replay from the snapshot point
+
+            snap_turn
+        } else {
+            // No snapshot, replay from the beginning
+            TurnId::new("turn_00000000".to_string())
+        };
 
         // Replay journal from snapshot point to target
-        let _journal_reader = JournalReader::new(self.storage.clone(), self.current_branch.clone())
+        let journal_reader = JournalReader::new(self.storage.clone(), self.current_branch.clone())
             .map_err(|e| RuntimeError::Journal(e))?;
 
-        // TODO: Iterate and replay turns up to target_turn
-        // For now, this is a placeholder implementation
+        // Iterate through all turns and replay them
+        let mut iter = journal_reader.iter_all().map_err(|e| RuntimeError::Journal(e))?;
+
+        while let Some(result) = iter.next() {
+            let record = result.map_err(|e| RuntimeError::Journal(e))?;
+
+            // Stop when we reach the target turn
+            if record.turn_id == target_turn {
+                self.turn_count += 1;
+                self.last_turn_per_actor.insert(record.actor.clone(), record.turn_id.clone());
+                break;
+            }
+
+            // Skip turns before the snapshot
+            if start_turn_id != TurnId::new("turn_00000000".to_string())
+                && record.turn_id <= start_turn_id {
+                continue;
+            }
+
+            // Apply the turn's state delta to runtime
+            // Get or create actor
+            let _actor = self.actors.entry(record.actor.clone())
+                .or_insert_with(|| Actor::new(record.actor.clone()));
+
+            // Apply state delta (simplified - in full implementation would apply all changes)
+            // For now, we just track that this actor exists and the turn was processed
+
+            self.turn_count += 1;
+            self.last_turn_per_actor.insert(record.actor.clone(), record.turn_id.clone());
+
+            // Re-enqueue any pending outputs as inputs for future turns
+            // This is a simplified replay - full implementation would be more sophisticated
+        }
 
         // Update branch head
         self.branch_manager
@@ -434,11 +483,48 @@ impl Runtime {
     }
 
     /// Rewind by N turns
-    pub fn back(&mut self, _count: usize) -> Result<()> {
-        // TODO: Calculate target turn ID by going back N turns from current head
-        // For now, this is a placeholder
+    pub fn back(&mut self, count: usize) -> Result<TurnId> {
+        // Get current head
+        let current_head = self.branch_manager
+            .head(&self.current_branch)
+            .cloned()
+            .ok_or_else(|| RuntimeError::Branch(
+                error::BranchError::NotFound("No head turn found".into())
+            ))?;
 
-        Ok(())
+        // Read journal to find the turn N steps back
+        let journal_reader = JournalReader::new(self.storage.clone(), self.current_branch.clone())
+            .map_err(|e| RuntimeError::Journal(e))?;
+
+        let mut turns = Vec::new();
+        let mut iter = journal_reader.iter_all().map_err(|e| RuntimeError::Journal(e))?;
+
+        while let Some(result) = iter.next() {
+            let record = result.map_err(|e| RuntimeError::Journal(e))?;
+            turns.push(record.turn_id.clone());
+
+            if record.turn_id == current_head {
+                break;
+            }
+        }
+
+        // Calculate target turn (go back N turns)
+        if count >= turns.len() {
+            // Go to the beginning
+            if let Some(first_turn) = turns.first() {
+                self.goto(first_turn.clone())?;
+                Ok(first_turn.clone())
+            } else {
+                Err(RuntimeError::Journal(
+                    error::JournalError::TurnNotFound("No turns in journal".into())
+                ))
+            }
+        } else {
+            let target_idx = turns.len() - count - 1;
+            let target_turn = turns[target_idx].clone();
+            self.goto(target_turn.clone())?;
+            Ok(target_turn)
+        }
     }
 
     /// Initialize runtime storage directories and metadata
@@ -474,13 +560,18 @@ impl Runtime {
     }
 
     /// Get the current branch
-    pub fn current_branch(&self) -> &BranchId {
-        &self.current_branch
+    pub fn current_branch(&self) -> BranchId {
+        self.current_branch.clone()
     }
 
     /// Get the storage manager
     pub fn storage(&self) -> &Storage {
         &self.storage
+    }
+
+    /// Get reference to scheduler
+    pub fn scheduler(&self) -> &Scheduler {
+        &self.scheduler
     }
 
     /// Get mutable access to the scheduler
@@ -498,9 +589,20 @@ impl Runtime {
         &self.snapshot_manager
     }
 
+    /// Get reference to branch manager
+    pub fn branch_manager(&self) -> &BranchManager {
+        &self.branch_manager
+    }
+
     /// Get mutable access to the branch manager
     pub fn branch_manager_mut(&mut self) -> &mut BranchManager {
         &mut self.branch_manager
+    }
+
+    /// Create a journal reader for a specific branch
+    pub fn journal_reader(&self, branch: &BranchId) -> Result<JournalReader> {
+        JournalReader::new(self.storage.clone(), branch.clone())
+            .map_err(|e| RuntimeError::Journal(e))
     }
 
     /// Get the global schema registry

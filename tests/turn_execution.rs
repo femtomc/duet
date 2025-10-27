@@ -128,6 +128,73 @@ fn test_journal_persistence_after_execution() {
 }
 
 #[test]
+fn test_parent_turn_tracking() {
+    let temp = TempDir::new().unwrap();
+    let config = RuntimeConfig {
+        root: temp.path().to_path_buf(),
+        snapshot_interval: 10,
+        flow_control_limit: 100,
+        debug: false,
+    };
+
+    Runtime::init(config.clone()).unwrap();
+    let mut runtime = Runtime::new(config).unwrap();
+
+    use duet::runtime::turn::{ActorId, FacetId};
+
+    let actor_id = ActorId::new();
+    let facet_id = FacetId::new();
+
+    // Execute first turn for this actor
+    runtime.send_message(
+        actor_id.clone(),
+        facet_id.clone(),
+        preserves::IOValue::symbol("turn1"),
+    );
+    let turn1 = runtime.step().unwrap().unwrap();
+    assert!(turn1.parent.is_none(), "First turn should have no parent");
+
+    // Execute second turn for same actor
+    runtime.send_message(
+        actor_id.clone(),
+        facet_id.clone(),
+        preserves::IOValue::symbol("turn2"),
+    );
+    let turn2 = runtime.step().unwrap().unwrap();
+    assert_eq!(
+        turn2.parent,
+        Some(turn1.turn_id.clone()),
+        "Second turn should have first turn as parent"
+    );
+
+    // Execute third turn
+    runtime.send_message(
+        actor_id.clone(),
+        facet_id.clone(),
+        preserves::IOValue::symbol("turn3"),
+    );
+    let turn3 = runtime.step().unwrap().unwrap();
+    assert_eq!(
+        turn3.parent,
+        Some(turn2.turn_id.clone()),
+        "Third turn should have second turn as parent"
+    );
+
+    // Execute turn for different actor
+    let actor2_id = ActorId::new();
+    runtime.send_message(
+        actor2_id.clone(),
+        facet_id.clone(),
+        preserves::IOValue::symbol("other-actor"),
+    );
+    let other_turn = runtime.step().unwrap().unwrap();
+    assert!(
+        other_turn.parent.is_none(),
+        "First turn for different actor should have no parent"
+    );
+}
+
+#[test]
 fn test_snapshot_creation_at_interval() {
     let temp = TempDir::new().unwrap();
     let config = RuntimeConfig {

@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::error::ActorResult;
+use super::pattern::{Pattern, PatternEngine};
 use super::state::{
     AccountDelta, AssertionDelta, AssertionSet, CapabilityDelta, CapabilityMap, FacetDelta,
     FacetMap, FacetMetadata, FacetStatus, PNCounter, StateDelta,
@@ -39,6 +40,9 @@ pub struct Actor {
 
     /// Entities attached to facets
     pub entities: Arc<RwLock<HashMap<FacetId, Vec<Box<dyn Entity>>>>>,
+
+    /// Pattern engine for subscriptions
+    pub pattern_engine: Arc<RwLock<PatternEngine>>,
 }
 
 impl Actor {
@@ -65,6 +69,7 @@ impl Actor {
             capabilities: Arc::new(RwLock::new(CapabilityMap::new())),
             account: Arc::new(RwLock::new(PNCounter::new())),
             entities: Arc::new(RwLock::new(HashMap::new())),
+            pattern_engine: Arc::new(RwLock::new(PatternEngine::new())),
         }
     }
 
@@ -142,10 +147,68 @@ impl Actor {
             }
 
             TurnInput::Assert { handle, value, .. } => {
+                // Evaluate pattern engine
+                let mut engine = self.pattern_engine.write();
+                let pattern_matches = engine.eval_assert(&handle, &value);
+                drop(engine);
+
+                // Generate PatternMatched outputs
+                for pattern_match in &pattern_matches {
+                    activation.outputs.push(TurnOutput::PatternMatched {
+                        pattern_id: pattern_match.pattern_id,
+                        handle: pattern_match.handle.clone(),
+                    });
+                }
+
+                // Call entity on_assert callbacks for matched patterns
+                let entities = self.entities.read();
+                for pattern_match in pattern_matches {
+                    // Find entities subscribed to this pattern (facet-based lookup)
+                    // For now, we'll need to look up the facet from the pattern
+                    let engine = self.pattern_engine.read();
+                    if let Some(pattern) = engine.patterns.get(&pattern_match.pattern_id) {
+                        if let Some(entity_list) = entities.get(&pattern.facet) {
+                            for entity in entity_list {
+                                entity.on_assert(activation, &handle, &value)?;
+                            }
+                        }
+                    }
+                }
+                drop(entities);
+
+                // Record the assertion
                 activation.assert(handle, value);
             }
 
             TurnInput::Retract { handle, .. } => {
+                // Evaluate pattern engine
+                let mut engine = self.pattern_engine.write();
+                let affected_patterns = engine.eval_retract(&handle);
+                drop(engine);
+
+                // Generate PatternUnmatched outputs
+                for pattern_id in &affected_patterns {
+                    activation.outputs.push(TurnOutput::PatternUnmatched {
+                        pattern_id: *pattern_id,
+                        handle: handle.clone(),
+                    });
+                }
+
+                // Call entity on_retract callbacks for affected patterns
+                let entities = self.entities.read();
+                for pattern_id in affected_patterns {
+                    let engine = self.pattern_engine.read();
+                    if let Some(pattern) = engine.patterns.get(&pattern_id) {
+                        if let Some(entity_list) = entities.get(&pattern.facet) {
+                            for entity in entity_list {
+                                entity.on_retract(activation, &handle)?;
+                            }
+                        }
+                    }
+                }
+                drop(entities);
+
+                // Record the retraction
                 activation.retract(handle);
             }
 
@@ -165,6 +228,18 @@ impl Actor {
     pub fn attach_entity(&self, facet: FacetId, entity: Box<dyn Entity>) {
         let mut entities = self.entities.write();
         entities.entry(facet).or_insert_with(Vec::new).push(entity);
+    }
+
+    /// Register a pattern subscription
+    pub fn register_pattern(&self, pattern: Pattern) -> uuid::Uuid {
+        let mut engine = self.pattern_engine.write();
+        engine.register(pattern)
+    }
+
+    /// Unregister a pattern subscription
+    pub fn unregister_pattern(&self, pattern_id: uuid::Uuid) {
+        let mut engine = self.pattern_engine.write();
+        engine.unregister(pattern_id);
     }
 }
 
@@ -439,5 +514,107 @@ mod tests {
 
         let (outputs, _delta) = result.unwrap();
         assert_eq!(outputs.len(), 1); // Should have echoed the message
+    }
+
+    #[test]
+    fn test_pattern_integration() {
+        use crate::runtime::pattern::Pattern;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        // Entity that counts pattern matches
+        struct PatternEntity {
+            assert_count: Arc<AtomicUsize>,
+            retract_count: Arc<AtomicUsize>,
+        }
+
+        impl Entity for PatternEntity {
+            fn on_message(
+                &self,
+                _activation: &mut Activation,
+                _payload: &preserves::IOValue,
+            ) -> ActorResult<()> {
+                Ok(())
+            }
+
+            fn on_assert(
+                &self,
+                _activation: &mut Activation,
+                _handle: &Handle,
+                _value: &preserves::IOValue,
+            ) -> ActorResult<()> {
+                self.assert_count.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+
+            fn on_retract(
+                &self,
+                _activation: &mut Activation,
+                _handle: &Handle,
+            ) -> ActorResult<()> {
+                self.retract_count.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        let actor = Actor::new(ActorId::new());
+        let facet = actor.root_facet.clone();
+
+        // Register a wildcard pattern
+        let pattern = Pattern {
+            id: uuid::Uuid::new_v4(),
+            pattern: preserves::IOValue::symbol("<_>"),
+            facet: facet.clone(),
+        };
+
+        actor.register_pattern(pattern);
+
+        // Attach entity
+        let assert_count = Arc::new(AtomicUsize::new(0));
+        let retract_count = Arc::new(AtomicUsize::new(0));
+
+        actor.attach_entity(
+            facet.clone(),
+            Box::new(PatternEntity {
+                assert_count: assert_count.clone(),
+                retract_count: retract_count.clone(),
+            }),
+        );
+
+        // Make an assertion
+        let handle = Handle::new();
+        let value = preserves::IOValue::symbol("test-value");
+
+        let inputs = vec![TurnInput::Assert {
+            actor: actor.id.clone(),
+            handle: handle.clone(),
+            value,
+        }];
+
+        let (outputs, _) = actor.execute_turn(inputs).unwrap();
+
+        // Should have triggered on_assert callback
+        assert_eq!(assert_count.load(Ordering::SeqCst), 1);
+
+        // Should have PatternMatched in outputs
+        assert!(outputs
+            .iter()
+            .any(|o| matches!(o, TurnOutput::PatternMatched { .. })));
+
+        // Now retract
+        let inputs = vec![TurnInput::Retract {
+            actor: actor.id.clone(),
+            handle,
+        }];
+
+        let (outputs, _) = actor.execute_turn(inputs).unwrap();
+
+        // Should have triggered on_retract callback
+        assert_eq!(retract_count.load(Ordering::SeqCst), 1);
+
+        // Should have PatternUnmatched in outputs
+        assert!(outputs
+            .iter()
+            .any(|o| matches!(o, TurnOutput::PatternUnmatched { .. })));
     }
 }

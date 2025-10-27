@@ -84,11 +84,55 @@ impl SnapshotManager {
     /// Find the nearest snapshot at or before a given turn
     pub fn nearest_snapshot(
         &self,
-        _branch: &BranchId,
-        _turn_id: &TurnId,
+        branch: &BranchId,
+        turn_id: &TurnId,
     ) -> SnapshotResult<Option<TurnId>> {
-        // TODO: Implement snapshot search
-        Ok(None)
+        let snapshot_dir = self.storage.branch_snapshot_dir(branch);
+
+        if !snapshot_dir.exists() {
+            return Ok(None);
+        }
+
+        // List all snapshot files
+        let mut snapshots = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(&snapshot_dir) {
+            for entry in entries.flatten() {
+                let file_name = entry.file_name();
+                let name = file_name.to_string_lossy();
+
+                // Format: turn-XXXXXXXX.snapshot
+                if name.starts_with("turn-") && name.ends_with(".snapshot") {
+                    snapshots.push(name.to_string());
+                }
+            }
+        }
+
+        if snapshots.is_empty() {
+            return Ok(None);
+        }
+
+        // Sort snapshots (they're named sequentially)
+        snapshots.sort();
+
+        // Find the latest snapshot that's <= target turn
+        // For now, use simple string comparison (works for "turn_NNNNNNNN" format)
+        let target_str = turn_id.as_str();
+
+        let mut best_snapshot = None;
+        for snapshot_name in snapshots.iter().rev() {
+            // Extract turn ID from filename
+            if let Some(turn_str) = snapshot_name
+                .strip_prefix("turn-")
+                .and_then(|s| s.strip_suffix(".snapshot"))
+            {
+                if turn_str <= target_str {
+                    best_snapshot = Some(TurnId::new(format!("turn_{}", turn_str)));
+                    break;
+                }
+            }
+        }
+
+        Ok(best_snapshot)
     }
 
     /// Check if a snapshot should be created based on interval

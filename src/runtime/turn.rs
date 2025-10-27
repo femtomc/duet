@@ -278,6 +278,22 @@ pub enum TurnOutput {
         /// Request payload
         request: preserves::IOValue,
     },
+
+    /// Pattern matched event
+    PatternMatched {
+        /// Pattern ID that matched
+        pattern_id: Uuid,
+        /// Handle of assertion that matched
+        handle: Handle,
+    },
+
+    /// Pattern unmatched event (assertion retracted)
+    PatternUnmatched {
+        /// Pattern ID that lost a match
+        pattern_id: Uuid,
+        /// Handle that was retracted
+        handle: Handle,
+    },
 }
 
 /// Complete record of a turn's execution
@@ -440,10 +456,9 @@ mod tests {
         let record = TurnRecord::new(actor, branch, clock, None, inputs, outputs, delta);
         let encoded = record.encode().unwrap();
 
-        // Use decode_from_reader since encode() adds a length prefix
-        use std::io::Cursor;
-        let mut cursor = Cursor::new(&encoded);
-        let decoded = TurnRecord::decode_from_reader(&mut cursor).unwrap();
+        // Verify encoding round-trip
+        // decode() expects the full format with length prefix
+        let decoded = TurnRecord::decode(&encoded).unwrap();
 
         assert_eq!(record.turn_id, decoded.turn_id);
         assert_eq!(record.clock, decoded.clock);

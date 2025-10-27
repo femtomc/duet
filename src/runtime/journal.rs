@@ -357,6 +357,30 @@ impl JournalReader {
         JournalIterator::new(self.storage.clone(), self.branch.clone(), 0, 0)
     }
 
+    /// Read a range of turn records
+    pub fn read_range(&self, start: usize, limit: usize) -> JournalResult<Vec<TurnRecord>> {
+        let mut records = Vec::new();
+        let mut iter = self.iter_all()?;
+
+        // Skip to start position
+        for _ in 0..start {
+            if iter.next().is_none() {
+                return Ok(records);
+            }
+        }
+
+        // Collect up to limit records
+        for _ in 0..limit {
+            match iter.next() {
+                Some(Ok(record)) => records.push(record),
+                Some(Err(e)) => return Err(e),
+                None => break,
+            }
+        }
+
+        Ok(records)
+    }
+
     /// Get the path for a segment
     fn segment_path(&self, segment: u64) -> PathBuf {
         self.storage
