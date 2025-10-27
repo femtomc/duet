@@ -71,7 +71,11 @@ impl PatternEngine {
     }
 
     /// Evaluate all patterns against a new assertion
-    pub fn eval_assert(&mut self, _handle: &Handle, _value: &preserves::IOValue) -> Vec<PatternMatch> {
+    pub fn eval_assert(
+        &mut self,
+        _handle: &Handle,
+        _value: &preserves::IOValue,
+    ) -> Vec<PatternMatch> {
         // TODO: Implement pattern matching logic
         Vec::new()
     }

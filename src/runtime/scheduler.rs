@@ -3,8 +3,8 @@
 //! Maintains ready queues per actor, enforces causal ordering,
 //! and integrates flow-control account limits.
 
-use std::collections::{BinaryHeap, HashMap};
 use std::cmp::Ordering;
+use std::collections::{BinaryHeap, HashMap};
 
 use super::turn::{ActorId, LogicalClock, TurnInput};
 
@@ -84,7 +84,10 @@ impl Scheduler {
     /// Enqueue a turn input
     pub fn enqueue(&mut self, actor: ActorId, input: TurnInput, cause: ScheduleCause) {
         // Get or initialize actor clock
-        let clock = self.actor_clocks.entry(actor.clone()).or_insert(LogicalClock::zero());
+        let clock = self
+            .actor_clocks
+            .entry(actor.clone())
+            .or_insert(LogicalClock::zero());
         let next_clock = clock.next();
 
         let turn = ScheduledTurn {
@@ -135,8 +138,8 @@ impl Scheduler {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::turn::FacetId;
+    use super::*;
 
     #[test]
     fn test_scheduler_enqueue() {

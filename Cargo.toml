@@ -21,7 +21,6 @@ serde_json = "1.0"
 
 # Error handling
 thiserror = "2.0"
-anyhow = "1.0"
 
 # Hashing and cryptography
 blake3 = "1.5"

@@ -3,11 +3,11 @@
 //! Provides high-level API for controlling the runtime: sending messages,
 //! stepping, rewinding, forking, merging, and inspecting state.
 
-use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use super::turn::{ActorId, FacetId, TurnId, BranchId};
 use super::RuntimeConfig;
+use super::error::Result;
+use super::turn::{ActorId, BranchId, FacetId, TurnId};
 
 /// Control interface for the runtime
 pub struct Control {
@@ -61,7 +61,12 @@ impl Control {
     }
 
     /// Fork a new branch
-    pub fn fork(&mut self, _source: BranchId, _new_branch: BranchId, _from_turn: Option<TurnId>) -> Result<BranchId> {
+    pub fn fork(
+        &mut self,
+        _source: BranchId,
+        _new_branch: BranchId,
+        _from_turn: Option<TurnId>,
+    ) -> Result<BranchId> {
         // TODO: Implement forking
         unimplemented!("fork not yet implemented")
     }
@@ -73,7 +78,12 @@ impl Control {
     }
 
     /// Get history for a branch
-    pub fn history(&self, _branch: &BranchId, _start: usize, _limit: usize) -> Result<Vec<TurnSummary>> {
+    pub fn history(
+        &self,
+        _branch: &BranchId,
+        _start: usize,
+        _limit: usize,
+    ) -> Result<Vec<TurnSummary>> {
         // TODO: Implement history retrieval
         Ok(Vec::new())
     }

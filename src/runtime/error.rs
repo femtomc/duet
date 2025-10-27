@@ -77,6 +77,9 @@ pub enum JournalError {
     Io(#[from] io::Error),
 }
 
+/// Convenience result alias for journal operations
+pub type JournalResult<T> = std::result::Result<T, JournalError>;
+
 /// Snapshot-specific errors
 #[derive(Debug, Error)]
 pub enum SnapshotError {
@@ -92,10 +95,17 @@ pub enum SnapshotError {
     #[error("Snapshot validation failed: {0}")]
     ValidationFailed(String),
 
+    /// Underlying storage error
+    #[error("Storage error: {0}")]
+    Storage(#[from] StorageError),
+
     /// IO error
     #[error("IO error: {0}")]
     Io(#[from] io::Error),
 }
+
+/// Convenience result alias for snapshot operations
+pub type SnapshotResult<T> = std::result::Result<T, SnapshotError>;
 
 /// Storage-specific errors
 #[derive(Debug, Error)]
@@ -125,6 +135,9 @@ pub enum StorageError {
     Json(#[from] serde_json::Error),
 }
 
+/// Convenience result alias for storage operations
+pub type StorageResult<T> = std::result::Result<T, StorageError>;
+
 /// Branch-specific errors
 #[derive(Debug, Error)]
 pub enum BranchError {
@@ -149,6 +162,9 @@ pub enum BranchError {
     },
 }
 
+/// Convenience result alias for branch operations
+pub type BranchResult<T> = std::result::Result<T, BranchError>;
+
 /// Actor execution errors
 #[derive(Debug, Error)]
 pub enum ActorError {
@@ -172,6 +188,9 @@ pub enum ActorError {
     #[error("Turn execution failed: {0}")]
     ExecutionFailed(String),
 }
+
+/// Convenience result alias for actor operations
+pub type ActorResult<T> = std::result::Result<T, ActorError>;
 
 /// Result type using RuntimeError
 pub type Result<T> = std::result::Result<T, RuntimeError>;

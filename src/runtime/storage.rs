@@ -3,10 +3,10 @@
 //! Manages the .duet/ directory structure, ensures atomic writes via
 //! temp files and renames, and provides utilities for persistence.
 
+use super::error::{StorageError, StorageResult};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use anyhow::{Context, Result};
 
 use super::RuntimeConfig;
 use super::turn::BranchId;
@@ -71,43 +71,57 @@ impl Storage {
     /// Write data atomically to a file
     ///
     /// Creates a temporary file, writes the data, syncs, then renames
-    pub fn write_atomic(&self, path: &Path, data: &[u8]) -> Result<()> {
+    pub fn write_atomic(&self, path: &Path, data: &[u8]) -> StorageResult<()> {
         let temp_path = path.with_extension("tmp");
 
         // Write to temporary file
-        let mut file = File::create(&temp_path)
-            .with_context(|| format!("Failed to create temp file: {:?}", temp_path))?;
+        let mut file = File::create(&temp_path).map_err(|e| StorageError::AtomicWriteFailed {
+            path: temp_path.clone(),
+            detail: e.to_string(),
+        })?;
 
         file.write_all(data)
-            .context("Failed to write data")?;
+            .map_err(|e| StorageError::AtomicWriteFailed {
+                path: temp_path.clone(),
+                detail: e.to_string(),
+            })?;
 
         file.sync_all()
-            .context("Failed to sync file")?;
+            .map_err(|e| StorageError::AtomicWriteFailed {
+                path: temp_path.clone(),
+                detail: e.to_string(),
+            })?;
 
         drop(file);
 
         // Rename atomically
-        fs::rename(&temp_path, path)
-            .with_context(|| format!("Failed to rename {:?} to {:?}", temp_path, path))?;
+        fs::rename(&temp_path, path).map_err(|e| StorageError::AtomicWriteFailed {
+            path: path.to_path_buf(),
+            detail: e.to_string(),
+        })?;
 
         // Sync parent directory
         if let Some(parent) = path.parent() {
-            let dir = OpenOptions::new()
-                .read(true)
-                .open(parent)
-                .with_context(|| format!("Failed to open directory: {:?}", parent))?;
+            let dir = OpenOptions::new().read(true).open(parent).map_err(|e| {
+                StorageError::AtomicWriteFailed {
+                    path: parent.to_path_buf(),
+                    detail: e.to_string(),
+                }
+            })?;
 
             dir.sync_all()
-                .context("Failed to sync directory")?;
+                .map_err(|e| StorageError::AtomicWriteFailed {
+                    path: parent.to_path_buf(),
+                    detail: e.to_string(),
+                })?;
         }
 
         Ok(())
     }
 
     /// Read a file
-    pub fn read_file(&self, path: &Path) -> Result<Vec<u8>> {
-        fs::read(path)
-            .with_context(|| format!("Failed to read file: {:?}", path))
+    pub fn read_file(&self, path: &Path) -> StorageResult<Vec<u8>> {
+        fs::read(path).map_err(StorageError::from)
     }
 
     /// Check if a path exists
@@ -116,18 +130,15 @@ impl Storage {
     }
 
     /// Create a directory and all parent directories
-    pub fn create_dir_all(&self, path: &Path) -> Result<()> {
-        fs::create_dir_all(path)
-            .with_context(|| format!("Failed to create directory: {:?}", path))
+    pub fn create_dir_all(&self, path: &Path) -> StorageResult<()> {
+        fs::create_dir_all(path).map_err(StorageError::from)
     }
 
     /// List files in a directory
-    pub fn list_dir(&self, path: &Path) -> Result<Vec<PathBuf>> {
+    pub fn list_dir(&self, path: &Path) -> StorageResult<Vec<PathBuf>> {
         let mut entries = Vec::new();
 
-        for entry in fs::read_dir(path)
-            .with_context(|| format!("Failed to read directory: {:?}", path))?
-        {
+        for entry in fs::read_dir(path).map_err(StorageError::from)? {
             let entry = entry?;
             entries.push(entry.path());
         }
@@ -137,7 +148,7 @@ impl Storage {
 }
 
 /// Initialize storage directories for a new runtime
-pub fn init_storage(root: &Path) -> Result<()> {
+pub fn init_storage(root: &Path) -> StorageResult<()> {
     let storage = Storage::new(root.to_path_buf());
 
     // Create all required directories
@@ -155,12 +166,11 @@ pub fn init_storage(root: &Path) -> Result<()> {
 }
 
 /// Write runtime configuration
-pub fn write_config(config: &RuntimeConfig) -> Result<()> {
+pub fn write_config(config: &RuntimeConfig) -> StorageResult<()> {
     let storage = Storage::new(config.root.clone());
     let config_path = storage.config_path();
 
-    let json = serde_json::to_vec_pretty(config)
-        .context("Failed to serialize config")?;
+    let json = serde_json::to_vec_pretty(config).map_err(StorageError::from)?;
 
     storage.write_atomic(&config_path, &json)?;
 
@@ -168,13 +178,12 @@ pub fn write_config(config: &RuntimeConfig) -> Result<()> {
 }
 
 /// Load runtime configuration
-pub fn load_config(root: &Path) -> Result<RuntimeConfig> {
+pub fn load_config(root: &Path) -> StorageResult<RuntimeConfig> {
     let storage = Storage::new(root.to_path_buf());
     let config_path = storage.config_path();
 
     let data = storage.read_file(&config_path)?;
-    let config: RuntimeConfig = serde_json::from_slice(&data)
-        .context("Failed to deserialize config")?;
+    let config: RuntimeConfig = serde_json::from_slice(&data).map_err(StorageError::from)?;
 
     Ok(config)
 }

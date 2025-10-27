@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use uuid::Uuid;
 
+use super::error::JournalError;
 use super::state::StateDelta;
 
 /// Unique identifier for a turn, deterministically computed
@@ -339,11 +340,12 @@ impl TurnRecord {
     /// Encode this turn record to bytes using preserves
     ///
     /// Format: [4-byte length prefix (little-endian)] + [preserves-packed data]
-    pub fn encode(&self) -> anyhow::Result<Vec<u8>> {
+    pub fn encode(&self) -> Result<Vec<u8>, JournalError> {
         use preserves::PackedWriter;
         let mut data_buf = Vec::new();
         let mut writer = PackedWriter::new(&mut data_buf);
-        preserves::serde::to_writer(&mut writer, self)?;
+        preserves::serde::to_writer(&mut writer, self)
+            .map_err(|e| JournalError::EncodingError(e.to_string()))?;
 
         // Prepend length
         let len = data_buf.len() as u32;
@@ -355,17 +357,15 @@ impl TurnRecord {
     }
 
     /// Decode a turn record from bytes
-    pub fn decode(bytes: &[u8]) -> anyhow::Result<Self> {
-        Ok(preserves::serde::from_bytes(bytes)?)
+    pub fn decode(bytes: &[u8]) -> Result<Self, JournalError> {
+        preserves::serde::from_bytes(bytes).map_err(|e| JournalError::DecodingError(e.to_string()))
     }
 
     /// Decode a turn record from a reader
     ///
     /// This reads the entire record into memory first, then decodes it.
     /// For streaming decoding, use a custom approach based on preserves PackedReader.
-    pub fn decode_from_reader<R: std::io::Read>(reader: &mut R) -> anyhow::Result<Self> {
-        use std::io::Read as _;
-
+    pub fn decode_from_reader<R: std::io::Read>(reader: &mut R) -> Result<Self, JournalError> {
         // Read length prefix (u32 in little-endian)
         let mut len_buf = [0u8; 4];
         reader.read_exact(&mut len_buf)?;

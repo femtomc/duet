@@ -374,7 +374,9 @@ CLI communicates via `runtime::control`, so all behaviour is testable without ru
    - Random CRDT operations to ensure join is associative/commutative/idempotent.  
    - Generate random work/repay sequences to validate flow-control invariants and ensure no negative balances or credit bypasses occur.  
    - Randomly inject external success/failure responses to validate determinism and circuit-breaking logic.  
-   - Property-test pattern subscriptions by randomly generating assertion streams and verifying match sets after joins.
+   - Property-test pattern subscriptions by randomly generating assertion streams and verifying match sets after joins.  
+   - Fuzz journal recovery: synthesize partial writes/truncations and ensure validate/rebuild produce consistent indexes.  
+   - Fuzz control protocol by generating random command sequences and asserting responses stay deterministic.
 
 4. **Core invariant assertions (behavioural unit tests)**  
    - **Single-active-facet**: during turn execution, assert only one facet is marked `Active`; nested turns must panic in tests.  

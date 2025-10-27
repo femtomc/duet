@@ -6,14 +6,14 @@
 //! - Entities: behavior handlers attached to facets
 //! - Activation: execution context for a turn
 
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
-use parking_lot::RwLock;
 
+use super::error::ActorResult;
 use super::state::{
-    AssertionSet, CapabilityMap, FacetMap, PNCounter, StateDelta,
-    AssertionDelta, FacetDelta, CapabilityDelta, AccountDelta,
-    FacetMetadata, FacetStatus,
+    AccountDelta, AssertionDelta, AssertionSet, CapabilityDelta, CapabilityMap, FacetDelta,
+    FacetMap, FacetMetadata, FacetStatus, PNCounter, StateDelta,
 };
 use super::turn::{ActorId, FacetId, Handle, TurnInput, TurnOutput};
 
@@ -112,7 +112,7 @@ impl Actor {
     pub fn execute_turn(
         &self,
         inputs: Vec<TurnInput>,
-    ) -> anyhow::Result<(Vec<TurnOutput>, StateDelta)> {
+    ) -> ActorResult<(Vec<TurnOutput>, StateDelta)> {
         // Create activation context
         let mut activation = Activation::new(self.id.clone(), self.root_facet.clone());
 
@@ -129,11 +129,7 @@ impl Actor {
     }
 
     /// Process a single input
-    fn process_input(
-        &self,
-        activation: &mut Activation,
-        input: TurnInput,
-    ) -> anyhow::Result<()> {
+    fn process_input(&self, activation: &mut Activation, input: TurnInput) -> ActorResult<()> {
         match input {
             TurnInput::ExternalMessage { facet, payload, .. } => {
                 // Deliver message to entities on this facet
@@ -330,7 +326,7 @@ pub trait Entity: Send + Sync {
         &self,
         activation: &mut Activation,
         payload: &preserves::IOValue,
-    ) -> anyhow::Result<()>;
+    ) -> ActorResult<()>;
 
     /// Handle a new assertion (pattern match)
     fn on_assert(
@@ -338,21 +334,17 @@ pub trait Entity: Send + Sync {
         _activation: &mut Activation,
         _handle: &Handle,
         _value: &preserves::IOValue,
-    ) -> anyhow::Result<()> {
+    ) -> ActorResult<()> {
         Ok(())
     }
 
     /// Handle a retraction
-    fn on_retract(
-        &self,
-        _activation: &mut Activation,
-        _handle: &Handle,
-    ) -> anyhow::Result<()> {
+    fn on_retract(&self, _activation: &mut Activation, _handle: &Handle) -> ActorResult<()> {
         Ok(())
     }
 
     /// Handle facet stop
-    fn on_stop(&self, _activation: &mut Activation) -> anyhow::Result<()> {
+    fn on_stop(&self, _activation: &mut Activation) -> ActorResult<()> {
         Ok(())
     }
 }
@@ -368,7 +360,7 @@ mod tests {
             &self,
             activation: &mut Activation,
             payload: &preserves::IOValue,
-        ) -> anyhow::Result<()> {
+        ) -> ActorResult<()> {
             // Echo the message back
             activation.send_message(
                 activation.actor_id.clone(),

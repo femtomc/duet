@@ -3,12 +3,12 @@
 //! Creates periodic snapshots of full runtime state for faster recovery
 //! and time-travel operations.
 
-use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use super::turn::{TurnId, BranchId};
-use super::state::{AssertionSet, FacetMap, CapabilityMap};
+use super::error::{SnapshotError, SnapshotResult};
+use super::state::{AssertionSet, CapabilityMap, FacetMap};
 use super::storage::Storage;
+use super::turn::{BranchId, TurnId};
 
 /// Complete runtime snapshot at a specific turn
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,14 +55,15 @@ impl SnapshotManager {
     }
 
     /// Save a snapshot using preserves encoding
-    pub fn save(&self, snapshot: &RuntimeSnapshot) -> Result<()> {
+    pub fn save(&self, snapshot: &RuntimeSnapshot) -> SnapshotResult<()> {
         let snapshot_path = self.snapshot_path(&snapshot.branch, &snapshot.turn_id);
 
         // Serialize snapshot using preserves
         use preserves::PackedWriter;
         let mut buf = Vec::new();
         let mut writer = PackedWriter::new(&mut buf);
-        preserves::serde::to_writer(&mut writer, snapshot)?;
+        preserves::serde::to_writer(&mut writer, snapshot)
+            .map_err(|e| SnapshotError::InvalidFormat(e.to_string()))?;
 
         self.storage.write_atomic(&snapshot_path, &buf)?;
 
@@ -70,17 +71,22 @@ impl SnapshotManager {
     }
 
     /// Load a snapshot from preserves encoding
-    pub fn load(&self, branch: &BranchId, turn_id: &TurnId) -> Result<RuntimeSnapshot> {
+    pub fn load(&self, branch: &BranchId, turn_id: &TurnId) -> SnapshotResult<RuntimeSnapshot> {
         let snapshot_path = self.snapshot_path(branch, turn_id);
 
         let data = self.storage.read_file(&snapshot_path)?;
-        let snapshot: RuntimeSnapshot = preserves::serde::from_bytes(&data)?;
+        let snapshot: RuntimeSnapshot = preserves::serde::from_bytes(&data)
+            .map_err(|e| SnapshotError::InvalidFormat(e.to_string()))?;
 
         Ok(snapshot)
     }
 
     /// Find the nearest snapshot at or before a given turn
-    pub fn nearest_snapshot(&self, _branch: &BranchId, _turn_id: &TurnId) -> Result<Option<TurnId>> {
+    pub fn nearest_snapshot(
+        &self,
+        _branch: &BranchId,
+        _turn_id: &TurnId,
+    ) -> SnapshotResult<Option<TurnId>> {
         // TODO: Implement snapshot search
         Ok(None)
     }

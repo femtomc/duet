@@ -3,11 +3,11 @@
 //! Tracks branch relationships, implements fork/rewind/goto operations,
 //! and orchestrates CRDT-based merges.
 
-use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use super::turn::{TurnId, BranchId};
+use super::error::{BranchError, BranchResult};
+use super::turn::{BranchId, TurnId};
 
 /// Branch metadata
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,9 +71,20 @@ impl BranchManager {
     }
 
     /// Create a new branch forked from another
-    pub fn fork(&mut self, source: &BranchId, new_branch: BranchId, base_turn: TurnId) -> Result<()> {
-        let source_metadata = self.branches.get(source)
-            .ok_or_else(|| anyhow::anyhow!("Source branch not found"))?;
+    pub fn fork(
+        &mut self,
+        source: &BranchId,
+        new_branch: BranchId,
+        base_turn: TurnId,
+    ) -> BranchResult<()> {
+        if self.branches.contains_key(&new_branch) {
+            return Err(BranchError::AlreadyExists(new_branch.0.clone()));
+        }
+
+        let source_metadata = self
+            .branches
+            .get(source)
+            .ok_or_else(|| BranchError::NotFound(source.0.clone()))?;
 
         let metadata = BranchMetadata {
             id: new_branch.clone(),
@@ -89,9 +100,9 @@ impl BranchManager {
     }
 
     /// Switch to a different branch
-    pub fn switch_branch(&mut self, branch: BranchId) -> Result<()> {
+    pub fn switch_branch(&mut self, branch: BranchId) -> BranchResult<()> {
         if !self.branches.contains_key(&branch) {
-            anyhow::bail!("Branch not found: {}", branch);
+            return Err(BranchError::NotFound(branch.0.clone()));
         }
 
         self.active_branch = branch;
@@ -99,9 +110,11 @@ impl BranchManager {
     }
 
     /// Update the head turn for a branch
-    pub fn update_head(&mut self, branch: &BranchId, turn: TurnId) -> Result<()> {
-        let metadata = self.branches.get_mut(branch)
-            .ok_or_else(|| anyhow::anyhow!("Branch not found"))?;
+    pub fn update_head(&mut self, branch: &BranchId, turn: TurnId) -> BranchResult<()> {
+        let metadata = self
+            .branches
+            .get_mut(branch)
+            .ok_or_else(|| BranchError::NotFound(branch.0.clone()))?;
 
         metadata.head_turn = turn;
         Ok(())
@@ -114,7 +127,7 @@ impl BranchManager {
     }
 
     /// Merge two branches using CRDT join
-    pub fn merge(&mut self, _source: &BranchId, _target: &BranchId) -> Result<MergeResult> {
+    pub fn merge(&mut self, _source: &BranchId, _target: &BranchId) -> BranchResult<MergeResult> {
         // TODO: Implement CRDT merge
         unimplemented!("Branch merge not yet implemented")
     }
@@ -171,7 +184,9 @@ mod tests {
         let experiment = BranchId::new("experiment");
         let base_turn = TurnId::new("turn_10".to_string());
 
-        manager.fork(&main, experiment.clone(), base_turn.clone()).unwrap();
+        manager
+            .fork(&main, experiment.clone(), base_turn.clone())
+            .unwrap();
 
         let metadata = manager.get_branch(&experiment).unwrap();
         assert_eq!(metadata.parent, Some(main));

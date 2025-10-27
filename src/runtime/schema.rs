@@ -4,9 +4,9 @@
 //! capabilities, external request/response payloads, and CRDT components.
 //! Ensures stable schema identifiers for backward compatibility.
 
+use blake3::Hasher;
 use std::collections::HashMap;
 use std::sync::OnceLock;
-use blake3::Hasher;
 
 /// Schema identifier computed from the schema definition
 pub type SchemaId = String;
@@ -119,9 +119,7 @@ impl SchemaRegistry {
 
     /// Validate that a schema hash matches the current version
     pub fn validate_hash(&self, name: &str, hash: &str) -> bool {
-        self.get(name)
-            .map(|def| def.hash == hash)
-            .unwrap_or(false)
+        self.get(name).map(|def| def.hash == hash).unwrap_or(false)
     }
 }
 

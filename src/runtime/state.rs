@@ -88,7 +88,10 @@ impl AssertionSet {
         for (actor, handle, value, version) in &delta.added {
             let key = (actor.clone(), handle.clone());
             // Only add if not tombstoned
-            if !self.tombstones.contains(&(actor.clone(), handle.clone(), *version)) {
+            if !self
+                .tombstones
+                .contains(&(actor.clone(), handle.clone(), *version))
+            {
                 self.active.insert(key, (value.clone(), *version));
             }
         }
@@ -96,7 +99,8 @@ impl AssertionSet {
         for (actor, handle, version) in &delta.retracted {
             let key = (actor.clone(), handle.clone());
             self.active.remove(&key);
-            self.tombstones.insert((actor.clone(), handle.clone(), *version));
+            self.tombstones
+                .insert((actor.clone(), handle.clone(), *version));
         }
     }
 
@@ -109,7 +113,10 @@ impl AssertionSet {
 
         // Union of active assertions, minus tombstones
         for (key, (value, version)) in self.active.iter().chain(other.active.iter()) {
-            if !result.tombstones.contains(&(key.0.clone(), key.1.clone(), *version)) {
+            if !result
+                .tombstones
+                .contains(&(key.0.clone(), key.1.clone(), *version))
+            {
                 result.active.insert(key.clone(), (value.clone(), *version));
             }
         }
@@ -191,7 +198,8 @@ impl FacetMap {
         let mut result = FacetMap::new();
 
         for (id, metadata) in self.facets.iter().chain(other.facets.iter()) {
-            result.facets
+            result
+                .facets
                 .entry(id.clone())
                 .and_modify(|existing| {
                     // Take the max status (Terminated dominates Alive)
@@ -279,7 +287,8 @@ impl CapabilityMap {
         let mut result = CapabilityMap::new();
 
         for (id, metadata) in self.capabilities.iter().chain(other.capabilities.iter()) {
-            result.capabilities
+            result
+                .capabilities
                 .entry(*id)
                 .and_modify(|existing| {
                     // Revoked dominates
@@ -414,16 +423,12 @@ mod tests {
         let v2 = Uuid::new_v4();
 
         let mut set1 = AssertionSet::new();
-        set1.active.insert(
-            (actor.clone(), handle1.clone()),
-            (value.clone(), v1),
-        );
+        set1.active
+            .insert((actor.clone(), handle1.clone()), (value.clone(), v1));
 
         let mut set2 = AssertionSet::new();
-        set2.active.insert(
-            (actor.clone(), handle2.clone()),
-            (value.clone(), v2),
-        );
+        set2.active
+            .insert((actor.clone(), handle2.clone()), (value.clone(), v2));
 
         let joined = set1.join(&set2);
         assert_eq!(joined.active.len(), 2);
@@ -457,7 +462,10 @@ mod tests {
         );
 
         let joined = map1.join(&map2);
-        assert_eq!(joined.facets.get(&facet_id).unwrap().status, FacetStatus::Terminated);
+        assert_eq!(
+            joined.facets.get(&facet_id).unwrap().status,
+            FacetStatus::Terminated
+        );
     }
 
     #[test]

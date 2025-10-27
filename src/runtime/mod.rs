@@ -3,8 +3,8 @@
 //! This module provides the main `Runtime` struct that coordinates all subsystems
 //! and exposes the public interface for embedding or controlling the runtime.
 
-use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 // Submodules
 pub mod actor;
@@ -50,13 +50,16 @@ impl Default for RuntimeConfig {
     }
 }
 
-use storage::Storage;
-use scheduler::Scheduler;
-use journal::{JournalWriter, JournalReader};
-use snapshot::SnapshotManager;
 use branch::BranchManager;
+use journal::{JournalReader, JournalWriter};
+use scheduler::Scheduler;
 use schema::SchemaRegistry;
+use snapshot::SnapshotManager;
+use storage::Storage;
 use turn::BranchId;
+
+use actor::Actor;
+use std::collections::HashMap;
 
 /// The main runtime orchestrator
 ///
@@ -69,6 +72,12 @@ pub struct Runtime {
     snapshot_manager: SnapshotManager,
     branch_manager: BranchManager,
     current_branch: BranchId,
+
+    /// Active actors in this runtime
+    actors: HashMap<turn::ActorId, Actor>,
+
+    /// Turn counter for snapshot interval
+    turn_count: u64,
 }
 
 impl Runtime {
@@ -103,26 +112,31 @@ impl Runtime {
             });
 
         // Validate and repair journal (truncates corrupted segments)
-        journal_reader.validate_and_repair()
+        journal_reader
+            .validate_and_repair()
             .map_err(|e| RuntimeError::Init(format!("Journal validation failed: {}", e)))?;
 
         // Rebuild index from actual segment data
-        let clean_index = journal_reader.rebuild_index()
+        let clean_index = journal_reader
+            .rebuild_index()
             .map_err(|e| RuntimeError::Init(format!("Index rebuild failed: {}", e)))?;
 
         // Save the clean index to disk
-        let index_path = storage.branch_meta_dir(&current_branch).join("journal.index");
+        let index_path = storage
+            .branch_meta_dir(&current_branch)
+            .join("journal.index");
         std::fs::create_dir_all(storage.branch_meta_dir(&current_branch))
             .map_err(|e| RuntimeError::Init(format!("Failed to create meta dir: {}", e)))?;
-        clean_index.save(&index_path)
+        clean_index
+            .save(&index_path)
             .map_err(|e| RuntimeError::Init(format!("Failed to save index: {}", e)))?;
 
         // Now create journal writer with the clean index
-        let journal_writer = JournalWriter::new_with_index(
-            storage.clone(),
-            current_branch.clone(),
-            clean_index,
-        ).map_err(|e| RuntimeError::Init(format!("Failed to create journal writer: {}", e)))?;
+        let journal_writer =
+            JournalWriter::new_with_index(storage.clone(), current_branch.clone(), clean_index)
+                .map_err(|e| {
+                    RuntimeError::Init(format!("Failed to create journal writer: {}", e))
+                })?;
 
         Ok(Self {
             config,
@@ -132,7 +146,148 @@ impl Runtime {
             snapshot_manager,
             branch_manager,
             current_branch,
+            actors: HashMap::new(),
+            turn_count: 0,
         })
+    }
+
+    /// Execute a single turn
+    ///
+    /// Takes the next ready turn from the scheduler, executes it,
+    /// records it to the journal, and updates state.
+    pub fn execute_turn(&mut self) -> Result<Option<TurnRecord>> {
+        // Get next ready turn from scheduler
+        let scheduled_turn = match self.scheduler.next_turn() {
+            Some(turn) => turn,
+            None => return Ok(None), // No turns ready
+        };
+
+        let actor_id = scheduled_turn.actor.clone();
+        let clock = scheduled_turn.clock;
+        let inputs = scheduled_turn.inputs;
+
+        // Get or create actor
+        let actor = self.actors
+            .entry(actor_id.clone())
+            .or_insert_with(|| Actor::new(actor_id.clone()));
+
+        // Execute the turn
+        let (outputs, delta) = actor
+            .execute_turn(inputs.clone())
+            .map_err(|e| RuntimeError::Actor(e))?;
+
+        // Update flow control in scheduler (before consuming delta)
+        let borrowed = delta.accounts.borrowed;
+        let repaid = delta.accounts.repaid;
+        self.scheduler.update_account(&actor_id, borrowed, repaid);
+
+        // Build turn record
+        let parent = None; // TODO: Track parent turn ID for causality
+        let turn_record = TurnRecord::new(
+            actor_id.clone(),
+            self.current_branch.clone(),
+            clock,
+            parent,
+            inputs,
+            outputs,
+            delta,
+        );
+
+        // Append to journal
+        self.journal_writer
+            .append(&turn_record)
+            .map_err(|e| RuntimeError::Journal(e))?;
+
+        // Update turn count
+        self.turn_count += 1;
+
+        // Check if we should create a snapshot
+        if self.snapshot_manager.should_snapshot(self.turn_count) {
+            self.create_snapshot()?;
+        }
+
+        Ok(Some(turn_record))
+    }
+
+    /// Step the runtime forward by one turn
+    pub fn step(&mut self) -> Result<Option<TurnRecord>> {
+        self.execute_turn()
+    }
+
+    /// Step the runtime forward by N turns
+    pub fn step_n(&mut self, count: usize) -> Result<Vec<TurnRecord>> {
+        let mut records = Vec::new();
+
+        for _ in 0..count {
+            match self.execute_turn()? {
+                Some(record) => records.push(record),
+                None => break, // No more ready turns
+            }
+        }
+
+        Ok(records)
+    }
+
+    /// Create a snapshot of current runtime state
+    fn create_snapshot(&mut self) -> Result<()> {
+        use snapshot::RuntimeSnapshot;
+        use state::{AssertionSet, FacetMap, CapabilityMap};
+
+        // Collect current state from all actors
+        let mut all_assertions = AssertionSet::new();
+        let mut all_facets = FacetMap::new();
+        let mut all_capabilities = CapabilityMap::new();
+
+        for actor in self.actors.values() {
+            // Merge actor state into snapshot
+            let actor_assertions = actor.assertions.read();
+            all_assertions = all_assertions.join(&actor_assertions);
+
+            let actor_facets = actor.facets.read();
+            all_facets = all_facets.join(&actor_facets);
+
+            let actor_caps = actor.capabilities.read();
+            all_capabilities = all_capabilities.join(&actor_caps);
+        }
+
+        // TODO: Get the actual turn ID of the last executed turn
+        let turn_id = TurnId::new(format!("turn_{:08}", self.turn_count));
+
+        let snapshot = RuntimeSnapshot {
+            branch: self.current_branch.clone(),
+            turn_id,
+            assertions: all_assertions,
+            facets: all_facets,
+            capabilities: all_capabilities,
+            metadata: snapshot::SnapshotMetadata {
+                created_at: chrono::Utc::now(),
+                turn_count: self.turn_count,
+            },
+        };
+
+        self.snapshot_manager
+            .save(&snapshot)
+            .map_err(|e| RuntimeError::Snapshot(e))?;
+
+        Ok(())
+    }
+
+    /// Enqueue a message to an actor
+    pub fn send_message(
+        &mut self,
+        target_actor: turn::ActorId,
+        target_facet: turn::FacetId,
+        payload: preserves::IOValue,
+    ) {
+        use scheduler::ScheduleCause;
+
+        let input = turn::TurnInput::ExternalMessage {
+            actor: target_actor.clone(),
+            facet: target_facet,
+            payload,
+        };
+
+        self.scheduler.enqueue(target_actor, input, ScheduleCause::External);
     }
 
     /// Initialize runtime storage directories and metadata
@@ -194,5 +349,5 @@ impl Runtime {
 
 // Re-export commonly used types
 pub use control::Control;
+pub use error::{Result, RuntimeError};
 pub use turn::{TurnId, TurnRecord};
-pub use error::{RuntimeError, Result};
