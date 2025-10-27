@@ -465,7 +465,7 @@ The Rust runtime exposes a process-level control protocol that the Python CLI (a
 | `back` | `{ "branch": "name", "count": 1 }` | `{ "head": new_head }` | convenience wrapper around `goto` |
 | `send_message` | `{ "branch": "name", "target": { "actor": "...", "facet": "..." }, "payload": { ... }, "format": "preserves-text" }` | `{ "queued_turn": turn_id }` | payload supplied as preserves text/binary encoded data |
 | `inject_assertion` | `{ "branch": "name", "handle": "...", "value": { ... }, "action": "assert"|"retract" }` | `{ "queued_turn": turn_id }` | |
-| `watch_pattern` | `{ "branch": "name", "pattern": { ... }, "watch_id": "optional" }` | `{ "watch_id": "uuid" }` | installs pattern subscription; matches reported via notifications |
+| `watch_pattern` | `{ "branch": "name", "pattern": { ... }, "watch_id": "optional" }` | `{ "watch_id": "stable-id" }` | installs pattern subscription; patterns are preserves-encoded, runtime derives a deterministic ID (unless overridden) and reports matches via notifications |
 | `unwatch_pattern` | `{ "watch_id": "uuid" }` | `{ "unwatched": true }` | |
 | `fork` | `{ "source": "main", "new_branch": "experiment", "from_turn": 150 }` | `{ "branch": "experiment", "base_turn": 150 }` | |
 | `merge` | `{ "source": "experiment", "target": "main" }` | `{ "merge_turn": turn_id, "warnings": [ ... ] }` | result includes conflict metadata |
