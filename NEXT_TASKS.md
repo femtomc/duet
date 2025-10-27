@@ -21,7 +21,7 @@
 
 ## 4. CLI & Control Protocol Implementation
 - Implement control commands (status, history, step/back/goto, fork/merge, watch/unwatch, connect/disconnect peers).
-- Build Python Textual CLI scaffolding (`python/duet_cli`): controllers, models, views, protocol client.
+- Expand the Python CLI (`python/duet`) with additional subcommands/formatting; keep it script-friendly for smoke tests and future TUIs.
 - Tests: control protocol golden transcripts, CLI integration with mocked runtime.
 
 ## 5. External Service Integrations
@@ -46,4 +46,3 @@
 - Surface metrics for CLI (pending inputs, snapshot latency, branch stats).
 - Document runtime APIs, add doc comments (resolve current missing_docs warnings).
 - Provide developer tooling scripts (format, lint, test). 
-

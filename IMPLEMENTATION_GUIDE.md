@@ -60,20 +60,14 @@ duet/
 │   │   ├── control.rs        // Runtime control facade used by CLI/tests
 │   │   └── link.rs           // Network links for distributed actors (future)
 ├── python/
-│   └── duet_cli/
+│   └── duet/
 │       ├── pyproject.toml    // Python package definition
-│       ├── src/duet_cli/
+│       ├── src/duet/
 │       │   ├── __init__.py
-│       │   ├── __main__.py   // Entry point (python -m duet_cli)
-│       │   ├── app.py        // Textual App subclass
-│       │   ├── protocol/     // Request/response codecs, version info
-│       │   ├── controllers/  // Runtime control clients, command handlers
-│       │   ├── models/       // Data representations mirroring runtime state
-│       │   ├── views/        // Screens & widgets (Textual components)
-│       │   └── services/     // Background tasks (subscriptions, debouncing)
-│       └── tests/
-│           ├── unit/
-│           └── fixtures/     // NDJSON transcripts, mock runtime responses
+│       │   ├── __main__.py   // Entry point (python -m duet)
+│       │   ├── cli.py        // Command dispatcher + Rich output helpers
+│       │   └── protocol/     // Control client, request helpers
+│       └── README.md
 └── tests/
     ├── integration.rs        // End-to-end execution, time-travel, fork
     └── determinism.rs        // Replay determinism & branch convergence
@@ -81,7 +75,7 @@ duet/
 
 **Key runtime flows**
 - External input (CLI, timers, linked tasks, out-of-process services) enqueue `TurnInput` events tagged with logical clocks and actor IDs.
-- The Python Textual CLI interacts with the Rust runtime through the control API, exchanging structured commands/responses over a stable protocol (see Section 11).
+- The Python CLI interacts with the Rust runtime through the control API, exchanging structured commands/responses over a stable protocol (see Section 11).
 - Scheduler selects the next enabled turn (lowest causal order) and executes it within a fresh activation context.
 - Turn execution produces outputs (assertions, retractions, messages, facet actions) and a CRDT state delta.
 - Journal writer commits the turn record (preserves-packed) and, when required, snapshot manager persists a full-state checkpoint.
@@ -215,11 +209,21 @@ The runtime provides infrastructure for registering entity types and persisting 
   - No manual hydration code needed
 
 - **HydratableEntity Trait** (optional): For rare cases where private state can't live in the dataspace (e.g., expensive caches, ephemeral derived data):
-  - Implement `snapshot_state()` to capture private state as `preserves::IOValue`
-  - Implement `restore_state()` to hydrate from snapshot during replay
+  - Implement `snapshot_state()` to capture private state as `preserves::IOValue`.
+  - Implement `restore_state()` to hydrate from snapshot during replay.
+  - Register the type with `EntityRegistry::register_hydratable`, which stores snapshot/restore adapters and ensures snapshots include the private state blob. During `goto`/replay the runtime restores these blobs before entities resume.
   - **Merge behavior**: If two branches have different private state, a merge warning is generated and one state wins arbitrarily. This is unavoidable for non-CRDT state—prefer dataspace-backed state when possible.
 
-- **Pattern Subscriptions**: Pattern IDs are tracked in entity metadata. Full pattern re-registration during hydration requires storing the complete pattern specification (not just IDs) in metadata—this is a TODO for complete hydration support. Current implementation recreates entities and attaches them to actors/facets on startup.
+- **Pattern Subscriptions**: Entity metadata persists the full pattern specification, so hydration and time-travel re-register watches automatically. Declarative assertions made inside a turn (via `Activation::assert`) are routed through the pattern engine, meaning local assertions trigger `PatternMatched` notifications the same way external assertions do.
+
+#### Built-in Entities (`codebase` module)
+
+The crate ships with a small catalog of entities registered via `codebase::register_codebase_entities()` (called automatically when a runtime is created):
+
+- `echo` – Accepts incoming messages and asserts `(echo <topic> <payload>)` into the dataspace. The topic defaults to `"echo"`, or you can configure it by passing a preserves string as the entity config.
+- `counter` – A hydratable counter that maintains an integer value across time travel. Each message increments by the signed integer payload (defaulting to `1`) and asserts `(counter <value>)`.
+
+Applications can register their own entity types alongside these defaults using the global `EntityRegistry`.
 
 ### 6.4 `runtime::scheduler`
 - Maintain ready queues per actor, keyed by logical clock and causal dependencies.  
@@ -345,22 +349,21 @@ To support automatic branch merges, every persistent state component is modelled
 
 ---
 
-## 8. CLI Functionality (Python Textual App)
+## 8. CLI Functionality (Python Command-Line)
 
-Reference command palette (invoked within the Textual UI):
+The `duet` CLI is intentionally stateless: each invocation launches `duetd`, performs a single command, prints the response with Rich, and exits. This makes it easy to script or drive via agents. Core subcommands include:
 
-- `init [--root PATH] [--snapshot-interval N]` – create runtime dirs, write config, bootstrap metadata.  
-- `status` – display active branch, head turn, queued inputs, snapshot info.  
-- `history [--branch BRANCH] [--range START..END]` – show concise turn listing (turn id, actor, cause, outputs).  
-- `send --actor ACTOR_ID --facet FACET_ID --payload <preserves text>` – inject message or schedule work.  
-- `step [--n COUNT]` – advance runtime by COUNT turns (default 1).  
-- `back [--n COUNT]` / `goto --turn TURN_ID` – rewind or jump to a specified turn.  
-- `fork --branch NEW_BRANCH [--from TURN_ID]` – create a new branch.  
-- `merge --source SRC --into DEST [--turn TURN_ID]` – merge SRC into DEST at HEAD or specific turn; report conflicts/resolutions.  
-- `watch --pattern <expr>` / `unwatch <id>` – register or remove pattern subscriptions; updates stream via notifications.  
-- `dump-turn --turn TURN_ID` – optional debugging command to print decoded turn record.
+- `status` – display the active branch, head turn, queued inputs, and snapshot interval.  
+- `history [--branch BRANCH] [--start N] [--limit M]` – list recent turns for a branch (turn id, actor, summary).  
+- `send --actor ACTOR_ID --facet FACET_ID --payload <preserves text>` – inject a message or work item.  
+- `register-entity --actor ACTOR_ID --facet FACET_ID --entity-type TYPE [--config VALUE]` – persist an entity and attach it to a facet.  
+- `list-entities [--actor ACTOR_ID]` – enumerate registered entities (optionally filtered by actor).  
+- `goto --turn-id TURN_ID [--branch BRANCH]` / `back [--count N] [--branch BRANCH]` – time-travel operations.  
+- `fork --new-branch NAME [--source BRANCH] [--from-turn TURN_ID]` – create a branch.  
+- `merge --source SRC --target DEST` – merge one branch into another and report warnings.  
+- `raw COMMAND '{"param": ...}'` – send an arbitrary control-plane request for experimentation.
 
-The Textual CLI uses the control protocol defined in Section 11; every command maps to a request on the runtime, and streaming updates (`pattern_match`, `turn_completed`, etc.) update the UI in real time.
+The CLI uses the control protocol defined in Section 11; extending it with additional subcommands should flow through the same request helpers so they remain testable.
 
 ---
 
@@ -568,14 +571,13 @@ This guide should remain the single source of truth for Duet’s architecture. U
 - **Testing discipline**: favour module-level unit tests and scenario-based integration tests under `tests/`. Provide deterministic stubs for external services by emitting pre-canned `TurnInput::ExternalResponse` events.
 - **IPC protocol**: expose a stable command protocol (e.g., JSON-RPC) via stdin/stdout pipes or a Unix socket. Serialize with `serde` in Rust; mirror the schema in Python. This keeps lifetimes simple and avoids tight FFI coupling.
 
-### 13.2 Python Textual CLI Guidelines
+### 13.2 Python CLI Guidelines
 
-- **Package layout**: follow the structure sketched in Section 3 (package metadata, `src/duet_cli`, subpackages for protocol/controllers/models/views/services). Ensure `__main__.py` enables `python -m duet_cli`.
-- **Async integration**: Textual is asyncio-native. Implement runtime clients using `asyncio`/`anyio` streams that speak the same protocol as the Rust control API. Keep network code in a separate service layer for testability.
-- **UI architecture**: separate data models from widgets. Use Textual `Screen`/`Widget` subclasses for timelines, branch trees, and diff panes. Drive updates via `Message` classes so logic stays decoupled from presentation.
-- **Protocol fidelity**: mirror the Rust command/response schema with `pydantic` models or typed dataclasses. Handle protocol errors gracefully—surface them in a notification panel instead of crashing the app.
-- **Testing**: adopt Textual’s `pilot` helper for widget interaction tests. Add unit tests for protocol serialization and a smoke test that drives the CLI against a mocked runtime process.
-- **Tooling**: enforce formatting (`ruff`, `black`), typing (`mypy`), and dependency pinning. Provide automation (Makefile/nox) that builds the Rust crate, installs the CLI package, and runs the combined test suite.
+- **Package layout**: follow the structure sketched in Section 3 (package metadata, `src/duet`, protocol client, and CLI entry point). Ensure `__main__.py` enables `python -m duet` so both `uv run` and the installed `duet` script behave the same.
+- **Command model**: keep the CLI stateless and composable—implement subcommands (`status`, `history`, `send`, `register-entity`, etc.) that spawn `duetd`, perform a handshake, execute one request, pretty-print the result with `rich`, and exit. This makes it easy for agents or shell scripts to drive the runtime.
+- **Runtime discovery**: auto-detect the daemon binary (defaulting to `target/debug/duetd` or falling back to `duetd` on `PATH`), while allowing overrides via `DUETD_BIN` or `--duetd-bin` so different builds can be tested.
+- **Testing**: exercise the CLI with subprocess-based smoke tests (e.g., via `uv run` in CI) and reuse the service protocol tests to lock down JSON envelopes. Add unit tests for any argument parsing helpers.
+- **Future extensions**: a Textual/TUI experience can layer on top of the same control client later. Keep the protocol helpers and command dispatch isolated so richer front-ends can reuse them without duplication.
 
 ### 13.3 Cross-Language Integration Strategy
 

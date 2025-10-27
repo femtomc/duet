@@ -19,6 +19,7 @@ pub struct Pattern {
     pub id: PatternId,
 
     /// Pattern expression
+    #[serde(with = "super::registry::preserves_text_serde")]
     pub pattern: preserves::IOValue,
 
     /// Facet that registered this pattern

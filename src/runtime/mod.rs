@@ -17,6 +17,7 @@ pub mod pattern;
 pub mod registry;
 pub mod scheduler;
 pub mod schema;
+pub mod service;
 pub mod snapshot;
 pub mod state;
 pub mod storage;
@@ -94,6 +95,8 @@ impl Runtime {
     ///
     /// This initializes all subsystems and performs crash recovery if needed.
     pub fn new(config: RuntimeConfig) -> Result<Self> {
+        crate::codebase::register_codebase_entities();
+        
         // Initialize storage
         let storage = Storage::new(config.root.clone());
 
@@ -166,8 +169,8 @@ impl Runtime {
 
         // Load entity metadata
         let entity_meta_path = storage.meta_dir().join("entities.json");
-        let entity_manager = EntityManager::load(&entity_meta_path)
-            .unwrap_or_else(|_| EntityManager::new());
+        let entity_manager =
+            EntityManager::load(&entity_meta_path).unwrap_or_else(|_| EntityManager::new());
 
         let mut runtime = Self {
             config,
@@ -184,7 +187,7 @@ impl Runtime {
         };
 
         // Hydrate entities: recreate and attach them from metadata
-        runtime.hydrate_entities()?;
+        runtime.hydrate_entities(None)?;
 
         Ok(runtime)
     }
@@ -193,31 +196,52 @@ impl Runtime {
     ///
     /// Recreates entity instances using the global registry, attaches them to
     /// actors/facets, and re-registers pattern subscriptions.
-    fn hydrate_entities(&mut self) -> Result<()> {
+    fn hydrate_entities(
+        &mut self,
+        entity_states: Option<&HashMap<uuid::Uuid, snapshot::EntityStateSnapshot>>,
+    ) -> Result<()> {
         use registry::EntityRegistry;
+
+        let registry = EntityRegistry::global();
 
         // Clone metadata to avoid borrow conflicts
         let entities: Vec<_> = self.entity_manager.list().into_iter().cloned().collect();
 
         for metadata in entities {
             // Create entity instance using registry
-            let entity = EntityRegistry::global()
+            let mut entity = registry
                 .create(&metadata.entity_type, &metadata.config)
                 .map_err(|e| RuntimeError::Actor(e))?;
 
+            // Restore private state if available
+            if let Some(state_map) = entity_states {
+                if let Some(state) = state_map.get(&metadata.id) {
+                    let _ = registry.restore_entity(
+                        &metadata.entity_type,
+                        entity.as_mut(),
+                        &state.state,
+                    )?;
+                }
+            }
+
             // Get or create actor
-            let actor = self.actors
+            let actor = self
+                .actors
                 .entry(metadata.actor.clone())
                 .or_insert_with(|| Actor::new(metadata.actor.clone()));
 
             // Attach entity to facet
-            actor.attach_entity(metadata.facet.clone(), entity);
+            actor.attach_entity(
+                metadata.id,
+                metadata.entity_type.clone(),
+                metadata.facet.clone(),
+                entity,
+            );
 
             // Re-register patterns
-            // For now, we only track pattern IDs in metadata
-            // In a full implementation, we'd need to persist the full pattern spec
-            // and recreate Pattern objects here
-            // TODO: Store full pattern specs in metadata for proper hydration
+            for pattern in &metadata.patterns {
+                actor.register_pattern(pattern.clone());
+            }
         }
 
         Ok(())
@@ -335,14 +359,35 @@ impl Runtime {
 
         // Get the actual turn ID of the last executed turn
         // Use the most recent turn ID from any actor, or generate a placeholder
-        let turn_id = self.last_turn_per_actor
+        let turn_id = self
+            .last_turn_per_actor
             .values()
             .max()
             .cloned()
             .unwrap_or_else(|| TurnId::new(format!("turn_{:08}", self.turn_count)));
 
         // Capture entity private state (for HydratableEntity implementations)
-        let entity_states = Vec::new(); // TODO: Capture HydratableEntity state when we detect it
+        let registry = registry::EntityRegistry::global();
+        let mut entity_states = Vec::new();
+
+        for (actor_id, actor) in self.actors.iter() {
+            let entities = actor.entities.read();
+            for (facet_id, entries) in entities.iter() {
+                for entry in entries.iter() {
+                    if let Some(state) =
+                        registry.snapshot_entity(&entry.entity_type, entry.entity.as_ref())
+                    {
+                        entity_states.push(snapshot::EntityStateSnapshot {
+                            entity_id: entry.id,
+                            actor: actor_id.clone(),
+                            facet: facet_id.clone(),
+                            entity_type: entry.entity_type.clone(),
+                            state,
+                        });
+                    }
+                }
+            }
+        }
 
         let snapshot = RuntimeSnapshot {
             branch: self.current_branch.clone(),
@@ -470,6 +515,9 @@ impl Runtime {
             .nearest_snapshot(&self.current_branch, &target_turn)
             .map_err(|e| RuntimeError::Snapshot(e))?;
 
+        let mut entity_state_map: HashMap<uuid::Uuid, snapshot::EntityStateSnapshot> =
+            HashMap::new();
+
         // Reset runtime state
         self.actors.clear();
         self.scheduler = Scheduler::new(self.config.flow_control_limit as i64);
@@ -484,6 +532,15 @@ impl Runtime {
 
             // Restore state from snapshot
             self.turn_count = snapshot.metadata.turn_count;
+
+            if !snapshot.entity_states.is_empty() {
+                entity_state_map = snapshot
+                    .entity_states
+                    .iter()
+                    .cloned()
+                    .map(|state| (state.entity_id, state))
+                    .collect();
+            }
 
             // The snapshot contains aggregate state for all actors
             // We need to reconstruct actors and apply the snapshot state
@@ -532,7 +589,9 @@ impl Runtime {
             .map_err(|e| RuntimeError::Journal(e))?;
 
         // Iterate through all turns and replay them
-        let mut iter = journal_reader.iter_all().map_err(|e| RuntimeError::Journal(e))?;
+        let mut iter = journal_reader
+            .iter_all()
+            .map_err(|e| RuntimeError::Journal(e))?;
 
         while let Some(result) = iter.next() {
             let record = result.map_err(|e| RuntimeError::Journal(e))?;
@@ -548,7 +607,9 @@ impl Runtime {
             }
 
             // Apply the turn's state delta to runtime
-            let actor = self.actors.entry(record.actor.clone())
+            let actor = self
+                .actors
+                .entry(record.actor.clone())
                 .or_insert_with(|| Actor::new(record.actor.clone()));
 
             // Apply state delta to actor state
@@ -570,12 +631,22 @@ impl Runtime {
             }
 
             self.turn_count += 1;
-            self.last_turn_per_actor.insert(record.actor.clone(), record.turn_id.clone());
+            self.last_turn_per_actor
+                .insert(record.actor.clone(), record.turn_id.clone());
 
             if record.turn_id == target_turn {
                 break;
             }
         }
+
+        // Rehydrate entities (attach + patterns) after replay
+        let state_map_opt = if entity_state_map.is_empty() {
+            None
+        } else {
+            Some(&entity_state_map)
+        };
+
+        self.hydrate_entities(state_map_opt)?;
 
         // Update branch head
         self.branch_manager
@@ -595,26 +666,25 @@ impl Runtime {
     /// 5. Create synthetic merge turn with the joined delta
     pub fn merge(&mut self, source: &BranchId, target: &BranchId) -> Result<branch::MergeResult> {
         // Find the lowest common ancestor
-        let lca_turn = self.branch_manager
+        let lca_turn = self
+            .branch_manager
             .find_lca(source, target)
-            .ok_or_else(|| RuntimeError::Branch(
-                error::BranchError::InvalidForkPoint("No common ancestor found".into())
-            ))?;
+            .ok_or_else(|| {
+                RuntimeError::Branch(error::BranchError::InvalidForkPoint(
+                    "No common ancestor found".into(),
+                ))
+            })?;
 
         // Get the head turns for both branches
-        let source_head = self.branch_manager
-            .head(source)
-            .cloned()
-            .ok_or_else(|| RuntimeError::Branch(
-                error::BranchError::NotFound(source.0.clone())
-            ))?;
+        let source_head =
+            self.branch_manager.head(source).cloned().ok_or_else(|| {
+                RuntimeError::Branch(error::BranchError::NotFound(source.0.clone()))
+            })?;
 
-        let target_head = self.branch_manager
-            .head(target)
-            .cloned()
-            .ok_or_else(|| RuntimeError::Branch(
-                error::BranchError::NotFound(target.0.clone())
-            ))?;
+        let target_head =
+            self.branch_manager.head(target).cloned().ok_or_else(|| {
+                RuntimeError::Branch(error::BranchError::NotFound(target.0.clone()))
+            })?;
 
         // Load state at LCA by replaying up to that turn
         let lca_state = self.load_state_at_turn(&lca_turn, source)?;
@@ -686,7 +756,9 @@ impl Runtime {
             .map_err(|e| RuntimeError::Journal(e))?;
 
         let mut accumulated_delta = state::StateDelta::empty();
-        let mut iter = journal_reader.iter_all().map_err(|e| RuntimeError::Journal(e))?;
+        let mut iter = journal_reader
+            .iter_all()
+            .map_err(|e| RuntimeError::Journal(e))?;
 
         while let Some(result) = iter.next() {
             let record = result.map_err(|e| RuntimeError::Journal(e))?;
@@ -707,7 +779,11 @@ impl Runtime {
     ///
     /// Returns a delta representing the changes from base to head.
     /// This is a simplified version - full implementation would compute precise diffs.
-    fn compute_delta(&self, _base: &state::StateDelta, head: &state::StateDelta) -> state::StateDelta {
+    fn compute_delta(
+        &self,
+        _base: &state::StateDelta,
+        head: &state::StateDelta,
+    ) -> state::StateDelta {
         // For merges, we actually want to use the head state directly
         // as the "delta from LCA" since head already represents all changes since LCA
         // when we accumulate deltas during replay.
@@ -739,7 +815,10 @@ impl Runtime {
         for (actor, handle, value, _version) in &target.assertions.added {
             if source_handles.contains(&(actor.clone(), handle.clone())) {
                 // Find the source value for comparison
-                if let Some(source_item) = source.assertions.added.iter()
+                if let Some(source_item) = source
+                    .assertions
+                    .added
+                    .iter()
                     .find(|(a, h, _, _)| a == actor && h == handle)
                 {
                     if &source_item.2 != value {
@@ -778,19 +857,22 @@ impl Runtime {
     /// Rewind by N turns
     pub fn back(&mut self, count: usize) -> Result<TurnId> {
         // Get current head
-        let current_head = self.branch_manager
+        let current_head = self
+            .branch_manager
             .head(&self.current_branch)
             .cloned()
-            .ok_or_else(|| RuntimeError::Branch(
-                error::BranchError::NotFound("No head turn found".into())
-            ))?;
+            .ok_or_else(|| {
+                RuntimeError::Branch(error::BranchError::NotFound("No head turn found".into()))
+            })?;
 
         // Read journal to find the turn N steps back
         let journal_reader = JournalReader::new(self.storage.clone(), self.current_branch.clone())
             .map_err(|e| RuntimeError::Journal(e))?;
 
         let mut turns = Vec::new();
-        let mut iter = journal_reader.iter_all().map_err(|e| RuntimeError::Journal(e))?;
+        let mut iter = journal_reader
+            .iter_all()
+            .map_err(|e| RuntimeError::Journal(e))?;
 
         while let Some(result) = iter.next() {
             let record = result.map_err(|e| RuntimeError::Journal(e))?;
@@ -808,9 +890,9 @@ impl Runtime {
                 self.goto(first_turn.clone())?;
                 Ok(first_turn.clone())
             } else {
-                Err(RuntimeError::Journal(
-                    error::JournalError::TurnNotFound("No turns in journal".into())
-                ))
+                Err(RuntimeError::Journal(error::JournalError::TurnNotFound(
+                    "No turns in journal".into(),
+                )))
             }
         } else {
             let target_idx = turns.len() - count - 1;

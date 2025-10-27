@@ -3,13 +3,15 @@
 //! Provides a global registry for entity types that can be instantiated from
 //! configuration. Registered at runtime startup by application code.
 
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
+use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
-use parking_lot::RwLock;
 
-use super::actor::Entity;
+use super::actor::{Entity, HydratableEntity};
 use super::error::{ActorResult, Result};
+use super::pattern::Pattern;
 use super::turn::{ActorId, FacetId};
 
 /// Entity type name (e.g., "llm-assistant", "timer-manager")
@@ -21,24 +23,33 @@ pub type EntityConfig = preserves::IOValue;
 /// Factory function that creates an entity from configuration
 pub type EntityFactory = Arc<dyn Fn(&EntityConfig) -> ActorResult<Box<dyn Entity>> + Send + Sync>;
 
+type SnapshotHandler = Arc<dyn Fn(&dyn Entity) -> preserves::IOValue + Send + Sync>;
+type RestoreHandler =
+    Arc<dyn Fn(&mut dyn Entity, &preserves::IOValue) -> ActorResult<()> + Send + Sync>;
+
+struct EntityTypeInfo {
+    factory: EntityFactory,
+    snapshot: Option<SnapshotHandler>,
+    restore: Option<RestoreHandler>,
+}
+
 /// Global entity type registry
 ///
 /// Maps entity type names to factory functions. Types must be registered
 /// at runtime startup before they can be instantiated.
 pub struct EntityRegistry {
-    factories: Arc<RwLock<HashMap<String, EntityFactory>>>,
+    types: Arc<RwLock<HashMap<String, EntityTypeInfo>>>,
 }
 
 // Global singleton instance
-static REGISTRY: once_cell::sync::Lazy<EntityRegistry> = once_cell::sync::Lazy::new(|| {
-    EntityRegistry::new()
-});
+static REGISTRY: once_cell::sync::Lazy<EntityRegistry> =
+    once_cell::sync::Lazy::new(|| EntityRegistry::new());
 
 impl EntityRegistry {
     /// Create a new empty registry
     fn new() -> Self {
         Self {
-            factories: Arc::new(RwLock::new(HashMap::new())),
+            types: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -52,8 +63,15 @@ impl EntityRegistry {
     where
         F: Fn(&EntityConfig) -> ActorResult<Box<dyn Entity>> + Send + Sync + 'static,
     {
-        let mut factories = self.factories.write();
-        factories.insert(type_name.to_string(), Arc::new(factory));
+        let mut types = self.types.write();
+        types.insert(
+            type_name.to_string(),
+            EntityTypeInfo {
+                factory: Arc::new(factory),
+                snapshot: None,
+                restore: None,
+            },
+        );
     }
 
     /// Register an entity type that implements Default
@@ -61,38 +79,104 @@ impl EntityRegistry {
     where
         T: Entity + Default + 'static,
     {
-        self.register(type_name, |_config| {
-            Ok(Box::new(T::default()))
+        self.register(type_name, |_config| Ok(Box::new(T::default())));
+    }
+
+    /// Register a hydratable entity type (supports private state snapshot/restore)
+    pub fn register_hydratable<T, F>(&self, type_name: EntityTypeName, factory: F)
+    where
+        T: HydratableEntity + 'static,
+        F: Fn(&EntityConfig) -> ActorResult<T> + Send + Sync + 'static,
+    {
+        let entity_factory: EntityFactory = Arc::new(move |config: &EntityConfig| {
+            let entity = factory(config)?;
+            Ok(Box::new(entity) as Box<dyn Entity>)
         });
+
+        let snapshot_handler: SnapshotHandler = Arc::new(move |entity: &dyn Entity| {
+            let concrete = (entity as &dyn Any)
+                .downcast_ref::<T>()
+                .expect("Hydratable entity type mismatch during snapshot");
+            concrete.snapshot_state()
+        });
+
+        let restore_handler: RestoreHandler = Arc::new(move |entity: &mut dyn Entity, state| {
+            let concrete = (entity as &mut dyn Any)
+                .downcast_mut::<T>()
+                .expect("Hydratable entity type mismatch during restore");
+            concrete.restore_state(state)
+        });
+
+        let mut types = self.types.write();
+        types.insert(
+            type_name.to_string(),
+            EntityTypeInfo {
+                factory: entity_factory,
+                snapshot: Some(snapshot_handler),
+                restore: Some(restore_handler),
+            },
+        );
     }
 
     /// Create an entity instance from type name and config
-    pub fn create(
-        &self,
-        type_name: &str,
-        config: &EntityConfig,
-    ) -> ActorResult<Box<dyn Entity>> {
-        let factories = self.factories.read();
+    pub fn create(&self, type_name: &str, config: &EntityConfig) -> ActorResult<Box<dyn Entity>> {
+        let types = self.types.read();
 
-        let factory = factories.get(type_name).ok_or_else(|| {
-            super::error::ActorError::InvalidActivation(
-                format!("Unknown entity type: {}", type_name)
-            )
+        let info = types.get(type_name).ok_or_else(|| {
+            super::error::ActorError::InvalidActivation(format!(
+                "Unknown entity type: {}",
+                type_name
+            ))
         })?;
 
-        factory(config)
+        (info.factory)(config)
     }
 
     /// Check if a type is registered
     pub fn has_type(&self, type_name: &str) -> bool {
-        let factories = self.factories.read();
-        factories.contains_key(type_name)
+        let types = self.types.read();
+        types.contains_key(type_name)
     }
 
     /// List all registered entity types
     pub fn list_types(&self) -> Vec<String> {
-        let factories = self.factories.read();
-        factories.keys().cloned().collect()
+        let types = self.types.read();
+        types.keys().cloned().collect()
+    }
+
+    /// Snapshot private entity state if supported
+    pub fn snapshot_entity(
+        &self,
+        type_name: &str,
+        entity: &dyn Entity,
+    ) -> Option<preserves::IOValue> {
+        let types = self.types.read();
+        let info = types.get(type_name)?;
+        info.snapshot.as_ref().map(|handler| handler(entity))
+    }
+
+    /// Restore private entity state if supported
+    pub fn restore_entity(
+        &self,
+        type_name: &str,
+        entity: &mut dyn Entity,
+        state: &preserves::IOValue,
+    ) -> Result<bool> {
+        let types = self.types.read();
+
+        let info = types.get(type_name).ok_or_else(|| {
+            super::error::ActorError::InvalidActivation(format!(
+                "Unknown entity type: {}",
+                type_name
+            ))
+        })?;
+
+        if let Some(handler) = &info.restore {
+            handler(entity, state)?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 }
 
@@ -116,7 +200,7 @@ pub struct EntityMetadata {
     pub config: EntityConfig,
 
     /// Pattern subscriptions registered by this entity
-    pub patterns: Vec<uuid::Uuid>,
+    pub patterns: Vec<Pattern>,
 }
 
 /// Custom serde module for preserves::IOValue (serialize as text)
@@ -196,8 +280,8 @@ impl EntityManager {
 
     /// Save entity metadata to JSON file (atomic write)
     pub fn save(&self, storage: &super::storage::Storage, path: &std::path::Path) -> Result<()> {
-        let data = serde_json::to_vec_pretty(&self.entities)
-            .map_err(super::error::StorageError::Json)?;
+        let data =
+            serde_json::to_vec_pretty(&self.entities).map_err(super::error::StorageError::Json)?;
 
         storage.write_atomic(path, &data)?;
 
@@ -210,11 +294,9 @@ impl EntityManager {
             return Ok(Self::new());
         }
 
-        let data = std::fs::read(path)
-            .map_err(super::error::StorageError::Io)?;
+        let data = std::fs::read(path).map_err(super::error::StorageError::Io)?;
 
-        let entities = serde_json::from_slice(&data)
-            .map_err(super::error::StorageError::Json)?;
+        let entities = serde_json::from_slice(&data).map_err(super::error::StorageError::Json)?;
 
         Ok(Self { entities })
     }
@@ -228,9 +310,12 @@ impl Default for EntityManager {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::actor::Activation;
+    use super::super::error::ActorError;
     use super::super::storage::Storage;
+    use super::*;
+    use std::any::Any;
+    use std::sync::Mutex;
 
     struct TestEntity {
         name: String,
@@ -260,7 +345,8 @@ mod tests {
 
         // Register with custom factory
         registry.register("test-entity", |config| {
-            let name = config.as_string()
+            let name = config
+                .as_string()
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| "default".to_string());
 
@@ -282,7 +368,8 @@ mod tests {
         let registry = EntityRegistry::new();
 
         registry.register("test-entity", |config| {
-            let name = config.as_string()
+            let name = config
+                .as_string()
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| "default".to_string());
 
@@ -308,15 +395,89 @@ mod tests {
         assert!(entity.is_ok());
     }
 
+    #[derive(Default)]
+    struct HydratableTestEntity {
+        value: Mutex<i32>,
+    }
+
+    impl Entity for HydratableTestEntity {
+        fn on_message(
+            &self,
+            _activation: &mut Activation,
+            _payload: &preserves::IOValue,
+        ) -> ActorResult<()> {
+            Ok(())
+        }
+    }
+
+    impl HydratableEntity for HydratableTestEntity {
+        fn snapshot_state(&self) -> preserves::IOValue {
+            let value = *self.value.lock().unwrap();
+            preserves::IOValue::new(value.to_string())
+        }
+
+        fn restore_state(&mut self, state: &preserves::IOValue) -> ActorResult<()> {
+            let text = match state.as_string() {
+                Some(s) => s,
+                None => {
+                    return Err(ActorError::InvalidActivation(
+                        "expected string for hydratable state".to_string(),
+                    ));
+                }
+            };
+
+            let value: i32 = match text.parse() {
+                Ok(v) => v,
+                Err(e) => return Err(ActorError::InvalidActivation(format!("{e}"))),
+            };
+
+            *self.value.lock().unwrap() = value;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_register_hydratable_snapshot_restore() {
+        let registry = EntityRegistry::new();
+
+        registry.register_hydratable("hydrated", |_config| Ok(HydratableTestEntity::default()));
+
+        assert!(registry.has_type("hydrated"));
+
+        let mut entity = registry
+            .create("hydrated", &preserves::IOValue::symbol("cfg"))
+            .unwrap();
+
+        let concrete = (&mut *entity as &mut dyn Any)
+            .downcast_mut::<HydratableTestEntity>()
+            .unwrap();
+        *concrete.value.lock().unwrap() = 7;
+
+        let snapshot = registry
+            .snapshot_entity("hydrated", entity.as_ref())
+            .unwrap();
+
+        let mut restored = registry
+            .create("hydrated", &preserves::IOValue::symbol("cfg"))
+            .unwrap();
+
+        registry
+            .restore_entity("hydrated", restored.as_mut(), &snapshot)
+            .unwrap();
+
+        let restored_concrete = (&*restored as &dyn Any)
+            .downcast_ref::<HydratableTestEntity>()
+            .unwrap();
+        assert_eq!(*restored_concrete.value.lock().unwrap(), 7);
+    }
+
     #[test]
     fn test_global_registry() {
         // Get global instance
         let registry = EntityRegistry::global();
 
         // Register a type
-        registry.register("global-test", |_| {
-            Ok(Box::new(TestEntity::default()))
-        });
+        registry.register("global-test", |_| Ok(Box::new(TestEntity::default())));
 
         // Should be accessible
         assert!(registry.has_type("global-test"));

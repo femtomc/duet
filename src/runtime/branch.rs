@@ -288,8 +288,12 @@ mod tests {
         let lca_turn = TurnId::new("turn_10".to_string());
 
         // Fork both branches from main at turn 10
-        manager.fork(&main, branch_a.clone(), lca_turn.clone()).unwrap();
-        manager.fork(&main, branch_b.clone(), lca_turn.clone()).unwrap();
+        manager
+            .fork(&main, branch_a.clone(), lca_turn.clone())
+            .unwrap();
+        manager
+            .fork(&main, branch_b.clone(), lca_turn.clone())
+            .unwrap();
 
         // LCA should be turn 10
         let lca = manager.find_lca(&branch_a, &branch_b);
@@ -308,13 +312,19 @@ mod tests {
         let turn_20 = TurnId::new("turn_20".to_string());
 
         // Fork A from main at turn 10
-        manager.fork(&main, branch_a.clone(), turn_10.clone()).unwrap();
+        manager
+            .fork(&main, branch_a.clone(), turn_10.clone())
+            .unwrap();
 
         // Fork B from A at turn 20
-        manager.fork(&branch_a, branch_b.clone(), turn_20.clone()).unwrap();
+        manager
+            .fork(&branch_a, branch_b.clone(), turn_20.clone())
+            .unwrap();
 
         // Fork C from A at turn 20
-        manager.fork(&branch_a, branch_c.clone(), turn_20.clone()).unwrap();
+        manager
+            .fork(&branch_a, branch_c.clone(), turn_20.clone())
+            .unwrap();
 
         // LCA of B and C should be turn 20 (both forked from A at that point)
         let lca = manager.find_lca(&branch_b, &branch_c);
@@ -328,7 +338,9 @@ mod tests {
         let branch_a = BranchId::new("branch-a");
 
         let turn_10 = TurnId::new("turn_10".to_string());
-        manager.fork(&main, branch_a.clone(), turn_10.clone()).unwrap();
+        manager
+            .fork(&main, branch_a.clone(), turn_10.clone())
+            .unwrap();
 
         // LCA of branch with itself should be its base turn
         let lca = manager.find_lca(&branch_a, &branch_a);

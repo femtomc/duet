@@ -93,7 +93,10 @@ impl SnapshotIndex {
 
     /// Add a snapshot entry
     pub fn add(&mut self, branch: &BranchId, turn_id: TurnId, turn_count: u64) {
-        let entry = SnapshotIndexEntry { turn_id, turn_count };
+        let entry = SnapshotIndexEntry {
+            turn_id,
+            turn_count,
+        };
 
         self.snapshots
             .entry(branch.0.clone())
@@ -111,7 +114,8 @@ impl SnapshotIndex {
         let entries = self.snapshots.get(&branch.0)?;
 
         // Find the latest snapshot whose turn_id <= target
-        entries.iter()
+        entries
+            .iter()
             .rev()
             .find(|e| e.turn_id <= *target)
             .map(|e| e.turn_count)
@@ -134,9 +138,7 @@ impl SnapshotIndex {
         }
 
         let data = std::fs::read(path)
-            .map_err(|e| SnapshotError::Storage(
-                super::error::StorageError::Io(e)
-            ))?;
+            .map_err(|e| SnapshotError::Storage(super::error::StorageError::Io(e)))?;
 
         let index = serde_json::from_slice(&data)
             .map_err(|e| SnapshotError::InvalidFormat(e.to_string()))?;
@@ -169,7 +171,8 @@ impl SnapshotManager {
     /// Save a snapshot using preserves encoding
     pub fn save(&self, snapshot: &RuntimeSnapshot) -> SnapshotResult<()> {
         // Use turn_count for filename to ensure proper ordering
-        let snapshot_path = self.snapshot_path_by_count(&snapshot.branch, snapshot.metadata.turn_count);
+        let snapshot_path =
+            self.snapshot_path_by_count(&snapshot.branch, snapshot.metadata.turn_count);
 
         // Serialize snapshot using preserves
         use preserves::PackedWriter;
@@ -198,7 +201,11 @@ impl SnapshotManager {
     }
 
     /// Load a snapshot from preserves encoding by turn count
-    pub fn load_by_count(&self, branch: &BranchId, turn_count: u64) -> SnapshotResult<RuntimeSnapshot> {
+    pub fn load_by_count(
+        &self,
+        branch: &BranchId,
+        turn_count: u64,
+    ) -> SnapshotResult<RuntimeSnapshot> {
         let snapshot_path = self.snapshot_path_by_count(branch, turn_count);
 
         let data = self.storage.read_file(&snapshot_path)?;

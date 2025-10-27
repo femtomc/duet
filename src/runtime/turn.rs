@@ -388,7 +388,9 @@ impl TurnRecord {
         use serde::de::Error as _;
 
         if bytes.len() < 4 {
-            return Err(PreservesSerdeError::custom("Buffer too short for length prefix"));
+            return Err(PreservesSerdeError::custom(
+                "Buffer too short for length prefix",
+            ));
         }
 
         // Skip the 4-byte length prefix

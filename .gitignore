@@ -1,1 +1,4 @@
 /target
+.duet/
+__pycache__/
+*.pyc

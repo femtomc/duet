@@ -5,10 +5,10 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::{Runtime, RuntimeConfig};
 use super::actor::Actor;
 use super::error::Result;
 use super::turn::{ActorId, BranchId, FacetId, TurnId, TurnRecord};
+use super::{Runtime, RuntimeConfig};
 
 /// Control interface for the runtime
 pub struct Control {
@@ -31,7 +31,9 @@ impl Control {
     /// Get runtime status
     pub fn status(&self) -> Result<RuntimeStatus> {
         let current_branch = self.runtime.current_branch();
-        let head_turn = self.runtime.branch_manager()
+        let head_turn = self
+            .runtime
+            .branch_manager()
             .head(&current_branch)
             .cloned()
             .unwrap_or_else(|| TurnId::new("turn_0".to_string()));
@@ -60,7 +62,7 @@ impl Control {
             Ok(record.turn_id)
         } else {
             Err(super::error::RuntimeError::Init(
-                "No turn executed after sending message".into()
+                "No turn executed after sending message".into(),
             ))
         }
     }
@@ -98,7 +100,9 @@ impl Control {
         Ok(MergeReport {
             merge_turn: result.merge_turn,
             warnings: result.warnings.iter().map(|w| w.message.clone()).collect(),
-            conflicts: result.warnings.iter()
+            conflicts: result
+                .warnings
+                .iter()
                 .filter(|w| w.category.contains("conflict"))
                 .map(|w| w.message.clone())
                 .collect(),
@@ -164,7 +168,7 @@ impl Control {
             id: entity_id,
             actor: actor.clone(),
             facet: facet.clone(),
-            entity_type,
+            entity_type: entity_type.clone(),
             config,
             patterns: vec![],
         };
@@ -173,11 +177,13 @@ impl Control {
         self.runtime.entity_manager_mut().register(metadata);
 
         // Attach entity to actor
-        let actor_obj = self.runtime.actors
+        let actor_obj = self
+            .runtime
+            .actors
             .entry(actor.clone())
             .or_insert_with(|| Actor::new(actor.clone()));
 
-        actor_obj.attach_entity(facet, entity);
+        actor_obj.attach_entity(entity_id, entity_type, facet.clone(), entity);
 
         // Persist entity metadata
         self.runtime.persist_entities()?;
@@ -187,8 +193,8 @@ impl Control {
 
     /// Register a pattern subscription for an entity
     ///
-    /// Registers the pattern with the actor and persists the pattern ID
-    /// in entity metadata for re-registration during hydration.
+    /// Registers the pattern with the actor and persists the pattern definition
+    /// so it can be re-applied during hydration.
     pub fn register_pattern_for_entity(
         &mut self,
         entity_id: uuid::Uuid,
@@ -196,27 +202,46 @@ impl Control {
     ) -> Result<uuid::Uuid> {
         let pattern_id = pattern.id;
 
-        // Get actor from entity metadata
-        let metadata = self.runtime.entity_manager()
-            .get(&entity_id)
-            .ok_or_else(|| super::error::RuntimeError::Actor(
-                super::error::ActorError::NotFound(format!("Entity {}", entity_id))
-            ))?;
+        // Snapshot metadata to determine actor + facet
+        let (actor_id, entity_facet) = {
+            let metadata =
+                self.runtime
+                    .entity_manager()
+                    .get(&entity_id)
+                    .ok_or_else(|| {
+                        super::error::RuntimeError::Actor(super::error::ActorError::NotFound(
+                            format!("Entity {}", entity_id),
+                        ))
+                    })?;
+            (metadata.actor.clone(), metadata.facet.clone())
+        };
 
-        let actor_id = metadata.actor.clone();
+        if pattern.facet != entity_facet {
+            return Err(super::error::RuntimeError::Actor(
+                super::error::ActorError::InvalidActivation(format!(
+                    "Pattern facet {} does not match entity facet {}",
+                    pattern.facet.0, entity_facet.0
+                )),
+            ));
+        }
 
-        // Register pattern with the actor
-        let actor = self.runtime.actors
-            .get(&actor_id)
-            .ok_or_else(|| super::error::RuntimeError::Actor(
-                super::error::ActorError::NotFound(format!("Actor {}", actor_id.0))
-            ))?;
+        // Ensure actor exists and register the pattern
+        let actor = self
+            .runtime
+            .actors
+            .entry(actor_id.clone())
+            .or_insert_with(|| Actor::new(actor_id.clone()));
 
-        actor.register_pattern(pattern);
+        actor.register_pattern(pattern.clone());
 
-        // Track the pattern ID in entity metadata
-        if let Some(meta) = self.runtime.entity_manager_mut().entities.get_mut(&entity_id) {
-            meta.patterns.push(pattern_id);
+        // Persist pattern definition
+        if let Some(metadata) = self
+            .runtime
+            .entity_manager_mut()
+            .entities
+            .get_mut(&entity_id)
+        {
+            metadata.patterns.push(pattern);
         }
 
         // Persist entity metadata
@@ -230,24 +255,19 @@ impl Control {
     /// Removes the entity from the actor, unregisters its patterns,
     /// and deletes its metadata.
     pub fn unregister_entity(&mut self, entity_id: uuid::Uuid) -> Result<bool> {
-        // Get metadata before removing
-        let metadata = match self.runtime.entity_manager().get(&entity_id) {
-            Some(meta) => meta.clone(),
+        // Remove metadata so we can detach entities/patterns
+        let metadata = match self.runtime.entity_manager_mut().unregister(&entity_id) {
+            Some(meta) => meta,
             None => return Ok(false),
         };
 
-        // Remove entity from actor
         if let Some(actor) = self.runtime.actors.get(&metadata.actor) {
-            actor.remove_entities_from_facet(&metadata.facet);
-
-            // Unregister all patterns
-            for pattern_id in &metadata.patterns {
-                actor.unregister_pattern(*pattern_id);
+            for pattern in &metadata.patterns {
+                actor.unregister_pattern(pattern.id);
             }
-        }
 
-        // Remove from entity manager
-        self.runtime.entity_manager_mut().unregister(&entity_id);
+            actor.detach_entity(entity_id);
+        }
 
         // Persist updated metadata
         self.runtime.persist_entities()?;
@@ -257,7 +277,8 @@ impl Control {
 
     /// List all registered entities
     pub fn list_entities(&self) -> Vec<EntityInfo> {
-        self.runtime.entity_manager()
+        self.runtime
+            .entity_manager()
             .list()
             .into_iter()
             .map(|meta| EntityInfo {
@@ -272,7 +293,8 @@ impl Control {
 
     /// List entities for a specific actor
     pub fn list_entities_for_actor(&self, actor: &ActorId) -> Vec<EntityInfo> {
-        self.runtime.entity_manager()
+        self.runtime
+            .entity_manager()
             .list_for_actor(actor)
             .into_iter()
             .map(|meta| EntityInfo {
@@ -283,6 +305,11 @@ impl Control {
                 pattern_count: meta.patterns.len(),
             })
             .collect()
+    }
+
+    /// Switch the active branch for subsequent operations
+    pub fn switch_branch(&mut self, branch: BranchId) -> Result<()> {
+        self.runtime.switch_branch(branch)
     }
 }
 
@@ -451,7 +478,9 @@ mod tests {
 
         // Fork a new branch
         let new_branch = BranchId::new("experiment");
-        let result = control.fork(BranchId::main(), new_branch.clone(), None).unwrap();
+        let result = control
+            .fork(BranchId::main(), new_branch.clone(), None)
+            .unwrap();
         assert_eq!(result, new_branch);
 
         // List branches should now show 2 branches
@@ -478,7 +507,9 @@ mod tests {
         let mut turn_ids = Vec::new();
         for i in 0..5 {
             let payload = preserves::IOValue::new(i);
-            let turn_id = control.send_message(actor_id.clone(), facet_id.clone(), payload).unwrap();
+            let turn_id = control
+                .send_message(actor_id.clone(), facet_id.clone(), payload)
+                .unwrap();
             turn_ids.push(turn_id);
         }
 
@@ -514,7 +545,9 @@ mod tests {
         let mut turn_ids = Vec::new();
         for i in 0..5 {
             let payload = preserves::IOValue::new(i);
-            let turn_id = control.send_message(actor_id.clone(), facet_id.clone(), payload).unwrap();
+            let turn_id = control
+                .send_message(actor_id.clone(), facet_id.clone(), payload)
+                .unwrap();
             turn_ids.push(turn_id);
         }
 
@@ -528,11 +561,17 @@ mod tests {
 
             // Verify actor still exists after replay
             let actor_count_after = control.runtime().actors.len();
-            assert_eq!(actor_count_after, actor_count_before, "Replay should preserve actors");
+            assert_eq!(
+                actor_count_after, actor_count_before,
+                "Replay should preserve actors"
+            );
 
             // Verify we're at the correct turn
             let status = control.status().unwrap();
-            assert_eq!(status.head_turn, turn_ids[2], "Should be at target turn after goto");
+            assert_eq!(
+                status.head_turn, turn_ids[2],
+                "Should be at target turn after goto"
+            );
         }
     }
 
@@ -553,35 +592,49 @@ mod tests {
 
         // Create some history on main
         for i in 0..3 {
-            control.send_message(
-                actor_id.clone(),
-                facet_id.clone(),
-                preserves::IOValue::new(i),
-            ).unwrap();
+            control
+                .send_message(
+                    actor_id.clone(),
+                    facet_id.clone(),
+                    preserves::IOValue::new(i),
+                )
+                .unwrap();
         }
 
         // Fork a branch
         let experiment = BranchId::new("experiment");
-        control.fork(BranchId::main(), experiment.clone(), None).unwrap();
+        control
+            .fork(BranchId::main(), experiment.clone(), None)
+            .unwrap();
 
         // Switch to experiment and make changes
-        control.runtime_mut().switch_branch(experiment.clone()).unwrap();
+        control
+            .runtime_mut()
+            .switch_branch(experiment.clone())
+            .unwrap();
         for i in 10..12 {
-            control.send_message(
-                actor_id.clone(),
-                facet_id.clone(),
-                preserves::IOValue::new(i),
-            ).unwrap();
+            control
+                .send_message(
+                    actor_id.clone(),
+                    facet_id.clone(),
+                    preserves::IOValue::new(i),
+                )
+                .unwrap();
         }
 
         // Switch back to main and make different changes
-        control.runtime_mut().switch_branch(BranchId::main()).unwrap();
+        control
+            .runtime_mut()
+            .switch_branch(BranchId::main())
+            .unwrap();
         for i in 20..22 {
-            control.send_message(
-                actor_id.clone(),
-                facet_id.clone(),
-                preserves::IOValue::new(i),
-            ).unwrap();
+            control
+                .send_message(
+                    actor_id.clone(),
+                    facet_id.clone(),
+                    preserves::IOValue::new(i),
+                )
+                .unwrap();
         }
 
         // Merge experiment into main
@@ -589,7 +642,10 @@ mod tests {
 
         assert!(!result.merge_turn.as_str().is_empty());
         // Clean merge should have minimal warnings
-        assert!(result.warnings.len() <= 2, "Should have few or no warnings for clean merge");
+        assert!(
+            result.warnings.len() <= 2,
+            "Should have few or no warnings for clean merge"
+        );
     }
 
     #[test]
@@ -608,28 +664,35 @@ mod tests {
         let facet_id = FacetId::new();
 
         // Create base history
-        control.send_message(
-            actor_id.clone(),
-            facet_id.clone(),
-            preserves::IOValue::symbol("base"),
-        ).unwrap();
+        control
+            .send_message(
+                actor_id.clone(),
+                facet_id.clone(),
+                preserves::IOValue::symbol("base"),
+            )
+            .unwrap();
 
         // Fork branch
         let experiment = BranchId::new("experiment");
-        control.fork(BranchId::main(), experiment.clone(), None).unwrap();
+        control
+            .fork(BranchId::main(), experiment.clone(), None)
+            .unwrap();
 
         // The merge functionality is implemented and tested
         // Conflicts would be detected in detect_conflicts()
         // For now, verify the merge mechanism works
 
         let result = control.merge(experiment, BranchId::main());
-        assert!(result.is_ok(), "Merge should succeed even with potential conflicts");
+        assert!(
+            result.is_ok(),
+            "Merge should succeed even with potential conflicts"
+        );
     }
 
     #[test]
     fn test_entity_registration() {
-        use super::super::registry::EntityRegistry;
         use super::super::actor::Activation;
+        use super::super::registry::EntityRegistry;
 
         struct TestEntity;
 
@@ -652,9 +715,7 @@ mod tests {
         };
 
         // Register the entity type in the global registry
-        EntityRegistry::global().register("test-entity", |_config| {
-            Ok(Box::new(TestEntity))
-        });
+        EntityRegistry::global().register("test-entity", |_config| Ok(Box::new(TestEntity)));
 
         let mut control = Control::init(config).unwrap();
 
@@ -663,12 +724,14 @@ mod tests {
         let facet_id = FacetId::new();
         let entity_config = preserves::IOValue::symbol("test-config");
 
-        let entity_id = control.register_entity(
-            actor_id.clone(),
-            facet_id.clone(),
-            "test-entity".to_string(),
-            entity_config,
-        ).unwrap();
+        let entity_id = control
+            .register_entity(
+                actor_id.clone(),
+                facet_id.clone(),
+                "test-entity".to_string(),
+                entity_config,
+            )
+            .unwrap();
 
         // List entities
         let entities = control.list_entities();

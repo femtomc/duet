@@ -1,0 +1,14 @@
+[build-system]
+requires = ["uv>=0.9"]
+build-backend = "uv.build"
+
+[project]
+name = "duet-workspace"
+version = "0.1.0"
+description = "Workspace configuration for the Duet runtime and CLI"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = []
+
+[tool.uv.workspace]
+members = ["python/duet"]

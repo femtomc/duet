@@ -14,7 +14,11 @@
 /// Runtime core modules implementing the Syndicated Actor model
 pub mod runtime;
 
+/// Built-in entities and helpers
+pub mod codebase;
+
 // Re-export key types for convenience
+pub use codebase::register_codebase_entities;
 pub use runtime::{Runtime, RuntimeConfig};
 
 /// Current version of the Duet runtime
