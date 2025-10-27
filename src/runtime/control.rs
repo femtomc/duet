@@ -325,4 +325,46 @@ mod tests {
         let status = control.status().unwrap();
         assert_eq!(status.head_turn, turn_ids[1]);
     }
+
+    #[test]
+    fn test_replay_preserves_state() {
+        let temp = TempDir::new().unwrap();
+        let config = RuntimeConfig {
+            root: temp.path().to_path_buf(),
+            snapshot_interval: 10,
+            flow_control_limit: 100,
+            debug: false,
+        };
+
+        let mut control = Control::init(config).unwrap();
+
+        // Create turn history by sending messages
+        // Each message creates outputs which get recorded in StateDelta
+        let actor_id = ActorId::new();
+        let facet_id = FacetId::new();
+
+        let mut turn_ids = Vec::new();
+        for i in 0..5 {
+            let payload = preserves::IOValue::new(i);
+            let turn_id = control.send_message(actor_id.clone(), facet_id.clone(), payload).unwrap();
+            turn_ids.push(turn_id);
+        }
+
+        // Verify actor exists and has some state
+        let actor_count_before = control.runtime().actors.len();
+        assert!(actor_count_before > 0, "Should have actors before replay");
+
+        // Go back to turn 2
+        if turn_ids.len() >= 3 {
+            control.goto(turn_ids[2].clone()).unwrap();
+
+            // Verify actor still exists after replay
+            let actor_count_after = control.runtime().actors.len();
+            assert_eq!(actor_count_after, actor_count_before, "Replay should preserve actors");
+
+            // Verify we're at the correct turn
+            let status = control.status().unwrap();
+            assert_eq!(status.head_turn, turn_ids[2], "Should be at target turn after goto");
+        }
+    }
 }

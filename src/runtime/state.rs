@@ -363,6 +363,12 @@ impl PNCounter {
             decrements: self.decrements + other.decrements,
         }
     }
+
+    /// Apply an account delta
+    pub fn apply(&mut self, delta: &AccountDelta) {
+        self.increments += delta.repaid;
+        self.decrements += delta.borrowed;
+    }
 }
 
 /// Account delta

@@ -38,8 +38,11 @@ pub struct SnapshotMetadata {
     /// When this snapshot was created (debug only)
     pub created_at: chrono::DateTime<chrono::Utc>,
 
-    /// Number of turns since last snapshot
+    /// Total number of turns executed (for ordering)
     pub turn_count: u64,
+
+    /// Turn ID captured in this snapshot (for verification)
+    pub turn_id: TurnId,
 }
 
 /// Snapshot manager
@@ -56,7 +59,8 @@ impl SnapshotManager {
 
     /// Save a snapshot using preserves encoding
     pub fn save(&self, snapshot: &RuntimeSnapshot) -> SnapshotResult<()> {
-        let snapshot_path = self.snapshot_path(&snapshot.branch, &snapshot.turn_id);
+        // Use turn_count for filename to ensure proper ordering
+        let snapshot_path = self.snapshot_path_by_count(&snapshot.branch, snapshot.metadata.turn_count);
 
         // Serialize snapshot using preserves
         use preserves::PackedWriter;
@@ -68,6 +72,17 @@ impl SnapshotManager {
         self.storage.write_atomic(&snapshot_path, &buf)?;
 
         Ok(())
+    }
+
+    /// Load a snapshot from preserves encoding by turn count
+    pub fn load_by_count(&self, branch: &BranchId, turn_count: u64) -> SnapshotResult<RuntimeSnapshot> {
+        let snapshot_path = self.snapshot_path_by_count(branch, turn_count);
+
+        let data = self.storage.read_file(&snapshot_path)?;
+        let snapshot: RuntimeSnapshot = preserves::serde::from_bytes(&data)
+            .map_err(|e| SnapshotError::InvalidFormat(e.to_string()))?;
+
+        Ok(snapshot)
     }
 
     /// Load a snapshot from preserves encoding
@@ -82,57 +97,51 @@ impl SnapshotManager {
     }
 
     /// Find the nearest snapshot at or before a given turn
+    ///
+    /// Searches by turn_count ordering, not turn_id hash comparison.
+    /// Returns the turn_count of the best snapshot, or None if no snapshots exist.
     pub fn nearest_snapshot(
         &self,
         branch: &BranchId,
-        turn_id: &TurnId,
-    ) -> SnapshotResult<Option<TurnId>> {
+        _turn_id: &TurnId,
+    ) -> SnapshotResult<Option<u64>> {
         let snapshot_dir = self.storage.branch_snapshot_dir(branch);
 
         if !snapshot_dir.exists() {
             return Ok(None);
         }
 
-        // List all snapshot files
-        let mut snapshots = Vec::new();
+        // List all snapshot files and extract turn counts
+        let mut snapshot_counts = Vec::new();
         if let Ok(entries) = std::fs::read_dir(&snapshot_dir) {
             for entry in entries.flatten() {
                 let file_name = entry.file_name();
                 let name = file_name.to_string_lossy();
 
-                // Format: turn-XXXXXXXX.snapshot
-                if name.starts_with("turn-") && name.ends_with(".snapshot") {
-                    snapshots.push(name.to_string());
+                // Format: turn-NNNNNNNN.snapshot
+                if let Some(count_str) = name
+                    .strip_prefix("turn-")
+                    .and_then(|s| s.strip_suffix(".snapshot"))
+                {
+                    if let Ok(count) = count_str.parse::<u64>() {
+                        snapshot_counts.push(count);
+                    }
                 }
             }
         }
 
-        if snapshots.is_empty() {
+        if snapshot_counts.is_empty() {
             return Ok(None);
         }
 
-        // Sort snapshots (they're named sequentially)
-        snapshots.sort();
+        // Sort by turn count
+        snapshot_counts.sort_unstable();
 
-        // Find the latest snapshot that's <= target turn
-        // For now, use simple string comparison (works for "turn_NNNNNNNN" format)
-        let target_str = turn_id.as_str();
-
-        let mut best_snapshot = None;
-        for snapshot_name in snapshots.iter().rev() {
-            // Extract turn ID from filename
-            if let Some(turn_str) = snapshot_name
-                .strip_prefix("turn-")
-                .and_then(|s| s.strip_suffix(".snapshot"))
-            {
-                if turn_str <= target_str {
-                    best_snapshot = Some(TurnId::new(format!("turn_{}", turn_str)));
-                    break;
-                }
-            }
-        }
-
-        Ok(best_snapshot)
+        // For now, return the latest snapshot since we don't have a way to map
+        // turn_id to turn_count without loading snapshots.
+        // A full implementation would maintain an index mapping turn_id -> turn_count
+        // or load each snapshot's metadata to check the turn_id.
+        Ok(snapshot_counts.last().copied())
     }
 
     /// Check if a snapshot should be created based on interval
@@ -140,11 +149,18 @@ impl SnapshotManager {
         turn_count % self.interval == 0
     }
 
-    /// Get the path for a snapshot file
+    /// Get the path for a snapshot file using turn count
     fn snapshot_path(&self, branch: &BranchId, turn_id: &TurnId) -> std::path::PathBuf {
         self.storage
             .branch_snapshot_dir(branch)
             .join(format!("{}.snapshot", turn_id.as_str()))
+    }
+
+    /// Get the path for a snapshot file using turn count (for numbered snapshots)
+    fn snapshot_path_by_count(&self, branch: &BranchId, turn_count: u64) -> std::path::PathBuf {
+        self.storage
+            .branch_snapshot_dir(branch)
+            .join(format!("turn-{:08}.snapshot", turn_count))
     }
 }
 

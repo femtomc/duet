@@ -59,7 +59,7 @@ use storage::Storage;
 use turn::BranchId;
 
 use actor::Actor;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// The main runtime orchestrator
 ///
@@ -282,18 +282,24 @@ impl Runtime {
             all_capabilities = all_capabilities.join(&actor_caps);
         }
 
-        // TODO: Get the actual turn ID of the last executed turn
-        let turn_id = TurnId::new(format!("turn_{:08}", self.turn_count));
+        // Get the actual turn ID of the last executed turn
+        // Use the most recent turn ID from any actor, or generate a placeholder
+        let turn_id = self.last_turn_per_actor
+            .values()
+            .max()
+            .cloned()
+            .unwrap_or_else(|| TurnId::new(format!("turn_{:08}", self.turn_count)));
 
         let snapshot = RuntimeSnapshot {
             branch: self.current_branch.clone(),
-            turn_id,
+            turn_id: turn_id.clone(),
             assertions: all_assertions,
             facets: all_facets,
             capabilities: all_capabilities,
             metadata: snapshot::SnapshotMetadata {
                 created_at: chrono::Utc::now(),
                 turn_count: self.turn_count,
+                turn_id,
             },
         };
 
@@ -415,22 +421,52 @@ impl Runtime {
         self.turn_count = 0;
         self.last_turn_per_actor.clear();
 
-        let start_turn_id = if let Some(snap_turn) = snapshot_turn.clone() {
+        let start_turn_id = if let Some(snap_count) = snapshot_turn {
             let snapshot = self
                 .snapshot_manager
-                .load(&self.current_branch, &snap_turn)
+                .load_by_count(&self.current_branch, snap_count)
                 .map_err(|e| RuntimeError::Snapshot(e))?;
 
-            // Restore state from snapshot by recreating actors with snapshot data
-            // For now, we'll replay from the beginning or snapshot point
+            // Restore state from snapshot
             self.turn_count = snapshot.metadata.turn_count;
 
-            // We'd need to reconstruct actors from the snapshot state
-            // This is complex as it requires recreating actor objects with the right state
-            // For the initial implementation, we'll just track the turn_count
-            // and replay from the snapshot point
+            // The snapshot contains aggregate state for all actors
+            // We need to reconstruct actors and apply the snapshot state
+            // For now, we'll collect the unique actors from the snapshot data
 
-            snap_turn
+            // Find all actors mentioned in assertions
+            let mut actor_ids = HashSet::new();
+            for (actor_id, _handle) in snapshot.assertions.active.keys() {
+                actor_ids.insert(actor_id.clone());
+            }
+            for facet_meta in snapshot.facets.facets.values() {
+                actor_ids.insert(facet_meta.actor.clone());
+            }
+
+            // Recreate actors and apply snapshot state
+            for actor_id in actor_ids {
+                let actor = Actor::new(actor_id.clone());
+
+                // Apply assertions for this actor
+                {
+                    let mut assertions = actor.assertions.write();
+                    *assertions = snapshot.assertions.clone();
+                }
+                // Apply facets
+                {
+                    let mut facets = actor.facets.write();
+                    *facets = snapshot.facets.clone();
+                }
+                // Apply capabilities
+                {
+                    let mut capabilities = actor.capabilities.write();
+                    *capabilities = snapshot.capabilities.clone();
+                }
+
+                self.actors.insert(actor_id, actor);
+            }
+
+            snapshot.metadata.turn_id.clone()
         } else {
             // No snapshot, replay from the beginning
             TurnId::new("turn_00000000".to_string())
@@ -461,17 +497,29 @@ impl Runtime {
 
             // Apply the turn's state delta to runtime
             // Get or create actor
-            let _actor = self.actors.entry(record.actor.clone())
+            let actor = self.actors.entry(record.actor.clone())
                 .or_insert_with(|| Actor::new(record.actor.clone()));
 
-            // Apply state delta (simplified - in full implementation would apply all changes)
-            // For now, we just track that this actor exists and the turn was processed
+            // Apply state delta to actor state
+            {
+                let mut assertions = actor.assertions.write();
+                assertions.apply(&record.delta.assertions);
+            }
+            {
+                let mut facets = actor.facets.write();
+                facets.apply(&record.delta.facets);
+            }
+            {
+                let mut capabilities = actor.capabilities.write();
+                capabilities.apply(&record.delta.capabilities);
+            }
+            {
+                let mut account = actor.account.write();
+                account.apply(&record.delta.accounts);
+            }
 
             self.turn_count += 1;
             self.last_turn_per_actor.insert(record.actor.clone(), record.turn_id.clone());
-
-            // Re-enqueue any pending outputs as inputs for future turns
-            // This is a simplified replay - full implementation would be more sophisticated
         }
 
         // Update branch head

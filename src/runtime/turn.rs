@@ -371,8 +371,19 @@ impl TurnRecord {
     }
 
     /// Decode a turn record from bytes
+    ///
+    /// Format: [4-byte length prefix (little-endian)] + [preserves-packed data]
+    /// This is symmetric with encode() - it strips the length prefix before decoding
     pub fn decode(bytes: &[u8]) -> Result<Self, PreservesSerdeError> {
-        preserves::serde::from_bytes(bytes)
+        use serde::de::Error as _;
+
+        if bytes.len() < 4 {
+            return Err(PreservesSerdeError::custom("Buffer too short for length prefix"));
+        }
+
+        // Skip the 4-byte length prefix
+        let data = &bytes[4..];
+        preserves::serde::from_bytes(data)
     }
 }
 

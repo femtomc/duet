@@ -87,8 +87,10 @@ fn read_record_from<R: Read>(reader: &mut R) -> JournalResult<Option<TurnRecord>
     let mut buf = vec![0u8; len];
     reader.read_exact(&mut buf)?;
 
-    let record =
-        TurnRecord::decode(&buf).map_err(|e| JournalError::DecodingError(e.to_string()))?;
+    // Deserialize directly from the data buffer (without length prefix)
+    // since we already read the length prefix separately above
+    let record = preserves::serde::from_bytes(&buf)
+        .map_err(|e| JournalError::DecodingError(e.to_string()))?;
 
     Ok(Some(record))
 }
