@@ -257,9 +257,7 @@ impl WorkspaceCatalog {
 
         let record_label = payload.label();
         let symbol = record_label.as_symbol().ok_or_else(|| {
-            ActorError::InvalidActivation(format!(
-                "expected symbol label for {label} invocation"
-            ))
+            ActorError::InvalidActivation(format!("expected symbol label for {label} invocation"))
         })?;
 
         if symbol.as_ref() != label {
@@ -275,26 +273,18 @@ impl WorkspaceCatalog {
         }
 
         let path_value = payload.index(0);
-        let path_str = path_value
-            .as_string()
-            .ok_or_else(|| {
-                ActorError::InvalidActivation(format!(
-                    "expected string path for {label}"
-                ))
-            })?;
+        let path_str = path_value.as_string().ok_or_else(|| {
+            ActorError::InvalidActivation(format!("expected string path for {label}"))
+        })?;
 
         Ok(PathBuf::from(path_str.as_ref()))
     }
 
     fn authorize(&self, metadata: &CapabilityMetadata, rel_path: &Path) -> ActorResult<()> {
         if let Some(first) = metadata.attenuation.first() {
-            let base = first
-                .as_string()
-                .ok_or_else(|| {
-                    ActorError::InvalidActivation(
-                        "capability attenuation must be a string path".into(),
-                    )
-                })?;
+            let base = first.as_string().ok_or_else(|| {
+                ActorError::InvalidActivation("capability attenuation must be a string path".into())
+            })?;
             let base_path = PathBuf::from(base.as_ref());
             let allowed_root = self.root.join(&base_path);
             let requested = self.root.join(rel_path);
@@ -353,9 +343,7 @@ impl WorkspaceCatalog {
 
         let content_value = payload.index(1);
         let content = content_value.as_string().ok_or_else(|| {
-            ActorError::InvalidActivation(
-                "workspace-write content must be a string".into(),
-            )
+            ActorError::InvalidActivation("workspace-write content must be a string".into())
         })?;
 
         let abs_path = self.root.join(&rel_path);

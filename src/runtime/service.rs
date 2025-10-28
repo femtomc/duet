@@ -8,8 +8,8 @@
 use super::control::Control;
 use super::error::{CapabilityError, RuntimeError};
 use super::turn::{ActorId, BranchId, FacetId, TurnId};
-use crate::codebase;
 use crate::PROTOCOL_VERSION;
+use crate::codebase;
 use preserves::IOValue;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -392,8 +392,8 @@ impl<W: Write> Service<W> {
             .workspace_handle()
             .ok_or_else(|| ServiceError::Protocol("workspace entity not registered".into()))?;
 
-        let content = codebase::read_file(&mut self.control, &handle, path)
-            .map_err(ServiceError::from)?;
+        let content =
+            codebase::read_file(&mut self.control, &handle, path).map_err(ServiceError::from)?;
         Ok(json!({ "path": path, "content": content }))
     }
 

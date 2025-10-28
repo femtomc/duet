@@ -333,9 +333,7 @@ impl Control {
         &self,
         actor: &ActorId,
     ) -> Vec<(super::turn::Handle, IOValue)> {
-        self.runtime
-            .assertions_for_actor(actor)
-            .unwrap_or_default()
+        self.runtime.assertions_for_actor(actor).unwrap_or_default()
     }
 
     /// Invoke a capability by id with a payload; runtime enforces attenuation

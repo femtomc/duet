@@ -303,7 +303,10 @@ impl Actor {
                 activation.outputs.push(TurnOutput::Synced { facet });
             }
 
-            TurnInput::CapabilityInvocation { capability, payload } => {
+            TurnInput::CapabilityInvocation {
+                capability,
+                payload,
+            } => {
                 self.handle_capability_invocation(activation, capability, payload)?;
             }
 
@@ -323,16 +326,10 @@ impl Actor {
     ) -> ActorResult<()> {
         let metadata = {
             let capabilities = self.capabilities.read();
-            capabilities
-                .capabilities
-                .get(&capability_id)
-                .cloned()
+            capabilities.capabilities.get(&capability_id).cloned()
         }
         .ok_or_else(|| {
-            ActorError::InvalidActivation(format!(
-                "Capability {} not found",
-                capability_id
-            ))
+            ActorError::InvalidActivation(format!("Capability {} not found", capability_id))
         })?;
 
         if metadata.status == CapabilityStatus::Revoked {
@@ -359,13 +356,14 @@ impl Actor {
         let entry = entity_list
             .iter_mut()
             .find(|entry| entry.id == issuer_entity)
-            .ok_or_else(|| ActorError::InvalidActivation(format!(
-                "Entity {} not found for capability {}",
-                issuer_entity, capability_id
-            )))?;
+            .ok_or_else(|| {
+                ActorError::InvalidActivation(format!(
+                    "Entity {} not found for capability {}",
+                    issuer_entity, capability_id
+                ))
+            })?;
 
-        let prev_facet =
-            std::mem::replace(&mut activation.current_facet, facet_id.clone());
+        let prev_facet = std::mem::replace(&mut activation.current_facet, facet_id.clone());
         activation.set_current_entity(Some(issuer_entity));
         let result = entry
             .entity
@@ -616,9 +614,9 @@ impl Activation {
         capability_id: CapId,
         spec: CapabilitySpec,
     ) -> CapId {
-        let issuer_entity = self.current_entity.expect(
-            "Capabilities can only be granted from within an entity activation",
-        );
+        let issuer_entity = self
+            .current_entity
+            .expect("Capabilities can only be granted from within an entity activation");
 
         let CapabilitySpec {
             holder,

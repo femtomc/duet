@@ -9,12 +9,12 @@ use duet::runtime::registry::{EntityMetadata, EntityRegistry};
 use duet::runtime::state::CapabilityTarget;
 use duet::runtime::turn::{ActorId, FacetId, Handle};
 use duet::runtime::{Control, RuntimeConfig};
+use once_cell::sync::Lazy;
 use std::convert::TryFrom;
 use std::fs;
 use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
-use once_cell::sync::Lazy;
 use uuid::Uuid;
 
 /// Simple test entity that counts messages
@@ -88,13 +88,10 @@ impl Entity for FlowControlEntity {
 
 const PRODUCER_HANDLE_UUID: Uuid = Uuid::from_u128(0xfeedfacefeedcafe1234567890abcdef);
 
-static PATTERN_ASSERT_COUNT: Lazy<Arc<AtomicUsize>> =
-    Lazy::new(|| Arc::new(AtomicUsize::new(0)));
+static PATTERN_ASSERT_COUNT: Lazy<Arc<AtomicUsize>> = Lazy::new(|| Arc::new(AtomicUsize::new(0)));
 
 static REGISTER_PATTERN_FIXTURE: Lazy<()> = Lazy::new(|| {
-    EntityRegistry::global().register("pattern-producer", |_config| {
-        Ok(Box::new(PatternProducer))
-    });
+    EntityRegistry::global().register("pattern-producer", |_config| Ok(Box::new(PatternProducer)));
 
     EntityRegistry::global().register("pattern-watcher", |_config| {
         Ok(Box::new(PatternWatcher {
@@ -306,11 +303,7 @@ fn test_workspace_capability_read_and_write() {
         vec![IOValue::new("hello.txt".to_string())],
     );
     control
-        .send_message(
-            actor_id.clone(),
-            facet_id.clone(),
-            read_request.clone(),
-        )
+        .send_message(actor_id.clone(), facet_id.clone(), read_request.clone())
         .unwrap();
 
     let read_cap = control
@@ -479,9 +472,7 @@ fn test_entity_patterns_persist_through_restart_and_time_travel() {
 #[test]
 fn test_pattern_retractions_survive_restart() {
     Lazy::force(&REGISTER_PATTERN_FIXTURE);
-    PATTERN_ASSERT_COUNT
-        .as_ref()
-        .store(0, Ordering::SeqCst);
+    PATTERN_ASSERT_COUNT.as_ref().store(0, Ordering::SeqCst);
 
     let temp = TempDir::new().unwrap();
     let config = RuntimeConfig {
@@ -541,7 +532,11 @@ fn test_pattern_retractions_survive_restart() {
             .runtime()
             .pattern_matches(&actor_id, &pattern_id)
             .expect("actor should exist");
-        assert_eq!(matches.len(), 1, "pattern engine retains match before restart");
+        assert_eq!(
+            matches.len(),
+            1,
+            "pattern engine retains match before restart"
+        );
         turn
     };
 

@@ -147,7 +147,11 @@ fn revoked_capability_produces_revoked_error() {
         .expect("capability to be granted");
 
     control
-        .send_message(actor_id.clone(), facet_id.clone(), IOValue::symbol("revoke"))
+        .send_message(
+            actor_id.clone(),
+            facet_id.clone(),
+            IOValue::symbol("revoke"),
+        )
         .expect("revoke message should execute");
 
     let err = control

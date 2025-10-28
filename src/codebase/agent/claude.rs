@@ -1,6 +1,6 @@
 //! Stub implementation of a Claude Code agent entity.
 
-use super::{exchanges_from_preserves, exchanges_to_preserves, AgentEntity, AgentExchange};
+use super::{AgentEntity, AgentExchange, exchanges_from_preserves, exchanges_to_preserves};
 use crate::runtime::actor::{Activation, Entity, HydratableEntity};
 use crate::runtime::error::{ActorError, ActorResult};
 use crate::runtime::registry::EntityRegistry;
@@ -39,6 +39,81 @@ impl ClaudeCodeAgent {
     fn handle_prompt(prompt: &str) -> String {
         format!("Claude Code (stub) suggestion: {}", prompt.trim())
     }
+
+    fn parse_request(value: &preserves::IOValue) -> ActorResult<(String, String)> {
+        if !value.is_record() {
+            return Err(ActorError::InvalidActivation(
+                "agent request must be a record".into(),
+            ));
+        }
+
+        if value
+            .label()
+            .as_symbol()
+            .map(|sym| sym.as_ref() == REQUEST_LABEL)
+            != Some(true)
+        {
+            return Err(ActorError::InvalidActivation(
+                "agent request must use agent-request label".into(),
+            ));
+        }
+
+        if value.len() < 2 {
+            return Err(ActorError::InvalidActivation(
+                "agent request requires id and prompt".into(),
+            ));
+        }
+
+        let request_id = value
+            .index(0)
+            .as_string()
+            .ok_or_else(|| ActorError::InvalidActivation("agent request id must be string".into()))?
+            .to_string();
+
+        let prompt = value
+            .index(1)
+            .as_string()
+            .ok_or_else(|| ActorError::InvalidActivation("agent prompt must be string".into()))?
+            .to_string();
+
+        Ok((request_id, prompt))
+    }
+
+    fn process_request(
+        &self,
+        activation: &mut Activation,
+        request_id: String,
+        prompt: String,
+    ) -> ActorResult<()> {
+        let mut exchanges = self.exchanges.lock().unwrap();
+        if exchanges
+            .iter()
+            .any(|exchange| exchange.request_id == request_id)
+        {
+            return Ok(());
+        }
+
+        let response = Self::handle_prompt(&prompt);
+        exchanges.push(AgentExchange {
+            request_id: request_id.clone(),
+            prompt: prompt.clone(),
+            response: response.clone(),
+        });
+        drop(exchanges);
+
+        let response_record = preserves::IOValue::record(
+            preserves::IOValue::symbol(RESPONSE_LABEL),
+            vec![
+                preserves::IOValue::new(request_id),
+                preserves::IOValue::new(prompt),
+                preserves::IOValue::new(response),
+                preserves::IOValue::symbol(self.agent_kind()),
+            ],
+        );
+
+        activation.assert(Handle::new(), response_record);
+        Ok(())
+    }
 }
 
 impl AgentEntity for ClaudeCodeAgent {
@@ -53,59 +128,21 @@ impl Entity for ClaudeCodeAgent {
         activation: &mut Activation,
         payload: &preserves::IOValue,
     ) -> ActorResult<()> {
-        if !payload.is_record() {
-            return Ok(());
+        match Self::parse_request(payload) {
+            Ok((request_id, prompt)) => self.process_request(activation, request_id, prompt),
+            Err(_) => Ok(()),
         }
+    }
 
-        if payload
-            .label()
-            .as_symbol()
-            .map(|sym| sym.as_ref() == REQUEST_LABEL)
-            != Some(true)
-        {
-            return Ok(());
+    fn on_assert(
+        &self,
+        activation: &mut Activation,
+        _handle: &Handle,
+        value: &preserves::IOValue,
+    ) -> ActorResult<()> {
+        if let Ok((request_id, prompt)) = Self::parse_request(value) {
+            self.process_request(activation, request_id, prompt)?;
         }
-
-        if payload.len() < 2 {
-            return Err(ActorError::InvalidActivation(
-                "agent request requires id and prompt".into(),
-            ));
-        }
-
-        let request_id = payload
-            .index(0)
-            .as_string()
-            .ok_or_else(|| ActorError::InvalidActivation("agent request id must be string".into()))?
-            .to_string();
-
-        let prompt = payload
-            .index(1)
-            .as_string()
-            .ok_or_else(|| ActorError::InvalidActivation("agent prompt must be string".into()))?
-            .to_string();
-
-        let response = Self::handle_prompt(&prompt);
-
-        {
-            let mut exchanges = self.exchanges.lock().unwrap();
-            exchanges.push(AgentExchange {
-                request_id: request_id.clone(),
-                prompt: prompt.clone(),
-                response: response.clone(),
-            });
-        }
-
-        let response_record = preserves::IOValue::record(
-            preserves::IOValue::symbol(RESPONSE_LABEL),
-            vec![
-                preserves::IOValue::new(request_id),
-                preserves::IOValue::new(prompt),
-                preserves::IOValue::new(response),
-                preserves::IOValue::symbol(self.agent_kind()),
-            ],
-        );
-
-        activation.assert(Handle::new(), response_record);
         Ok(())
     }
 }

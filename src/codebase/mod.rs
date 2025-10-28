@@ -17,11 +17,12 @@ use serde::Serialize;
 use crate::runtime::actor::{Activation, Entity, HydratableEntity};
 use crate::runtime::control::Control;
 use crate::runtime::error::{ActorError, ActorResult, Result as RuntimeResult, RuntimeError};
+use crate::runtime::pattern::Pattern;
 use crate::runtime::registry::EntityRegistry;
 use crate::runtime::turn::{ActorId, FacetId, Handle};
 
-pub mod workspace;
 pub mod agent;
+pub mod workspace;
 
 static INIT: Once = Once::new();
 
@@ -142,7 +143,10 @@ pub struct AgentResponse {
 }
 
 /// Ensure a workspace entity exists for the given root directory.
-pub fn ensure_workspace_entity(control: &mut Control, root: &Path) -> RuntimeResult<WorkspaceHandle> {
+pub fn ensure_workspace_entity(
+    control: &mut Control,
+    root: &Path,
+) -> RuntimeResult<WorkspaceHandle> {
     if let Some(handle) = workspace_handle(control) {
         return Ok(handle);
     }
@@ -218,12 +222,11 @@ pub fn read_file(
         vec![preserves::IOValue::new(rel_path.to_string())],
     );
     let response = control.invoke_capability(cap, payload)?;
-    response
-        .as_string()
-        .map(|s| s.to_string())
-        .ok_or_else(|| RuntimeError::Actor(ActorError::InvalidActivation(
+    response.as_string().map(|s| s.to_string()).ok_or_else(|| {
+        RuntimeError::Actor(ActorError::InvalidActivation(
             "workspace read returned non-string".into(),
-        )))
+        ))
+    })
 }
 
 /// Ensure a Claude Code agent entity exists for this runtime.
@@ -240,6 +243,21 @@ pub fn ensure_claude_agent(control: &mut Control) -> RuntimeResult<AgentHandle> 
         agent::claude::ENTITY_TYPE.to_string(),
         preserves::IOValue::symbol("default"),
     )?;
+
+    let pattern = Pattern {
+        id: uuid::Uuid::new_v4(),
+        pattern: preserves::IOValue::record(
+            preserves::IOValue::symbol(agent::claude::REQUEST_LABEL),
+            vec![
+                preserves::IOValue::symbol("<_>"),
+                preserves::IOValue::symbol("<_>"),
+            ],
+        ),
+        facet: facet.clone(),
+    };
+    control
+        .register_pattern_for_entity(entity_id, pattern)
+        .map_err(RuntimeError::from)?;
 
     Ok(AgentHandle {
         entity_id,
@@ -415,7 +433,13 @@ fn request_read_capability(
     handle: &WorkspaceHandle,
     rel_path: &str,
 ) -> RuntimeResult<uuid::Uuid> {
-    request_capability(control, handle, rel_path, WORKSPACE_READ_KIND, WORKSPACE_READ_MSG)
+    request_capability(
+        control,
+        handle,
+        rel_path,
+        WORKSPACE_READ_KIND,
+        WORKSPACE_READ_MSG,
+    )
 }
 
 fn request_write_capability(
@@ -423,7 +447,13 @@ fn request_write_capability(
     handle: &WorkspaceHandle,
     rel_path: &str,
 ) -> RuntimeResult<uuid::Uuid> {
-    request_capability(control, handle, rel_path, WORKSPACE_WRITE_KIND, WORKSPACE_WRITE_MSG)
+    request_capability(
+        control,
+        handle,
+        rel_path,
+        WORKSPACE_WRITE_KIND,
+        WORKSPACE_WRITE_MSG,
+    )
 }
 
 fn request_capability(

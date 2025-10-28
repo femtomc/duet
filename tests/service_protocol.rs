@@ -153,7 +153,10 @@ fn workspace_commands_expose_entries() {
         .collect();
     assert!(paths.iter().any(|path| path.contains("note.txt")));
 
-    assert_eq!(lines[3]["result"]["content"].as_str().unwrap(), "hello world");
+    assert_eq!(
+        lines[3]["result"]["content"].as_str().unwrap(),
+        "hello world"
+    );
     assert_eq!(lines[4]["result"], json!({"status": "ok"}));
     assert_eq!(lines[5]["result"]["content"].as_str().unwrap(), "updated");
 }
@@ -202,7 +205,12 @@ fn agent_commands_roundtrip() {
     assert!(lines[1]["result"].get("response").is_some());
     let responses = lines[2]["result"]["responses"].as_array().unwrap();
     assert_eq!(responses.len(), 1);
-    assert!(responses[0]["prompt"].as_str().unwrap().contains("quicksort"));
+    assert!(
+        responses[0]["prompt"]
+            .as_str()
+            .unwrap()
+            .contains("quicksort")
+    );
 }
 
 struct SharedWriter(Rc<RefCell<Vec<u8>>>);
