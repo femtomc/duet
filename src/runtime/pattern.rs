@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
-use super::turn::{FacetId, Handle};
+use super::state::AssertionSet;
+use super::turn::{ActorId, FacetId, Handle};
 
 /// Pattern identifier
 pub type PatternId = Uuid;
@@ -67,6 +68,47 @@ impl PatternEngine {
         self.patterns.insert(id, pattern);
         self.matches.insert(id, HashMap::new());
         id
+    }
+
+    /// Seed matches for a pattern based on an assertion snapshot.
+    pub fn seed_matches_from_assertions(
+        &mut self,
+        pattern: &Pattern,
+        actor_id: &ActorId,
+        assertions: &AssertionSet,
+    ) {
+        // Remove any old references to this pattern from the handle index.
+        let mut empty_handles = Vec::new();
+        for (handle, patterns) in self.handle_to_patterns.iter_mut() {
+            patterns.remove(&pattern.id);
+            if patterns.is_empty() {
+                empty_handles.push(handle.clone());
+            }
+        }
+        for handle in empty_handles {
+            self.handle_to_patterns.remove(&handle);
+        }
+
+        let mut match_map = HashMap::new();
+        for ((asserting_actor, handle), (value, _version)) in assertions.active.iter() {
+            if asserting_actor == actor_id && matches_pattern(&pattern.pattern, value) {
+                match_map.insert(
+                    handle.clone(),
+                    PatternMatch {
+                        pattern_id: pattern.id,
+                        handle: handle.clone(),
+                        value: value.clone(),
+                    },
+                );
+
+                self.handle_to_patterns
+                    .entry(handle.clone())
+                    .or_insert_with(HashSet::new)
+                    .insert(pattern.id);
+            }
+        }
+
+        self.matches.insert(pattern.id, match_map);
     }
 
     /// Unregister a pattern subscription

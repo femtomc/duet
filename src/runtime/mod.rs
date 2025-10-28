@@ -1000,6 +1000,18 @@ impl Runtime {
         self.entity_manager.save(&self.storage, &entity_meta_path)
     }
 
+    /// Inspect current pattern matches for an actor (testing/diagnostics).
+    pub fn pattern_matches(
+        &self,
+        actor: &turn::ActorId,
+        pattern_id: &Uuid,
+    ) -> Option<Vec<pattern::PatternMatch>> {
+        self.actors.get(actor).map(|actor_obj| {
+            let engine = actor_obj.pattern_engine.read();
+            engine.get_matches(pattern_id)
+        })
+    }
+
     /// Get the global schema registry
     pub fn schema_registry() -> &'static SchemaRegistry {
         SchemaRegistry::init()

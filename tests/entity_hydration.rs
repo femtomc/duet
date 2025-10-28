@@ -7,13 +7,14 @@ use duet::runtime::error::{ActorError, ActorResult, RuntimeError};
 use duet::runtime::pattern::Pattern;
 use duet::runtime::registry::{EntityMetadata, EntityRegistry};
 use duet::runtime::state::CapabilityTarget;
-use duet::runtime::turn::{ActorId, FacetId};
+use duet::runtime::turn::{ActorId, FacetId, Handle};
 use duet::runtime::{Control, RuntimeConfig};
 use std::convert::TryFrom;
 use std::fs;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
+use once_cell::sync::Lazy;
 use uuid::Uuid;
 
 /// Simple test entity that counts messages
@@ -81,6 +82,76 @@ impl Entity for FlowControlEntity {
             }
         }
 
+        Ok(())
+    }
+}
+
+const PRODUCER_HANDLE_UUID: Uuid = Uuid::from_u128(0xfeedfacefeedcafe1234567890abcdef);
+
+static PATTERN_ASSERT_COUNT: Lazy<Arc<AtomicUsize>> =
+    Lazy::new(|| Arc::new(AtomicUsize::new(0)));
+
+static REGISTER_PATTERN_FIXTURE: Lazy<()> = Lazy::new(|| {
+    EntityRegistry::global().register("pattern-producer", |_config| {
+        Ok(Box::new(PatternProducer))
+    });
+
+    EntityRegistry::global().register("pattern-watcher", |_config| {
+        Ok(Box::new(PatternWatcher {
+            on_assert: Arc::clone(&PATTERN_ASSERT_COUNT),
+        }))
+    });
+});
+
+struct PatternProducer;
+
+impl Entity for PatternProducer {
+    fn on_message(
+        &self,
+        activation: &mut Activation,
+        payload: &preserves::IOValue,
+    ) -> ActorResult<()> {
+        if let Some(symbol) = payload.as_symbol() {
+            match symbol.as_ref() {
+                "assert" => {
+                    let handle = Handle(PRODUCER_HANDLE_UUID);
+                    activation.assert(handle, preserves::IOValue::symbol("note"));
+                }
+                "retract" => {
+                    let handle = Handle(PRODUCER_HANDLE_UUID);
+                    activation.retract(handle);
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+}
+
+struct PatternWatcher {
+    on_assert: Arc<AtomicUsize>,
+}
+
+impl Entity for PatternWatcher {
+    fn on_message(
+        &self,
+        _activation: &mut Activation,
+        _payload: &preserves::IOValue,
+    ) -> ActorResult<()> {
+        Ok(())
+    }
+
+    fn on_assert(
+        &self,
+        _activation: &mut Activation,
+        _handle: &Handle,
+        _value: &preserves::IOValue,
+    ) -> ActorResult<()> {
+        self.on_assert.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn on_retract(&self, _activation: &mut Activation, _handle: &Handle) -> ActorResult<()> {
         Ok(())
     }
 }
@@ -403,6 +474,98 @@ fn test_entity_patterns_persist_through_restart_and_time_travel() {
         assert_eq!(entities.len(), 1);
         assert_eq!(entities[0].pattern_count, 1);
     }
+}
+
+#[test]
+fn test_pattern_retractions_survive_restart() {
+    Lazy::force(&REGISTER_PATTERN_FIXTURE);
+    PATTERN_ASSERT_COUNT
+        .as_ref()
+        .store(0, Ordering::SeqCst);
+
+    let temp = TempDir::new().unwrap();
+    let config = RuntimeConfig {
+        root: temp.path().to_path_buf(),
+        snapshot_interval: 10,
+        flow_control_limit: 100,
+        debug: false,
+    };
+
+    let actor_id = ActorId::new();
+    let facet_id = FacetId::new();
+    let pattern_id = Uuid::new_v4();
+
+    let turn_after_assert = {
+        let mut control = Control::init(config.clone()).unwrap();
+        let _producer_id = control
+            .register_entity(
+                actor_id.clone(),
+                facet_id.clone(),
+                "pattern-producer".to_string(),
+                preserves::IOValue::symbol("config"),
+            )
+            .unwrap();
+        let watcher_id = control
+            .register_entity(
+                actor_id.clone(),
+                facet_id.clone(),
+                "pattern-watcher".to_string(),
+                preserves::IOValue::symbol("config"),
+            )
+            .unwrap();
+
+        let pattern = Pattern {
+            id: pattern_id,
+            pattern: preserves::IOValue::symbol("<_>"),
+            facet: facet_id.clone(),
+        };
+        control
+            .register_pattern_for_entity(watcher_id, pattern)
+            .unwrap();
+
+        let turn = control
+            .send_message(
+                actor_id.clone(),
+                facet_id.clone(),
+                preserves::IOValue::symbol("assert"),
+            )
+            .unwrap();
+
+        assert_eq!(
+            PATTERN_ASSERT_COUNT.as_ref().load(Ordering::SeqCst),
+            1,
+            "watcher should observe initial assertion"
+        );
+
+        let matches = control
+            .runtime()
+            .pattern_matches(&actor_id, &pattern_id)
+            .expect("actor should exist");
+        assert_eq!(matches.len(), 1, "pattern engine retains match before restart");
+        turn
+    };
+
+    let mut control = Control::new(config).unwrap();
+
+    // Ensure restart did not spuriously deliver extra matches
+    assert_eq!(
+        PATTERN_ASSERT_COUNT.as_ref().load(Ordering::SeqCst),
+        1,
+        "restart should not re-trigger assertion callbacks"
+    );
+
+    // Rehydrate state to the turn where the assertion was active
+    control.goto(turn_after_assert.clone()).unwrap();
+
+    let matches = control
+        .runtime()
+        .pattern_matches(&actor_id, &pattern_id)
+        .expect("actor should exist after restart");
+    assert_eq!(
+        matches.len(),
+        1,
+        "pattern engine should seed match data during hydration"
+    );
 }
 
 #[test]

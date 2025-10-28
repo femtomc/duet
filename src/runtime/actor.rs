@@ -422,8 +422,23 @@ impl Actor {
 
     /// Register a pattern subscription
     pub fn register_pattern(&self, pattern: Pattern) -> uuid::Uuid {
+        let assertions_snapshot = {
+            let assertions = self.assertions.read();
+            if assertions.active.is_empty() {
+                None
+            } else {
+                Some(assertions.clone())
+            }
+        };
+
         let mut engine = self.pattern_engine.write();
-        engine.register(pattern)
+        let pattern_id = engine.register(pattern.clone());
+
+        if let Some(snapshot) = assertions_snapshot {
+            engine.seed_matches_from_assertions(&pattern, &self.id, &snapshot);
+        }
+
+        pattern_id
     }
 
     /// Unregister a pattern subscription
