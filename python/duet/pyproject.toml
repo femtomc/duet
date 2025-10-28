@@ -11,7 +11,9 @@ requires-python = ">=3.9"
 dependencies = [
     "rich>=13.0"
 ]
-scripts = { "duet" = "duet.__main__:main" }
+
+[project.scripts]
+duet = "duet.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

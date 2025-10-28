@@ -11,6 +11,10 @@ from typing import Any, Dict, Tuple
 
 from rich.console import Console
 from rich.json import JSON
+from rich.panel import Panel
+from rich.table import Table
+from rich.syntax import Syntax
+from rich.tree import Tree
 
 from .protocol.client import ControlClient, ProtocolError
 
@@ -117,21 +121,41 @@ def main(argv: list[str] | None = None) -> int:
         asyncio.run(run(args))
     except ProtocolError as exc:
         suffix = f" ({exc.code})" if getattr(exc, "code", None) else ""
-        console.print(f"[red]Protocol error{suffix}:[/] {exc}")
+        error_content = f"[bold]{exc}[/bold]"
         details = getattr(exc, "details", None)
+
         if details is not None:
             if isinstance(details, (dict, list)):
-                console.print(JSON.from_data(details))
+                import json
+                details_str = json.dumps(details, indent=2)
+                error_content += f"\n\n[dim]Details:[/dim]\n{details_str}"
             else:
-                console.print(f"[red]Details:[/] {details}")
+                error_content += f"\n\n[dim]Details:[/dim] {details}"
+
+        console.print(Panel(
+            error_content,
+            title=f"[bold red]Protocol Error{suffix}[/bold red]",
+            border_style="red"
+        ))
         return 1
     except FileNotFoundError as exc:
-        console.print(f"[red]Failed to launch codebased:[/] {exc}")
+        console.print(Panel(
+            f"[bold]{exc}[/bold]\n\n[dim]Make sure codebased is installed or use --codebased-bin to specify the path.[/dim]",
+            title="[bold red]Failed to Launch[/bold red]",
+            border_style="red"
+        ))
         return 1
     except KeyboardInterrupt:
+        console.print("\n[yellow]Interrupted by user[/yellow]")
         return 130
     except Exception as exc:  # pragma: no cover - safety net
-        console.print(f"[red]Unexpected error:[/] {exc}")
+        import traceback
+        tb = traceback.format_exc()
+        console.print(Panel(
+            f"[bold]{exc}[/bold]\n\n[dim]{tb}[/dim]",
+            title="[bold red]Unexpected Error[/bold red]",
+            border_style="red"
+        ))
         return 1
     return 0
 
@@ -198,7 +222,7 @@ async def run(args: argparse.Namespace) -> None:
         else:  # pragma: no cover - argparse enforces choices
             raise ProtocolError(f"Unsupported command: {args.command}")
 
-        _print_result(result)
+        _print_result(result, args.command)
     finally:
         await client.close()
 
@@ -243,8 +267,166 @@ def discover_codebased_command() -> Tuple[str, ...]:
     return (exe_name, "--stdio")
 
 
-def _print_result(result: Any) -> None:
-    if isinstance(result, (dict, list)):
+def _print_result(result: Any, command: str | None = None) -> None:
+    """Print command result with Rich formatting based on command type."""
+    if command == "status":
+        _print_status(result)
+    elif command == "history":
+        _print_history(result)
+    elif command == "list-entities":
+        _print_entities(result)
+    elif command == "list-capabilities":
+        _print_capabilities(result)
+    elif command in ("send", "register-entity", "invoke-capability"):
+        _print_operation_result(result, command)
+    elif command in ("goto", "back", "fork", "merge"):
+        _print_navigation_result(result, command)
+    elif isinstance(result, (dict, list)):
         console.print(JSON.from_data(result))
     else:
         console.print(result)
+
+
+def _print_status(result: Any) -> None:
+    """Format status output with panels and tree view."""
+    if not isinstance(result, dict):
+        console.print(JSON.from_data(result))
+        return
+
+    # Main status panel
+    status_tree = Tree("[bold cyan]Runtime Status[/bold cyan]")
+
+    # Branch information
+    if "branch" in result:
+        branch_info = result["branch"]
+        branch_node = status_tree.add(f"[bold]Branch:[/bold] {branch_info.get('name', 'N/A')}")
+        if "head" in branch_info:
+            branch_node.add(f"[dim]Head Turn:[/dim] {branch_info['head']}")
+        if "turn_count" in branch_info:
+            branch_node.add(f"[dim]Turn Count:[/dim] {branch_info['turn_count']}")
+
+    # Actor information
+    if "actors" in result:
+        actors = result["actors"]
+        actors_node = status_tree.add(f"[bold]Actors:[/bold] {len(actors)} active")
+        for actor in actors[:5]:  # Show first 5
+            actor_id = actor.get("id", "unknown")[:8]
+            actors_node.add(f"[dim]{actor_id}...[/dim]")
+        if len(actors) > 5:
+            actors_node.add(f"[dim]... and {len(actors) - 5} more[/dim]")
+
+    # Show full JSON for any unhandled fields
+    handled_keys = {"branch", "actors"}
+    remaining = {k: v for k, v in result.items() if k not in handled_keys}
+
+    if remaining:
+        status_tree.add("[bold]Additional Data:[/bold]")
+        for key, value in remaining.items():
+            status_tree.add(f"[dim]{key}:[/dim] {value}")
+
+    console.print(Panel(status_tree, border_style="cyan"))
+
+
+def _print_history(result: Any) -> None:
+    """Format history output as a table."""
+    if not isinstance(result, dict) or "turns" not in result:
+        console.print(JSON.from_data(result))
+        return
+
+    turns = result["turns"]
+    if not turns:
+        console.print("[yellow]No turns in history[/yellow]")
+        return
+
+    table = Table(title="Turn History", border_style="blue")
+    table.add_column("Turn ID", style="cyan", no_wrap=True)
+    table.add_column("Index", style="magenta", justify="right")
+    table.add_column("Timestamp", style="green")
+    table.add_column("Type", style="yellow")
+
+    for turn in turns:
+        turn_id = str(turn.get("id", ""))[:12] + "..."
+        index = str(turn.get("index", "N/A"))
+        timestamp = turn.get("timestamp", "N/A")
+        turn_type = turn.get("type", "N/A")
+        table.add_row(turn_id, index, timestamp, turn_type)
+
+    console.print(table)
+
+
+def _print_entities(result: Any) -> None:
+    """Format entity list as a table."""
+    if not isinstance(result, dict) or "entities" not in result:
+        console.print(JSON.from_data(result))
+        return
+
+    entities = result["entities"]
+    if not entities:
+        console.print("[yellow]No entities registered[/yellow]")
+        return
+
+    table = Table(title="Registered Entities", border_style="green")
+    table.add_column("Entity ID", style="cyan", no_wrap=True)
+    table.add_column("Type", style="yellow")
+    table.add_column("Actor", style="magenta", no_wrap=True)
+    table.add_column("Facet", style="blue", no_wrap=True)
+
+    for entity in entities:
+        entity_id = str(entity.get("id", ""))[:12] + "..."
+        entity_type = entity.get("type", "N/A")
+        actor = str(entity.get("actor", ""))[:8] + "..."
+        facet = str(entity.get("facet", ""))[:8] + "..."
+        table.add_row(entity_id, entity_type, actor, facet)
+
+    console.print(table)
+
+
+def _print_capabilities(result: Any) -> None:
+    """Format capabilities list as a table."""
+    if not isinstance(result, dict) or "capabilities" not in result:
+        console.print(JSON.from_data(result))
+        return
+
+    capabilities = result["capabilities"]
+    if not capabilities:
+        console.print("[yellow]No capabilities available[/yellow]")
+        return
+
+    table = Table(title="Available Capabilities", border_style="magenta")
+    table.add_column("Capability ID", style="cyan", no_wrap=True)
+    table.add_column("Name", style="yellow")
+    table.add_column("Provider", style="green", no_wrap=True)
+    table.add_column("Status", style="blue")
+
+    for cap in capabilities:
+        cap_id = str(cap.get("id", ""))[:12] + "..."
+        name = cap.get("name", "N/A")
+        provider = str(cap.get("provider", ""))[:12] + "..."
+        status = cap.get("status", "active")
+        table.add_row(cap_id, name, provider, status)
+
+    console.print(table)
+
+
+def _print_operation_result(result: Any, operation: str) -> None:
+    """Format operation results with success panels."""
+    if isinstance(result, dict):
+        if result.get("success") or "id" in result:
+            title = "[bold green]Success[/bold green]"
+        else:
+            title = "[bold yellow]Result[/bold yellow]"
+
+        content = JSON.from_data(result)
+        console.print(Panel(content, title=title, border_style="green"))
+    else:
+        console.print(Panel(str(result), title="Result", border_style="green"))
+
+
+def _print_navigation_result(result: Any, operation: str) -> None:
+    """Format navigation operation results."""
+    if isinstance(result, dict):
+        title = f"[bold cyan]{operation.title()}[/bold cyan]"
+        content = JSON.from_data(result)
+        console.print(Panel(content, title=title, border_style="cyan"))
+    else:
+        console.print(f"[green]{result}[/green]")

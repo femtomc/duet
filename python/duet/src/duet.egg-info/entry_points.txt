@@ -1,2 +1,0 @@
-[console_scripts]
-duet = duet.__main__:main

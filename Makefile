@@ -25,7 +25,7 @@ install:
 	@echo "Installing codebased (release build)..."
 	cargo install --path .
 	@echo "Installing duet CLI (editable mode)..."
-	uv pip install -e $(PYTHON_PROJECT)
+	uv tool install --editable $(PYTHON_PROJECT)
 	@echo "✓ Both tools installed successfully!"
 	@echo "  codebased: $$(which codebased)"
 	@echo "  duet:  $$(which duet)"
@@ -35,7 +35,7 @@ install-dev:
 	cargo build --bin codebased
 	@ln -sf $(PWD)/target/debug/codebased ~/.cargo/bin/codebased
 	@echo "Installing duet CLI (editable mode)..."
-	uv pip install -e $(PYTHON_PROJECT)
+	uv tool install --editable $(PYTHON_PROJECT)
 	@echo "✓ Both tools installed successfully (dev mode)!"
 	@echo "  codebased: $$(which codebased) (symlinked to debug build)"
 	@echo "  duet:  $$(which duet)"
