@@ -4,9 +4,11 @@
 //! stepping, rewinding, forking, merging, and inspecting state.
 
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use super::actor::Actor;
 use super::error::Result;
+use super::state::{CapId, CapabilityStatus, CapabilityTarget};
 use super::turn::{ActorId, BranchId, FacetId, TurnId, TurnRecord};
 use super::{Runtime, RuntimeConfig};
 
@@ -152,7 +154,7 @@ impl Control {
         facet: FacetId,
         entity_type: String,
         config: preserves::IOValue,
-    ) -> Result<uuid::Uuid> {
+    ) -> Result<Uuid> {
         use super::registry::{EntityMetadata, EntityRegistry};
 
         // Create the entity instance using the global registry
@@ -161,7 +163,7 @@ impl Control {
             .map_err(|e| super::error::RuntimeError::Actor(e))?;
 
         // Generate entity ID
-        let entity_id = uuid::Uuid::new_v4();
+        let entity_id = Uuid::new_v4();
 
         // Create metadata (patterns will be added later via register_pattern_for_entity)
         let metadata = EntityMetadata {
@@ -197,9 +199,9 @@ impl Control {
     /// so it can be re-applied during hydration.
     pub fn register_pattern_for_entity(
         &mut self,
-        entity_id: uuid::Uuid,
+        entity_id: Uuid,
         pattern: super::pattern::Pattern,
-    ) -> Result<uuid::Uuid> {
+    ) -> Result<Uuid> {
         let pattern_id = pattern.id;
 
         // Snapshot metadata to determine actor + facet
@@ -254,7 +256,7 @@ impl Control {
     ///
     /// Removes the entity from the actor, unregisters its patterns,
     /// and deletes its metadata.
-    pub fn unregister_entity(&mut self, entity_id: uuid::Uuid) -> Result<bool> {
+    pub fn unregister_entity(&mut self, entity_id: Uuid) -> Result<bool> {
         // Remove metadata so we can detach entities/patterns
         let metadata = match self.runtime.entity_manager_mut().unregister(&entity_id) {
             Some(meta) => meta,
@@ -307,6 +309,53 @@ impl Control {
             .collect()
     }
 
+    /// List capabilities for all actors
+    pub fn list_capabilities(&self) -> Vec<CapabilityInfo> {
+        let mut results = Vec::new();
+        for (actor_id, actor) in &self.runtime.actors {
+            results.extend(Self::collect_capabilities_for_actor(actor_id, actor));
+        }
+        results
+    }
+
+    /// List capabilities for a specific actor
+    pub fn list_capabilities_for_actor(&self, actor: &ActorId) -> Vec<CapabilityInfo> {
+        if let Some(actor_obj) = self.runtime.actors.get(actor) {
+            Self::collect_capabilities_for_actor(actor, actor_obj)
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Invoke a capability by id with a payload; runtime enforces attenuation
+    pub fn invoke_capability(
+        &mut self,
+        cap_id: Uuid,
+        payload: preserves::IOValue,
+    ) -> Result<preserves::IOValue> {
+        self.runtime.invoke_capability(cap_id, payload)
+    }
+
+    fn collect_capabilities_for_actor(_actor_id: &ActorId, actor: &Actor) -> Vec<CapabilityInfo> {
+        let capabilities = actor.capabilities.read();
+        capabilities
+            .capabilities
+            .values()
+            .map(|metadata| CapabilityInfo {
+                id: metadata.id,
+                issuer: metadata.issuer.clone(),
+                issuer_facet: metadata.issuer_facet.clone(),
+                issuer_entity: metadata.issuer_entity,
+                holder: metadata.holder.clone(),
+                holder_facet: metadata.holder_facet.clone(),
+                target: metadata.target.clone(),
+                kind: metadata.kind.clone(),
+                attenuation: metadata.attenuation.clone(),
+                status: metadata.status.clone(),
+            })
+            .collect()
+    }
+
     /// Switch the active branch for subsequent operations
     pub fn switch_branch(&mut self, branch: BranchId) -> Result<()> {
         self.runtime.switch_branch(branch)
@@ -317,7 +366,7 @@ impl Control {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EntityInfo {
     /// Entity instance ID
-    pub id: uuid::Uuid,
+    pub id: Uuid,
     /// Actor ID
     pub actor: ActorId,
     /// Facet ID
@@ -326,6 +375,31 @@ pub struct EntityInfo {
     pub entity_type: String,
     /// Number of pattern subscriptions
     pub pattern_count: usize,
+}
+
+/// Capability information for display
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapabilityInfo {
+    /// Capability identifier
+    pub id: CapId,
+    /// Issuing actor
+    pub issuer: ActorId,
+    /// Facet on the issuer that minted the capability
+    pub issuer_facet: FacetId,
+    /// Issuer entity instance (if known)
+    pub issuer_entity: Option<Uuid>,
+    /// Holder actor
+    pub holder: ActorId,
+    /// Holder facet
+    pub holder_facet: FacetId,
+    /// Target scope (if any)
+    pub target: Option<CapabilityTarget>,
+    /// Semantic kind string
+    pub kind: String,
+    /// Attenuation caveats attached to the capability
+    pub attenuation: Vec<preserves::IOValue>,
+    /// Current capability status
+    pub status: CapabilityStatus,
 }
 
 /// Convert a TurnRecord to a TurnSummary

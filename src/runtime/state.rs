@@ -294,15 +294,66 @@ pub enum CapabilityStatus {
     Revoked,
 }
 
-/// Capability metadata
+/// Target of a capability (actor/facet to which it applies)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapabilityTarget {
+    /// Actor affected when this capability is exercised
+    pub actor: ActorId,
+    /// Optional facet for scoping (None means actor-wide)
+    pub facet: Option<FacetId>,
+}
+
+/// Capability metadata recorded in the CRDT
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CapabilityMetadata {
     /// Capability ID
     pub id: CapId,
-    /// Attenuation caveats
+    /// Actor that issued the capability
+    pub issuer: ActorId,
+    /// Facet from which the capability was minted
+    #[serde(default = "default_facet_id")]
+    pub issuer_facet: FacetId,
+    /// Entity that granted the capability
+    #[serde(default = "default_option_uuid")]
+    pub issuer_entity: Option<uuid::Uuid>,
+    /// Actor currently holding the capability
+    pub holder: ActorId,
+    /// Facet within the holder that received the capability
+    pub holder_facet: FacetId,
+    /// Target scope of the capability (if applicable)
+    pub target: Option<CapabilityTarget>,
+    /// Semantic kind (e.g., "workspace/edit", "agent/run")
+    pub kind: String,
+    /// Attenuation caveats applied to this capability
     pub attenuation: Vec<preserves::IOValue>,
     /// Status
     pub status: CapabilityStatus,
+}
+
+impl CapabilityMetadata {
+    /// Create a revoked metadata placeholder (used when only a revoke is observed)
+    pub fn revoked_placeholder(id: CapId) -> Self {
+        Self {
+            id,
+            issuer: ActorId::from_uuid(Uuid::nil()),
+            issuer_facet: FacetId::from_uuid(Uuid::nil()),
+            issuer_entity: None,
+            holder: ActorId::from_uuid(Uuid::nil()),
+            holder_facet: FacetId::from_uuid(Uuid::nil()),
+            target: None,
+            kind: String::from("unknown"),
+            attenuation: Vec::new(),
+            status: CapabilityStatus::Revoked,
+        }
+    }
+}
+
+fn default_facet_id() -> FacetId {
+    FacetId::from_uuid(Uuid::nil())
+}
+
+fn default_option_uuid() -> Option<uuid::Uuid> {
+    None
 }
 
 /// Delta for capability changes
@@ -325,25 +376,21 @@ impl CapabilityDelta {
     /// Combines granted and revoked capabilities from both deltas.
     /// Revoked status dominates (once revoked, stays revoked).
     pub fn join(&self, other: &CapabilityDelta) -> CapabilityDelta {
-        let mut result = CapabilityDelta::default();
+        let mut granted = HashMap::new();
 
-        // Union of granted capabilities (deduplicate by ID)
-        let mut seen_granted = HashSet::new();
         for metadata in self.granted.iter().chain(other.granted.iter()) {
-            if seen_granted.insert(metadata.id) {
-                result.granted.push(metadata.clone());
-            }
+            granted.insert(metadata.id, metadata.clone());
         }
 
-        // Union of revoked capabilities (deduplicate by ID)
-        let mut seen_revoked = HashSet::new();
+        let mut revoked = HashSet::new();
         for cap_id in self.revoked.iter().chain(other.revoked.iter()) {
-            if seen_revoked.insert(*cap_id) {
-                result.revoked.push(*cap_id);
-            }
+            revoked.insert(*cap_id);
         }
 
-        result
+        CapabilityDelta {
+            granted: granted.into_values().collect(),
+            revoked: revoked.into_iter().collect(),
+        }
     }
 }
 
@@ -363,13 +410,18 @@ impl CapabilityMap {
     /// Apply a delta
     pub fn apply(&mut self, delta: &CapabilityDelta) {
         for metadata in &delta.granted {
-            self.capabilities.insert(metadata.id, metadata.clone());
+            self.capabilities
+                .entry(metadata.id)
+                .and_modify(|existing| *existing = metadata.clone())
+                .or_insert_with(|| metadata.clone());
         }
 
         for cap_id in &delta.revoked {
-            if let Some(metadata) = self.capabilities.get_mut(cap_id) {
-                metadata.status = CapabilityStatus::Revoked;
-            }
+            let entry = self
+                .capabilities
+                .entry(*cap_id)
+                .or_insert_with(|| CapabilityMetadata::revoked_placeholder(*cap_id));
+            entry.status = CapabilityStatus::Revoked;
         }
     }
 
@@ -383,12 +435,19 @@ impl CapabilityMap {
                 .capabilities
                 .entry(*id)
                 .and_modify(|existing| {
-                    // Revoked dominates
-                    if metadata.status == CapabilityStatus::Revoked {
-                        existing.status = CapabilityStatus::Revoked;
-                    }
+                    // Prefer the latest metadata from the other map
+                    *existing = metadata.clone();
                 })
                 .or_insert_with(|| metadata.clone());
+        }
+
+        // Ensure revoked status dominates
+        for (id, metadata) in self.capabilities.iter().chain(other.capabilities.iter()) {
+            if metadata.status == CapabilityStatus::Revoked {
+                if let Some(existing) = result.capabilities.get_mut(id) {
+                    existing.status = CapabilityStatus::Revoked;
+                }
+            }
         }
 
         result
@@ -739,5 +798,105 @@ mod tests {
 
         assert_eq!(joined.spawned.len(), 2, "Should combine spawned facets");
         assert_eq!(joined.terminated.len(), 1, "Should include terminations");
+    }
+
+    #[test]
+    fn test_capability_delta_join_and_map_apply() {
+        let issuer = ActorId::new();
+        let holder = ActorId::new();
+        let holder_facet = FacetId::new();
+        let issuer_facet = FacetId::new();
+        let cap_id = Uuid::new_v4();
+
+        let metadata = CapabilityMetadata {
+            id: cap_id,
+            issuer: issuer.clone(),
+            issuer_facet: issuer_facet.clone(),
+            issuer_entity: None,
+            holder: holder.clone(),
+            holder_facet: holder_facet.clone(),
+            target: Some(CapabilityTarget {
+                actor: holder.clone(),
+                facet: Some(holder_facet.clone()),
+            }),
+            kind: "test/edit".into(),
+            attenuation: vec![preserves::IOValue::symbol("caveat")],
+            status: CapabilityStatus::Active,
+        };
+
+        let grant = CapabilityDelta {
+            granted: vec![metadata.clone()],
+            revoked: vec![],
+        };
+
+        let revoke = CapabilityDelta {
+            granted: vec![],
+            revoked: vec![cap_id],
+        };
+
+        let joined = grant.join(&revoke);
+
+        assert_eq!(joined.granted.len(), 1, "Grant metadata should persist");
+        assert_eq!(joined.revoked.len(), 1, "Revocation should be recorded");
+
+        let mut map = CapabilityMap::new();
+        map.apply(&joined);
+
+        let entry = map.capabilities.get(&cap_id).expect("capability present");
+        assert_eq!(entry.status, CapabilityStatus::Revoked);
+        assert_eq!(entry.kind, "test/edit");
+        assert_eq!(entry.issuer, issuer);
+    }
+
+    #[test]
+    fn test_capability_map_join_prefers_latest_metadata() {
+        let cap_id = Uuid::new_v4();
+        let issuer = ActorId::new();
+        let holder = ActorId::new();
+        let facet = FacetId::new();
+        let issuer_facet = FacetId::new();
+
+        let mut map_a = CapabilityMap::new();
+        map_a.capabilities.insert(
+            cap_id,
+            CapabilityMetadata {
+                id: cap_id,
+                issuer: issuer.clone(),
+                issuer_facet: issuer_facet.clone(),
+                issuer_entity: None,
+                holder: holder.clone(),
+                holder_facet: facet.clone(),
+                target: None,
+                kind: "test/edit".into(),
+                attenuation: vec![preserves::IOValue::symbol("old")],
+                status: CapabilityStatus::Active,
+            },
+        );
+
+        let mut map_b = CapabilityMap::new();
+        map_b.capabilities.insert(
+            cap_id,
+            CapabilityMetadata {
+                id: cap_id,
+                issuer: issuer.clone(),
+                issuer_facet: issuer_facet.clone(),
+                issuer_entity: None,
+                holder: holder.clone(),
+                holder_facet: facet.clone(),
+                target: Some(CapabilityTarget {
+                    actor: holder.clone(),
+                    facet: Some(facet.clone()),
+                }),
+                kind: "test/edit".into(),
+                attenuation: vec![preserves::IOValue::symbol("new")],
+                status: CapabilityStatus::Active,
+            },
+        );
+
+        let joined = map_a.join(&map_b);
+        let meta = joined.capabilities.get(&cap_id).unwrap();
+
+        assert_eq!(meta.attenuation, vec![preserves::IOValue::symbol("new")]);
+        assert!(meta.target.is_some());
     }
 }

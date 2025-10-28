@@ -2,12 +2,15 @@
 //!
 //! Tests the complete flow of entity lifecycle across time-travel and restarts.
 
-use duet::runtime::actor::{Activation, Entity, HydratableEntity};
-use duet::runtime::error::{ActorError, ActorResult};
+use duet::runtime::actor::{Activation, CapabilitySpec, Entity, HydratableEntity};
+use duet::runtime::error::{ActorError, ActorResult, RuntimeError};
 use duet::runtime::pattern::Pattern;
 use duet::runtime::registry::{EntityMetadata, EntityRegistry};
+use duet::runtime::state::CapabilityTarget;
 use duet::runtime::turn::{ActorId, FacetId};
 use duet::runtime::{Control, RuntimeConfig};
+use std::convert::TryFrom;
+use std::fs;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
@@ -25,6 +28,59 @@ impl Entity for CounterEntity {
         _payload: &preserves::IOValue,
     ) -> ActorResult<()> {
         self.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+/// Entity that grants a deterministic capability when it receives the "grant" symbol.
+struct CapabilityIssuerEntity;
+
+impl Entity for CapabilityIssuerEntity {
+    fn on_message(
+        &self,
+        activation: &mut Activation,
+        payload: &preserves::IOValue,
+    ) -> ActorResult<()> {
+        if let Some(symbol) = payload.as_symbol() {
+            if symbol.as_ref() == "grant" {
+                let spec = CapabilitySpec {
+                    holder: activation.actor_id.clone(),
+                    holder_facet: activation.current_facet.clone(),
+                    target: Some(CapabilityTarget {
+                        actor: activation.actor_id.clone(),
+                        facet: Some(activation.current_facet.clone()),
+                    }),
+                    kind: "test/grant".to_string(),
+                    attenuation: Vec::new(),
+                };
+                activation.grant_capability(spec);
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Entity that exercises the flow-control borrow/repay helpers based on integer payloads.
+struct FlowControlEntity;
+
+impl Entity for FlowControlEntity {
+    fn on_message(
+        &self,
+        activation: &mut Activation,
+        payload: &preserves::IOValue,
+    ) -> ActorResult<()> {
+        if let Some(amount) = payload
+            .as_signed_integer()
+            .and_then(|value| i64::try_from(value.as_ref()).ok())
+        {
+            if amount > 0 {
+                activation.borrow_tokens(amount);
+            } else if amount < 0 {
+                activation.repay_tokens(-amount);
+            }
+        }
+
         Ok(())
     }
 }
@@ -133,6 +189,121 @@ fn test_entity_survives_time_travel() {
     let entities = control.list_entities();
     assert_eq!(entities.len(), 1);
     assert_eq!(entities[0].id, entity_id);
+}
+
+#[test]
+fn test_workspace_capability_read_and_write() {
+    use preserves::IOValue;
+
+    let temp = TempDir::new().unwrap();
+    let workspace_root = temp.path();
+    fs::write(workspace_root.join("hello.txt"), "hello world").unwrap();
+
+    let config = RuntimeConfig {
+        root: temp.path().to_path_buf(),
+        snapshot_interval: 5,
+        flow_control_limit: 100,
+        debug: false,
+    };
+
+    let mut control = Control::init(config).unwrap();
+
+    let actor_id = ActorId::new();
+    let facet_id = FacetId::new();
+
+    control
+        .register_entity(
+            actor_id.clone(),
+            facet_id.clone(),
+            "workspace".to_string(),
+            IOValue::new(workspace_root.to_string_lossy().to_string()),
+        )
+        .unwrap();
+
+    // Create an initial catalog snapshot
+    control
+        .send_message(
+            actor_id.clone(),
+            facet_id.clone(),
+            IOValue::symbol("workspace-rescan"),
+        )
+        .unwrap();
+
+    // Request read capability for hello.txt
+    let read_request = IOValue::record(
+        IOValue::symbol("workspace-read"),
+        vec![IOValue::new("hello.txt".to_string())],
+    );
+    control
+        .send_message(
+            actor_id.clone(),
+            facet_id.clone(),
+            read_request.clone(),
+        )
+        .unwrap();
+
+    let read_cap = control
+        .list_capabilities()
+        .into_iter()
+        .find(|cap| cap.kind == "workspace/read")
+        .expect("read capability should be granted");
+
+    let read_result = control
+        .invoke_capability(read_cap.id, read_request.clone())
+        .unwrap();
+
+    let text = read_result
+        .as_string()
+        .expect("expected string result from read");
+    assert_eq!(text.as_ref(), "hello world");
+
+    // Request write capability and overwrite the file
+    let write_grant = IOValue::record(
+        IOValue::symbol("workspace-write"),
+        vec![IOValue::new("hello.txt".to_string())],
+    );
+    control
+        .send_message(actor_id.clone(), facet_id.clone(), write_grant)
+        .unwrap();
+
+    let write_cap = control
+        .list_capabilities()
+        .into_iter()
+        .find(|cap| cap.kind == "workspace/write")
+        .expect("write capability should be granted");
+
+    let write_payload = IOValue::record(
+        IOValue::symbol("workspace-write"),
+        vec![
+            IOValue::new("hello.txt".to_string()),
+            IOValue::new("updated".to_string()),
+        ],
+    );
+
+    let write_result = control
+        .invoke_capability(write_cap.id, write_payload)
+        .unwrap();
+
+    assert_eq!(
+        write_result
+            .as_symbol()
+            .expect("write returns symbol")
+            .as_ref(),
+        "ok"
+    );
+
+    let file_contents = fs::read_to_string(workspace_root.join("hello.txt")).unwrap();
+    assert_eq!(file_contents, "updated");
+
+    // Read again via capability to confirm the catalog sees the change
+    let read_result_again = control
+        .invoke_capability(read_cap.id, read_request)
+        .unwrap();
+
+    let text_again = read_result_again
+        .as_string()
+        .expect("expected string result");
+    assert_eq!(text_again.as_ref(), "updated");
 }
 
 #[test]
@@ -334,4 +505,157 @@ fn test_hydratable_entity_state_restored_on_goto() {
     control.goto(turn_id).unwrap();
 
     assert_eq!(restored.load(Ordering::SeqCst), 42);
+}
+
+#[test]
+fn test_capabilities_persist_across_time_travel_and_restart() {
+    EntityRegistry::global().register("cap-issuer", |_config| Ok(Box::new(CapabilityIssuerEntity)));
+
+    let temp = TempDir::new().unwrap();
+    let config = RuntimeConfig {
+        root: temp.path().to_path_buf(),
+        snapshot_interval: 5,
+        flow_control_limit: 100,
+        debug: false,
+    };
+
+    let actor_id = ActorId::new();
+    let facet_id = FacetId::new();
+
+    let grant_turn = {
+        let mut control = Control::init(config.clone()).unwrap();
+
+        control
+            .register_entity(
+                actor_id.clone(),
+                facet_id.clone(),
+                "cap-issuer".to_string(),
+                preserves::IOValue::symbol("cfg"),
+            )
+            .unwrap();
+
+        // Produce an initial turn so that time-travel has a baseline state
+        control
+            .send_message(
+                actor_id.clone(),
+                facet_id.clone(),
+                preserves::IOValue::symbol("noop"),
+            )
+            .unwrap();
+
+        // Issue the capability
+        let grant_turn = control
+            .send_message(
+                actor_id.clone(),
+                facet_id.clone(),
+                preserves::IOValue::symbol("grant"),
+            )
+            .unwrap();
+
+        let capabilities = control.list_capabilities();
+        assert_eq!(capabilities.len(), 1);
+        let cap = &capabilities[0];
+        assert_eq!(cap.issuer, actor_id);
+        assert_eq!(cap.holder, actor_id);
+        assert_eq!(cap.kind, "test/grant");
+
+        // Rewind to before the capability was issued
+        control.back(1).unwrap();
+        assert!(control.list_capabilities().is_empty());
+
+        // Jump forward again and ensure the capability reappears
+        control.goto(grant_turn.clone()).unwrap();
+        assert_eq!(control.list_capabilities().len(), 1);
+
+        grant_turn
+    };
+
+    // Restart the runtime and ensure capability metadata is restored
+    {
+        let mut control = Control::new(config.clone()).unwrap();
+        control.goto(grant_turn.clone()).unwrap();
+        let caps = control.list_capabilities();
+        assert_eq!(caps.len(), 1);
+        let cap = &caps[0];
+        assert_eq!(cap.kind, "test/grant");
+        assert_eq!(cap.issuer, actor_id);
+        assert_eq!(cap.holder, actor_id);
+        assert_eq!(cap.target.as_ref().unwrap().actor, actor_id);
+    }
+
+    // Time travel backwards after restart clears the capability state
+    {
+        let mut control = Control::new(config).unwrap();
+        control.back(1).unwrap();
+        assert!(control.list_capabilities().is_empty());
+    }
+}
+
+#[test]
+fn test_flow_control_account_balance_and_time_travel() {
+    EntityRegistry::global().register("flow-control", |_config| Ok(Box::new(FlowControlEntity)));
+
+    let temp = TempDir::new().unwrap();
+    let config = RuntimeConfig {
+        root: temp.path().to_path_buf(),
+        snapshot_interval: 5,
+        flow_control_limit: 5,
+        debug: false,
+    };
+
+    let actor_id = ActorId::new();
+    let facet_id = FacetId::new();
+
+    {
+        let mut control = Control::init(config.clone()).unwrap();
+
+        control
+            .register_entity(
+                actor_id.clone(),
+                facet_id.clone(),
+                "flow-control".to_string(),
+                preserves::IOValue::symbol("cfg"),
+            )
+            .unwrap();
+
+        // Produce an initial turn to ensure rewind has a stable checkpoint
+        control
+            .send_message(
+                actor_id.clone(),
+                facet_id.clone(),
+                preserves::IOValue::new(preserves::SignedInteger::from(0)),
+            )
+            .unwrap();
+
+        // Borrow more than the flow-control limit
+        control
+            .send_message(
+                actor_id.clone(),
+                facet_id.clone(),
+                preserves::IOValue::new(preserves::SignedInteger::from(6)),
+            )
+            .unwrap();
+
+        assert_eq!(control.runtime().scheduler().account_balance(&actor_id), 6);
+
+        // Scheduler should refuse to schedule further work for the actor while debt exceeds limit
+        let err = control
+            .send_message(
+                actor_id.clone(),
+                facet_id.clone(),
+                preserves::IOValue::new(preserves::SignedInteger::from(-1)),
+            )
+            .expect_err("flow control should block the actor");
+        match err {
+            RuntimeError::Init(message) => assert!(message.contains("No turn executed")),
+            other => panic!("unexpected error variant: {:?}", other),
+        }
+    };
+
+    // Rewinding should reset the account balance on a fresh runtime
+    {
+        let mut control = Control::new(config.clone()).unwrap();
+        control.back(1).unwrap();
+        assert_eq!(control.runtime().scheduler().account_balance(&actor_id), 0);
+    }
 }

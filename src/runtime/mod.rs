@@ -55,14 +55,15 @@ impl Default for RuntimeConfig {
 
 use branch::BranchManager;
 use journal::{JournalReader, JournalWriter};
-use scheduler::Scheduler;
+use scheduler::{ScheduleCause, Scheduler};
 use schema::SchemaRegistry;
 use snapshot::SnapshotManager;
 use storage::Storage;
-use turn::BranchId;
+use turn::{BranchId, TurnInput, TurnOutput};
 
 use actor::Actor;
 use registry::EntityManager;
+use state::{CapId, CapabilityMetadata, CapabilityStatus};
 use std::collections::{HashMap, HashSet};
 
 /// The main runtime orchestrator
@@ -96,7 +97,7 @@ impl Runtime {
     /// This initializes all subsystems and performs crash recovery if needed.
     pub fn new(config: RuntimeConfig) -> Result<Self> {
         crate::codebase::register_codebase_entities();
-        
+
         // Initialize storage
         let storage = Storage::new(config.root.clone());
 
@@ -277,6 +278,9 @@ impl Runtime {
         let borrowed = delta.accounts.borrowed;
         let repaid = delta.accounts.repaid;
         self.scheduler.update_account(&actor_id, borrowed, repaid);
+
+        // Apply the delta to in-memory actor state so subsequent turns see the new data
+        actor.apply_delta(&delta);
 
         // Build turn record with parent turn tracking
         let parent = self.last_turn_per_actor.get(&actor_id).cloned();
@@ -1000,9 +1004,84 @@ impl Runtime {
     pub fn schema_registry() -> &'static SchemaRegistry {
         SchemaRegistry::init()
     }
+
+    /// Invoke a capability by identifier, returning the result payload.
+    ///
+    /// Schedules a synthetic turn for the capability issuer so the invocation
+    /// participates in causal ordering and journal replay.
+    pub fn invoke_capability(
+        &mut self,
+        cap_id: uuid::Uuid,
+        payload: preserves::IOValue,
+    ) -> Result<preserves::IOValue> {
+        CapabilityInvoker::invoke(self, cap_id, payload)
+    }
+
+    fn lookup_capability(&self, cap_id: CapId) -> Option<(turn::ActorId, CapabilityMetadata)> {
+        for (actor_id, actor) in &self.actors {
+            let capabilities = actor.capabilities.read();
+            if let Some(metadata) = capabilities.capabilities.get(&cap_id) {
+                return Some((actor_id.clone(), metadata.clone()));
+            }
+        }
+        None
+    }
 }
 
 // Re-export commonly used types
 pub use control::Control;
 pub use error::{Result, RuntimeError};
 pub use turn::{TurnId, TurnRecord};
+
+struct CapabilityInvoker;
+
+impl CapabilityInvoker {
+    fn invoke(
+        runtime: &mut Runtime,
+        cap_id: uuid::Uuid,
+        payload: preserves::IOValue,
+    ) -> Result<preserves::IOValue> {
+        use crate::runtime::error::CapabilityError;
+
+        let (issuer_actor, metadata) = runtime
+            .lookup_capability(cap_id)
+            .ok_or_else(|| CapabilityError::NotFound(cap_id))?;
+
+        if metadata.status == CapabilityStatus::Revoked {
+            return Err(CapabilityError::Revoked(cap_id).into());
+        }
+
+        runtime.scheduler.enqueue(
+            issuer_actor.clone(),
+            TurnInput::CapabilityInvocation {
+                capability: cap_id,
+                payload,
+            },
+            ScheduleCause::Capability,
+        );
+
+        loop {
+            match runtime.execute_turn()? {
+                Some(record) => {
+                    if let Some(result) = record.outputs.iter().find_map(|output| {
+                        if let TurnOutput::CapabilityResult { capability, result } = output {
+                            if *capability == cap_id {
+                                return Some(result.clone());
+                            }
+                        }
+                        None
+                    }) {
+                        return Ok(result);
+                    }
+                }
+                None => {
+                    return Err(CapabilityError::Denied(
+                        cap_id,
+                        "capability invocation did not produce a result".into(),
+                    )
+                    .into());
+                }
+            }
+        }
+    }
+}

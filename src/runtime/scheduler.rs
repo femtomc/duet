@@ -53,6 +53,8 @@ pub enum ScheduleCause {
     Timer,
     /// Sync completion
     Sync,
+    /// Capability invocation
+    Capability,
 }
 
 /// Deterministic turn scheduler
@@ -134,6 +136,11 @@ impl Scheduler {
     pub fn pending_count(&self) -> usize {
         self.ready_queue.len()
     }
+
+    /// Inspect the current account balance for an actor
+    pub fn account_balance(&self, actor: &ActorId) -> i64 {
+        self.account_balances.get(actor).copied().unwrap_or(0)
+    }
 }
 
 #[cfg(test)]
@@ -195,5 +202,6 @@ mod tests {
 
         // Should be blocked
         assert!(scheduler.next_turn().is_none());
+        assert_eq!(scheduler.account_balance(&actor), 15);
     }
 }

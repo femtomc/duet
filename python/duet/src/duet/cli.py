@@ -25,12 +25,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--root",
         type=Path,
-        help="Runtime root directory (passed to duetd).",
+        help="Runtime root directory (passed to codebased).",
+    )
+    parser.add_argument(
+        "--codebased-bin",
+        dest="codebased_bin",
+        type=Path,
+        help="Path to the codebased daemon binary (overrides auto-discovery).",
     )
     parser.add_argument(
         "--duetd-bin",
+        dest="codebased_bin",
         type=Path,
-        help="Path to the duetd binary (overrides auto-discovery).",
+        help=argparse.SUPPRESS,
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -64,6 +71,9 @@ def build_parser() -> argparse.ArgumentParser:
     list_entities = subparsers.add_parser("list-entities", help="List registered entities.")
     list_entities.add_argument("--actor", help="Filter by actor UUID.")
 
+    list_capabilities = subparsers.add_parser("list-capabilities", help="List known capabilities.")
+    list_capabilities.add_argument("--actor", help="Filter by actor UUID.")
+
     goto = subparsers.add_parser("goto", help="Jump to a specific turn.")
     goto.add_argument("turn_id", help="Turn ID to jump to.")
     goto.add_argument("--branch", default="main")
@@ -80,6 +90,17 @@ def build_parser() -> argparse.ArgumentParser:
     merge = subparsers.add_parser("merge", help="Merge source branch into target.")
     merge.add_argument("--source", required=True)
     merge.add_argument("--target", required=True)
+
+    invoke = subparsers.add_parser(
+        "invoke-capability",
+        help="Invoke a capability by id with a preserves payload.",
+    )
+    invoke.add_argument("--capability", required=True, help="Capability UUID.")
+    invoke.add_argument(
+        "--payload",
+        required=True,
+        help="Preserves payload (e.g. '(workspace-read \"path\")').",
+    )
 
     raw = subparsers.add_parser("raw", help="Send a raw command/params JSON payload.")
     raw.add_argument("rpc_command")
@@ -98,7 +119,7 @@ def main(argv: list[str] | None = None) -> int:
         console.print(f"[red]Protocol error:[/] {exc}")
         return 1
     except FileNotFoundError as exc:
-        console.print(f"[red]Failed to launch duetd:[/] {exc}")
+        console.print(f"[red]Failed to launch codebased:[/] {exc}")
         return 1
     except KeyboardInterrupt:
         return 130
@@ -136,6 +157,9 @@ async def run(args: argparse.Namespace) -> None:
         elif args.command == "list-entities":
             params = {"actor": args.actor} if args.actor else {}
             result = await client.call("list_entities", params)
+        elif args.command == "list-capabilities":
+            params = {"actor": args.actor} if args.actor else {}
+            result = await client.call("list_capabilities", params)
         elif args.command == "goto":
             result = await client.call(
                 "goto",
@@ -154,6 +178,8 @@ async def run(args: argparse.Namespace) -> None:
             result = await client.call(
                 "merge", {"source": args.source, "target": args.target}
             )
+        elif args.command == "invoke-capability":
+            result = await client.invoke_capability(args.capability, args.payload)
         elif args.command == "raw":
             try:
                 params = json_loads(args.params)
@@ -177,7 +203,7 @@ def json_loads(payload: str) -> Any:
 
 
 async def _connect_client(args: argparse.Namespace) -> ControlClient:
-    cmd = list(_duetd_command(args))
+    cmd = list(_codebased_command(args))
     if args.root:
         cmd.extend(["--root", str(args.root)])
     client = ControlClient(tuple(cmd))
@@ -185,17 +211,17 @@ async def _connect_client(args: argparse.Namespace) -> ControlClient:
     return client
 
 
-def _duetd_command(args: argparse.Namespace) -> Tuple[str, ...]:
-    if args.duetd_bin:
-        return (str(args.duetd_bin), "--stdio")
-    env_override = os.environ.get("DUETD_BIN")
+def _codebased_command(args: argparse.Namespace) -> Tuple[str, ...]:
+    if args.codebased_bin:
+        return (str(args.codebased_bin), "--stdio")
+    env_override = os.environ.get("CODEBASED_BIN") or os.environ.get("DUETD_BIN")
     if env_override:
         return (env_override, "--stdio")
-    return discover_duetd_command()
+    return discover_codebased_command()
 
 
-def discover_duetd_command() -> Tuple[str, ...]:
-    exe_name = "duetd.exe" if os.name == "nt" else "duetd"
+def discover_codebased_command() -> Tuple[str, ...]:
+    exe_name = "codebased.exe" if os.name == "nt" else "codebased"
     root = Path(__file__).resolve()
 
     for parent in root.parents:

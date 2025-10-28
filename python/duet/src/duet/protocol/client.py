@@ -68,6 +68,15 @@ class ControlClient:
     async def call(self, command: str, params: Dict[str, Any]) -> Any:
         return await self._send(command, params)
 
+    async def invoke_capability(self, capability: str, payload: str) -> Any:
+        response = await self._send(
+            "invoke_capability",
+            {"capability": capability, "payload": payload},
+        )
+        if isinstance(response, dict):
+            return response.get("result")
+        return response
+
     async def _handshake(self) -> None:
         await self._send(
             "handshake",
@@ -94,7 +103,7 @@ class ControlClient:
 
         line = await self._process.stdout.readline()
         if not line:
-            raise RuntimeError("duetd closed the connection")
+            raise RuntimeError("codebased closed the connection")
 
         response = json.loads(line.decode("utf-8"))
         if "error" in response:

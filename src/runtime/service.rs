@@ -2,7 +2,7 @@
 //!
 //! This module exposes a small dispatcher that translates newline-delimited
 //! JSON commands into calls on the high-level [`Control`] facade. It backs the
-//! `duetd` command-line daemon and is intentionally conservative: commands are
+//! `codebased` command-line daemon and is intentionally conservative: commands are
 //! processed sequentially, and unsupported operations return structured errors.
 
 use super::control::Control;
@@ -91,6 +91,8 @@ impl<W: Write> Service<W> {
             "merge" => self.cmd_merge(params),
             "register_entity" => self.cmd_register_entity(params),
             "list_entities" => self.cmd_list_entities(params),
+            "list_capabilities" => self.cmd_list_capabilities(params),
+            "invoke_capability" => self.cmd_invoke_capability(params),
             other => Err(ServiceError::Unsupported(other.to_string())),
         }
     }
@@ -125,7 +127,8 @@ impl<W: Write> Service<W> {
                     "history",
                     "time_travel",
                     "branching",
-                    "entity_persistence"
+                    "entity_persistence",
+                    "capability_inspection"
                 ]
             }
         }))
@@ -337,6 +340,45 @@ impl<W: Write> Service<W> {
             let entities = self.control.list_entities();
             Ok(json!({ "entities": entities }))
         }
+    }
+
+    fn cmd_list_capabilities(&mut self, params: &Value) -> Result<Value, ServiceError> {
+        self.ensure_handshake()?;
+        if let Some(actor_str) = params.get("actor").and_then(Value::as_str) {
+            let actor = ActorId::from_uuid(parse_uuid(actor_str)?);
+            let capabilities = self.control.list_capabilities_for_actor(&actor);
+            Ok(json!({ "capabilities": capabilities }))
+        } else {
+            let capabilities = self.control.list_capabilities();
+            Ok(json!({ "capabilities": capabilities }))
+        }
+    }
+
+    fn cmd_invoke_capability(&mut self, params: &Value) -> Result<Value, ServiceError> {
+        self.ensure_handshake()?;
+
+        let cap_id = params
+            .get("capability")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ServiceError::invalid_param("capability"))?;
+
+        let payload = params
+            .get("payload")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ServiceError::invalid_param("payload"))?;
+
+        let capability = parse_uuid(cap_id)?;
+        let payload_value: IOValue = payload
+            .parse()
+            .map_err(|err| ServiceError::InvalidParams(format!("invalid payload: {err}")))?;
+
+        let response = self
+            .control
+            .invoke_capability(capability, payload_value)
+            .map_err(ServiceError::from)?;
+
+        let rendered = format!("{:?}", response);
+        Ok(json!({ "result": rendered }))
     }
 
     fn switch_branch(&mut self, branch: &str) -> Result<(), ServiceError> {

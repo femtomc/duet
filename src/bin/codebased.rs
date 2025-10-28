@@ -1,4 +1,4 @@
-//! `duetd` – Duet runtime daemon exposing the NDJSON control protocol.
+//! `codebased` – Codebase daemon built on the Duet runtime.
 
 use duet::runtime::service::Service;
 use duet::runtime::{Control, RuntimeConfig};
@@ -64,7 +64,7 @@ fn main() -> io::Result<()> {
 
 fn print_usage() {
     eprintln!(
-        "Usage: duetd [--root PATH] [--no-init] [--stdio]\n\
+        "Usage: codebased [--root PATH] [--no-init] [--stdio]\n\
          \n\
          Options:\n\
            --root PATH   Use PATH as the runtime root (default: .duet)\n\

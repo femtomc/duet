@@ -47,11 +47,10 @@ fn test_single_turn_execution() {
     runtime.send_message(actor_id, facet_id, payload);
 
     // Execute the turn
-    let result = runtime.step().unwrap();
-
-    assert!(result.is_some(), "Expected a turn to be executed");
-
-    let turn_record = result.unwrap();
+    let turn_record = runtime
+        .step()
+        .unwrap()
+        .expect("expected a turn to be executed");
     assert_eq!(turn_record.inputs.len(), 1);
 }
 
@@ -239,10 +238,8 @@ fn test_no_turns_when_queue_empty() {
     let mut runtime = Runtime::new(config).unwrap();
 
     // Try to step with empty queue
-    let result = runtime.step().unwrap();
-
     assert!(
-        result.is_none(),
+        runtime.step().unwrap().is_none(),
         "No turns should execute when queue is empty"
     );
 }
@@ -275,18 +272,20 @@ fn test_flow_control_blocking() {
     runtime.scheduler_mut().update_account(&actor_id, 10, 0);
 
     // Try to execute - should be blocked
-    let result = runtime.step().unwrap();
-
-    // With account at 10 and limit at 5, turns should be blocked
-    // (Note: Current implementation doesn't have actual token borrowing in turns yet,
-    // so this test demonstrates the blocking mechanism)
+    assert!(
+        runtime.step().unwrap().is_none(),
+        "turn should be blocked when account exceeds limit"
+    );
 
     // Reset account to allow execution
     runtime.scheduler_mut().update_account(&actor_id, 0, 10);
 
     // Now should be able to execute
-    let result = runtime.step().unwrap();
-    assert!(result.is_some(), "Turn should execute after account reset");
+    let executed = runtime.step().unwrap();
+    assert!(
+        executed.is_some(),
+        "Turn should execute after account reset"
+    );
 }
 
 #[test]

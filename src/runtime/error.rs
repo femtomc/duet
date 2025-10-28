@@ -6,6 +6,7 @@
 use std::io;
 use std::path::PathBuf;
 use thiserror::Error;
+use uuid::Uuid;
 
 // No longer need to import TurnId/BranchId since we use String
 
@@ -31,6 +32,10 @@ pub enum RuntimeError {
     /// Actor/turn execution errors
     #[error("Actor error: {0}")]
     Actor(#[from] ActorError),
+
+    /// Capability errors
+    #[error("Capability error: {0}")]
+    Capability(#[from] CapabilityError),
 
     /// Configuration errors
     #[error("Configuration error: {0}")]
@@ -203,6 +208,22 @@ pub enum ActorError {
     /// Turn execution failed
     #[error("Turn execution failed: {0}")]
     ExecutionFailed(String),
+}
+
+/// Capability invocation errors
+#[derive(Debug, Error)]
+pub enum CapabilityError {
+    /// Capability not found
+    #[error("Capability {0} not found")]
+    NotFound(Uuid),
+
+    /// Capability was revoked before invocation
+    #[error("Capability {0} has been revoked")]
+    Revoked(Uuid),
+
+    /// Capability invocation denied by issuer
+    #[error("Capability {0} invocation denied: {1}")]
+    Denied(Uuid, String),
 }
 
 /// Convenience result alias for actor operations

@@ -4,7 +4,7 @@
 //! and state deltas for a single deterministic execution step. Turn IDs are
 //! computed deterministically from inputs using Blake3 hashing.
 
-use super::state::StateDelta;
+use super::state::{CapId, CapabilityTarget, StateDelta};
 use blake3::Hasher;
 use chrono::{DateTime, Utc};
 use preserves::serde::Error as PreservesSerdeError;
@@ -203,6 +203,14 @@ pub enum TurnInput {
         response: preserves::IOValue,
     },
 
+    /// Capability invocation targeting an entity reference
+    CapabilityInvocation {
+        /// Capability identifier
+        capability: CapId,
+        /// Payload supplied with invocation
+        payload: preserves::IOValue,
+    },
+
     /// Remote message from another node (future)
     RemoteMessage {
         /// Source node
@@ -303,6 +311,42 @@ pub enum TurnOutput {
         pattern_id: Uuid,
         /// Handle that was retracted
         handle: Handle,
+    },
+
+    /// Capability granted during this turn
+    CapabilityGranted {
+        /// Capability identifier
+        capability: CapId,
+        /// Issuer of the capability
+        issuer: ActorId,
+        /// Facet that minted the capability
+        issuer_facet: FacetId,
+        /// Entity instance that minted the capability
+        issuer_entity: Option<uuid::Uuid>,
+        /// Holder actor
+        holder: ActorId,
+        /// Facet within the holder
+        holder_facet: FacetId,
+        /// Optional target scope
+        target: Option<CapabilityTarget>,
+        /// Semantic kind
+        kind: String,
+        /// Attenuation caveats associated with the capability
+        attenuation: Vec<preserves::IOValue>,
+    },
+
+    /// Capability revoked during this turn
+    CapabilityRevoked {
+        /// Capability identifier
+        capability: CapId,
+    },
+
+    /// Result emitted after invoking a capability
+    CapabilityResult {
+        /// Capability identifier
+        capability: CapId,
+        /// Invocation result payload
+        result: preserves::IOValue,
     },
 }
 

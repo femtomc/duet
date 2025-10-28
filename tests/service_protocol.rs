@@ -49,12 +49,13 @@ fn service_handles_basic_commands() {
         }}),
         json!({"id": 5, "command": "list_entities", "params": {}}),
         json!({"id": 6, "command": "list_entities", "params": {"actor": actor.to_string()}}),
-        json!({"id": 7, "command": "send_message", "params": {
+        json!({"id": 7, "command": "list_capabilities", "params": {}}),
+        json!({"id": 8, "command": "send_message", "params": {
             "target": {"actor": actor.to_string(), "facet": facet.to_string()},
             "payload": "nil"
         }}),
-        json!({"id": 8, "command": "history", "params": {"branch": "main", "start": 0, "limit": 10}}),
-        json!({"id": 9, "command": "noop", "params": {}}),
+        json!({"id": 9, "command": "history", "params": {"branch": "main", "start": 0, "limit": 10}}),
+        json!({"id": 10, "command": "noop", "params": {}}),
     ];
 
     let input_data = requests
@@ -73,7 +74,7 @@ fn service_handles_basic_commands() {
         .map(|line| serde_json::from_slice::<Value>(line).unwrap())
         .collect();
 
-    assert_eq!(lines.len(), 9);
+    assert_eq!(lines.len(), 10);
 
     assert_eq!(lines[0]["error"]["code"], "protocol_error");
     assert!(lines[1]["result"].is_object());
@@ -81,9 +82,16 @@ fn service_handles_basic_commands() {
     assert!(lines[3]["result"].get("entity_id").is_some());
     assert_eq!(lines[4]["result"]["entities"].as_array().unwrap().len(), 1);
     assert_eq!(lines[5]["result"]["entities"].as_array().unwrap().len(), 1);
-    assert!(lines[6]["result"].get("queued_turn").is_some());
-    assert!(lines[7]["result"]["turns"].as_array().unwrap().len() >= 1);
-    assert_eq!(lines[8]["error"]["code"], "unsupported_command");
+    assert!(lines[6]["result"]["capabilities"].is_array());
+    assert!(
+        lines[6]["result"]["capabilities"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(lines[7]["result"].get("queued_turn").is_some());
+    assert!(lines[8]["result"]["turns"].as_array().unwrap().len() >= 1);
+    assert_eq!(lines[9]["error"]["code"], "unsupported_command");
 }
 
 struct SharedWriter(Rc<RefCell<Vec<u8>>>);

@@ -1,8 +1,11 @@
 //! Built-in entities and behaviours shipped with the Duet runtime.
 //!
-//! These are optional helpers that demonstrate common patterns
-//! (message-to-assertion echoing and hydratable counters) so that
-//! applications have useful primitives out of the box.
+//! The `codebase` module provides foundational entities that power
+//! the `codebased` daemon.  It currently includes:
+//!   * `workspace` – publishes a causal view of the filesystem and
+//!     issues capabilities for reading/modifying files.
+//!   * `echo` / `counter` – small reference implementations used by
+//!     tests/examples until richer catalogues arrive.
 
 use std::convert::TryFrom;
 use std::sync::{Mutex, Once};
@@ -14,6 +17,8 @@ use crate::runtime::error::{ActorError, ActorResult};
 use crate::runtime::registry::EntityRegistry;
 use crate::runtime::turn::Handle;
 
+pub mod workspace;
+
 static INIT: Once = Once::new();
 
 /// Register all built-in entities provided by this crate.
@@ -22,6 +27,8 @@ static INIT: Once = Once::new();
 pub fn register_codebase_entities() {
     INIT.call_once(|| {
         let registry = EntityRegistry::global();
+
+        workspace::register(registry);
 
         registry.register("echo", |config| {
             let topic = config
@@ -125,5 +132,6 @@ mod tests {
         let registry = EntityRegistry::global();
         assert!(registry.has_type("echo"));
         assert!(registry.has_type("counter"));
+        assert!(registry.has_type("workspace"));
     }
 }

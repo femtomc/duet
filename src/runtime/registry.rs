@@ -318,7 +318,7 @@ mod tests {
     use std::sync::Mutex;
 
     struct TestEntity {
-        name: String,
+        _name: String,
     }
 
     impl Entity for TestEntity {
@@ -334,7 +334,7 @@ mod tests {
     impl Default for TestEntity {
         fn default() -> Self {
             Self {
-                name: "default".to_string(),
+                _name: "default".to_string(),
             }
         }
     }
@@ -350,7 +350,7 @@ mod tests {
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| "default".to_string());
 
-            Ok(Box::new(TestEntity { name }))
+            Ok(Box::new(TestEntity { _name: name }))
         });
 
         assert!(registry.has_type("test-entity"));
@@ -373,7 +373,7 @@ mod tests {
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| "default".to_string());
 
-            Ok(Box::new(TestEntity { name }))
+            Ok(Box::new(TestEntity { _name: name }))
         });
 
         let config = preserves::IOValue::new("test-name".to_string());

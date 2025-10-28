@@ -12,11 +12,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use super::error::ActorResult;
+use super::error::{ActorError, ActorResult};
 use super::pattern::{Pattern, PatternEngine};
 use super::state::{
-    AccountDelta, AssertionDelta, AssertionSet, CapabilityDelta, CapabilityMap, FacetDelta,
-    FacetMap, FacetMetadata, FacetStatus, PNCounter, StateDelta,
+    AccountDelta, AssertionDelta, AssertionSet, CapId, CapabilityDelta, CapabilityMap,
+    CapabilityMetadata, CapabilityStatus, CapabilityTarget, FacetDelta, FacetMap, FacetMetadata,
+    FacetStatus, PNCounter, StateDelta,
 };
 use super::turn::{ActorId, FacetId, Handle, TurnInput, TurnOutput};
 
@@ -106,13 +107,22 @@ impl Actor {
             let engine = self.pattern_engine.read();
             if let Some(pattern) = engine.patterns.get(&pattern_match.pattern_id) {
                 if let Some(entity_list) = entities.get(&pattern.facet) {
-                    for entry in entity_list {
-                        entry.entity.on_assert(
-                            activation,
-                            &pattern_match.handle,
-                            &pattern_match.value,
-                        )?;
-                    }
+                    let prev_facet =
+                        std::mem::replace(&mut activation.current_facet, pattern.facet.clone());
+                    let result: ActorResult<()> = (|| {
+                        for entry in entity_list {
+                            activation.set_current_entity(Some(entry.id));
+                            entry.entity.on_assert(
+                                activation,
+                                &pattern_match.handle,
+                                &pattern_match.value,
+                            )?;
+                        }
+                        Ok(())
+                    })();
+                    activation.set_current_entity(None);
+                    activation.current_facet = prev_facet;
+                    result?;
                 }
             }
         }
@@ -175,6 +185,29 @@ impl Actor {
         }
     }
 
+    /// Apply a state delta to the actor's internal CRDTs
+    pub fn apply_delta(&self, delta: &StateDelta) {
+        {
+            let mut assertions = self.assertions.write();
+            assertions.apply(&delta.assertions);
+        }
+
+        {
+            let mut facets = self.facets.write();
+            facets.apply(&delta.facets);
+        }
+
+        {
+            let mut capabilities = self.capabilities.write();
+            capabilities.apply(&delta.capabilities);
+        }
+
+        {
+            let mut account = self.account.write();
+            account.apply(&delta.accounts);
+        }
+    }
+
     /// Execute a turn with the given inputs
     pub fn execute_turn(
         &self,
@@ -202,9 +235,18 @@ impl Actor {
                 // Deliver message to entities on this facet
                 let entities = self.entities.read();
                 if let Some(entity_list) = entities.get(&facet) {
-                    for entry in entity_list {
-                        entry.entity.on_message(activation, &payload)?;
-                    }
+                    let prev_facet =
+                        std::mem::replace(&mut activation.current_facet, facet.clone());
+                    let result: ActorResult<()> = (|| {
+                        for entry in entity_list {
+                            activation.set_current_entity(Some(entry.id));
+                            entry.entity.on_message(activation, &payload)?;
+                        }
+                        Ok(())
+                    })();
+                    activation.set_current_entity(None);
+                    activation.current_facet = prev_facet;
+                    result?;
                 }
             }
 
@@ -234,9 +276,20 @@ impl Actor {
                     let engine = self.pattern_engine.read();
                     if let Some(pattern) = engine.patterns.get(&pattern_id) {
                         if let Some(entity_list) = entities.get(&pattern.facet) {
-                            for entry in entity_list {
-                                entry.entity.on_retract(activation, &handle)?;
-                            }
+                            let prev_facet = std::mem::replace(
+                                &mut activation.current_facet,
+                                pattern.facet.clone(),
+                            );
+                            let result: ActorResult<()> = (|| {
+                                for entry in entity_list {
+                                    activation.set_current_entity(Some(entry.id));
+                                    entry.entity.on_retract(activation, &handle)?;
+                                }
+                                Ok(())
+                            })();
+                            activation.set_current_entity(None);
+                            activation.current_facet = prev_facet;
+                            result?;
                         }
                     }
                 }
@@ -250,12 +303,82 @@ impl Actor {
                 activation.outputs.push(TurnOutput::Synced { facet });
             }
 
+            TurnInput::CapabilityInvocation { capability, payload } => {
+                self.handle_capability_invocation(activation, capability, payload)?;
+            }
+
             _ => {
                 // Handle other input types
             }
         }
 
         self.process_pending_asserts(activation)
+    }
+
+    fn handle_capability_invocation(
+        &self,
+        activation: &mut Activation,
+        capability_id: CapId,
+        payload: preserves::IOValue,
+    ) -> ActorResult<()> {
+        let metadata = {
+            let capabilities = self.capabilities.read();
+            capabilities
+                .capabilities
+                .get(&capability_id)
+                .cloned()
+        }
+        .ok_or_else(|| {
+            ActorError::InvalidActivation(format!(
+                "Capability {} not found",
+                capability_id
+            ))
+        })?;
+
+        if metadata.status == CapabilityStatus::Revoked {
+            return Err(ActorError::InvalidActivation(format!(
+                "Capability {} has been revoked",
+                capability_id
+            )));
+        }
+
+        let issuer_entity = metadata.issuer_entity.ok_or_else(|| {
+            ActorError::InvalidActivation(format!(
+                "Capability {} is missing issuer entity metadata",
+                capability_id
+            ))
+        })?;
+
+        let facet_id = metadata.issuer_facet.clone();
+
+        let mut entities = self.entities.write();
+        let entity_list = entities
+            .get_mut(&facet_id)
+            .ok_or_else(|| ActorError::FacetNotFound(facet_id.0.to_string()))?;
+
+        let entry = entity_list
+            .iter_mut()
+            .find(|entry| entry.id == issuer_entity)
+            .ok_or_else(|| ActorError::InvalidActivation(format!(
+                "Entity {} not found for capability {}",
+                issuer_entity, capability_id
+            )))?;
+
+        let prev_facet =
+            std::mem::replace(&mut activation.current_facet, facet_id.clone());
+        activation.set_current_entity(Some(issuer_entity));
+        let result = entry
+            .entity
+            .on_capability_invoke(activation, &metadata, &payload)?;
+        activation.set_current_entity(None);
+        activation.current_facet = prev_facet;
+
+        activation.outputs.push(TurnOutput::CapabilityResult {
+            capability: capability_id,
+            result,
+        });
+
+        Ok(())
     }
 
     /// Attach an entity to a facet
@@ -318,6 +441,9 @@ pub struct Activation {
     /// Current facet context
     pub current_facet: FacetId,
 
+    /// Root facet of the actor
+    pub root_facet: FacetId,
+
     /// Outputs collected during this turn
     pub outputs: Vec<TurnOutput>,
 
@@ -341,6 +467,29 @@ pub struct Activation {
 
     /// Flow-control: tokens repaid
     pub tokens_repaid: i64,
+
+    /// Capabilities granted during this turn
+    pub capabilities_granted: Vec<CapabilityMetadata>,
+
+    /// Capabilities revoked during this turn
+    pub capabilities_revoked: Vec<CapId>,
+
+    /// Currently executing entity (if any)
+    current_entity: Option<Uuid>,
+}
+
+/// Specification for granting a capability during a turn
+pub struct CapabilitySpec {
+    /// Actor that will hold the capability
+    pub holder: ActorId,
+    /// Facet on the holder that receives it
+    pub holder_facet: FacetId,
+    /// Optional target scope for the capability
+    pub target: Option<CapabilityTarget>,
+    /// Semantic kind (e.g., "workspace/edit")
+    pub kind: String,
+    /// Attenuation caveats encoded as preserves values
+    pub attenuation: Vec<preserves::IOValue>,
 }
 
 impl Activation {
@@ -348,7 +497,8 @@ impl Activation {
     pub fn new(actor_id: ActorId, current_facet: FacetId) -> Self {
         Self {
             actor_id,
-            current_facet,
+            current_facet: current_facet.clone(),
+            root_facet: current_facet,
             outputs: Vec::new(),
             assertions_added: Vec::new(),
             assertions_retracted: Vec::new(),
@@ -357,6 +507,9 @@ impl Activation {
             facets_terminated: Vec::new(),
             tokens_borrowed: 0,
             tokens_repaid: 0,
+            capabilities_granted: Vec::new(),
+            capabilities_revoked: Vec::new(),
+            current_entity: None,
         }
     }
 
@@ -381,6 +534,10 @@ impl Activation {
     /// Remove the most recently queued pending assertion (used for external inputs)
     pub fn pop_last_pending_assert(&mut self) {
         self.pending_asserts.pop();
+    }
+
+    pub(crate) fn set_current_entity(&mut self, entity: Option<Uuid>) {
+        self.current_entity = entity;
     }
 
     /// Send a message to another actor/facet
@@ -432,6 +589,100 @@ impl Activation {
         self.tokens_repaid += amount;
     }
 
+    /// Grant a new capability with a freshly generated identifier
+    pub fn grant_capability(&mut self, spec: CapabilitySpec) -> CapId {
+        let capability_id = Uuid::new_v4();
+        self.grant_capability_with_id(capability_id, spec)
+    }
+
+    /// Grant (or re-grant) a capability using a specific identifier
+    pub fn grant_capability_with_id(
+        &mut self,
+        capability_id: CapId,
+        spec: CapabilitySpec,
+    ) -> CapId {
+        let issuer_entity = self.current_entity.expect(
+            "Capabilities can only be granted from within an entity activation",
+        );
+
+        let CapabilitySpec {
+            holder,
+            holder_facet,
+            target,
+            kind,
+            attenuation,
+        } = spec;
+
+        let metadata = CapabilityMetadata {
+            id: capability_id,
+            issuer: self.actor_id.clone(),
+            issuer_facet: self.current_facet.clone(),
+            issuer_entity: Some(issuer_entity),
+            holder: holder.clone(),
+            holder_facet: holder_facet.clone(),
+            target: target.clone(),
+            kind: kind.clone(),
+            attenuation: attenuation.clone(),
+            status: CapabilityStatus::Active,
+        };
+
+        if let Some(existing) = self
+            .capabilities_granted
+            .iter_mut()
+            .find(|meta| meta.id == capability_id)
+        {
+            *existing = metadata.clone();
+        } else {
+            self.capabilities_granted.push(metadata.clone());
+        }
+
+        // Ensure the capability is not marked as revoked in this turn
+        self.capabilities_revoked
+            .retain(|existing| *existing != capability_id);
+
+        self.outputs.push(TurnOutput::CapabilityGranted {
+            capability: capability_id,
+            issuer: metadata.issuer.clone(),
+            issuer_facet: metadata.issuer_facet.clone(),
+            issuer_entity: metadata.issuer_entity,
+            holder: metadata.holder.clone(),
+            holder_facet: metadata.holder_facet.clone(),
+            target: metadata.target.clone(),
+            kind: metadata.kind.clone(),
+            attenuation: metadata.attenuation.clone(),
+        });
+
+        capability_id
+    }
+
+    /// Revoke a capability by identifier
+    pub fn revoke_capability(&mut self, capability_id: CapId) {
+        let was_new = if self
+            .capabilities_revoked
+            .iter()
+            .any(|existing| *existing == capability_id)
+        {
+            false
+        } else {
+            self.capabilities_revoked.push(capability_id);
+            true
+        };
+
+        if let Some(existing) = self
+            .capabilities_granted
+            .iter_mut()
+            .find(|meta| meta.id == capability_id)
+        {
+            existing.status = CapabilityStatus::Revoked;
+        }
+
+        if was_new {
+            self.outputs.push(TurnOutput::CapabilityRevoked {
+                capability: capability_id,
+            });
+        }
+    }
+
     /// Build the state delta from this activation
     pub fn build_delta(&self) -> StateDelta {
         let mut assertions = AssertionDelta::default();
@@ -463,10 +714,15 @@ impl Activation {
             repaid: self.tokens_repaid,
         };
 
+        let capabilities = CapabilityDelta {
+            granted: self.capabilities_granted.clone(),
+            revoked: self.capabilities_revoked.clone(),
+        };
+
         StateDelta {
             assertions,
             facets,
-            capabilities: CapabilityDelta::default(),
+            capabilities,
             timers: super::state::TimerDelta::default(),
             accounts,
         }
@@ -511,6 +767,18 @@ pub trait Entity: Send + Sync + Any {
     /// Handle facet stop
     fn on_stop(&self, _activation: &mut Activation) -> ActorResult<()> {
         Ok(())
+    }
+
+    /// Handle capability invocation (default: unsupported)
+    fn on_capability_invoke(
+        &self,
+        _activation: &mut Activation,
+        _capability: &CapabilityMetadata,
+        _payload: &preserves::IOValue,
+    ) -> ActorResult<preserves::IOValue> {
+        Err(ActorError::InvalidActivation(
+            "capability invocation not supported by this entity".into(),
+        ))
     }
 }
 
@@ -818,6 +1086,74 @@ mod tests {
                 .iter()
                 .any(|o| matches!(o, TurnOutput::PatternMatched { .. })),
             "local assertions should trigger pattern matches"
+        );
+    }
+
+    #[test]
+    fn test_grant_capability_emits_output_with_metadata() {
+        let actor_id = ActorId::new();
+        let actor = Actor::new(actor_id.clone());
+        let mut activation = Activation::new(actor_id.clone(), actor.root_facet.clone());
+        let entity_id = Uuid::new_v4();
+        activation.set_current_entity(Some(entity_id));
+
+        let spec = CapabilitySpec {
+            holder: actor_id.clone(),
+            holder_facet: actor.root_facet.clone(),
+            target: Some(CapabilityTarget {
+                actor: actor_id.clone(),
+                facet: Some(actor.root_facet.clone()),
+            }),
+            kind: "test/grant".into(),
+            attenuation: vec![preserves::IOValue::symbol("allow")],
+        };
+
+        let cap_id = activation.grant_capability(spec);
+
+        assert_eq!(activation.capabilities_granted.len(), 1);
+        match activation.outputs.last() {
+            Some(TurnOutput::CapabilityGranted {
+                capability,
+                issuer,
+                holder,
+                kind,
+                attenuation,
+                ..
+            }) => {
+                assert_eq!(*capability, cap_id);
+                assert_eq!(*issuer, actor_id);
+                assert_eq!(*holder, actor_id);
+                assert_eq!(kind, "test/grant");
+                assert_eq!(attenuation, &vec![preserves::IOValue::symbol("allow")]);
+            }
+            other => panic!("unexpected output: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_revoke_capability_emits_event() {
+        let actor_id = ActorId::new();
+        let actor = Actor::new(actor_id.clone());
+        let mut activation = Activation::new(actor_id.clone(), actor.root_facet.clone());
+        let entity_id = Uuid::new_v4();
+        activation.set_current_entity(Some(entity_id));
+
+        let cap_id = activation.grant_capability(CapabilitySpec {
+            holder: actor_id.clone(),
+            holder_facet: actor.root_facet.clone(),
+            target: None,
+            kind: "test/grant".into(),
+            attenuation: Vec::new(),
+        });
+
+        activation.revoke_capability(cap_id);
+
+        assert!(
+            activation
+                .outputs
+                .iter()
+                .any(|output| matches!(output, TurnOutput::CapabilityRevoked { capability } if *capability == cap_id)),
+            "revoking should emit a capability revoked output"
         );
     }
 }

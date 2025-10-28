@@ -220,6 +220,7 @@ The runtime provides infrastructure for registering entity types and persisting 
 
 The crate ships with a small catalog of entities registered via `codebase::register_codebase_entities()` (called automatically when a runtime is created):
 
+- `workspace` – Scans the filesystem root, asserts `(workspace-entry <path> <kind> <size> <timestamp> …)` facts, and issues `workspace/read` or `workspace/write` capabilities on request. Rescans are deterministic so time travel replays the same catalog, and deleted paths emit retractions.
 - `echo` – Accepts incoming messages and asserts `(echo <topic> <payload>)` into the dataspace. The topic defaults to `"echo"`, or you can configure it by passing a preserves string as the entity config.
 - `counter` – A hydratable counter that maintains an integer value across time travel. Each message increments by the signed integer payload (defaulting to `1`) and asserts `(counter <value>)`.
 
@@ -306,10 +307,10 @@ To support automatic branch merges, every persistent state component is modelled
 - **Semantics:** Once any branch terminates a facet, the merged state keeps it terminated. Metadata allows UI to indicate “revived” facets if reopened later.
 
 ### Capabilities
-- **Structure:** Map `CapId -> {attenuation_chain, status}`.  
+- **Structure:** Map `CapId -> {issuer, holder, holder_facet, target?, kind, attenuation_chain, status}`.  
 - **Join:**  
   - Status: `Revoked` dominates `Active`.  
-  - Attenuation: intersection/most restrictive combined cage of caveats; union of provenance metadata.  
+  - Attenuation: intersection/most restrictive combined cage of caveats; target/kind metadata last-wins.  
 - **Semantics:** Capabilities never become more permissive after merge. Revocation anywhere revokes everywhere.
 
 ### Timers & Linked Tasks
@@ -351,7 +352,7 @@ To support automatic branch merges, every persistent state component is modelled
 
 ## 8. CLI Functionality (Python Command-Line)
 
-The `duet` CLI is intentionally stateless: each invocation launches `duetd`, performs a single command, prints the response with Rich, and exits. This makes it easy to script or drive via agents. Core subcommands include:
+The `duet` CLI is intentionally stateless: each invocation launches `codebased`, performs a single command, prints the response with Rich, and exits. This makes it easy to script or drive via agents. Core subcommands include:
 
 - `status` – display the active branch, head turn, queued inputs, and snapshot interval.  
 - `history [--branch BRANCH] [--start N] [--limit M]` – list recent turns for a branch (turn id, actor, summary).  
@@ -574,14 +575,14 @@ This guide should remain the single source of truth for Duet’s architecture. U
 ### 13.2 Python CLI Guidelines
 
 - **Package layout**: follow the structure sketched in Section 3 (package metadata, `src/duet`, protocol client, and CLI entry point). Ensure `__main__.py` enables `python -m duet` so both `uv run` and the installed `duet` script behave the same.
-- **Command model**: keep the CLI stateless and composable—implement subcommands (`status`, `history`, `send`, `register-entity`, etc.) that spawn `duetd`, perform a handshake, execute one request, pretty-print the result with `rich`, and exit. This makes it easy for agents or shell scripts to drive the runtime.
-- **Runtime discovery**: auto-detect the daemon binary (defaulting to `target/debug/duetd` or falling back to `duetd` on `PATH`), while allowing overrides via `DUETD_BIN` or `--duetd-bin` so different builds can be tested.
+- **Command model**: keep the CLI stateless and composable—implement subcommands (`status`, `history`, `send`, `register-entity`, etc.) that spawn `codebased`, perform a handshake, execute one request, pretty-print the result with `rich`, and exit. This makes it easy for agents or shell scripts to drive the runtime.
+- **Runtime discovery**: auto-detect the daemon binary (defaulting to `target/debug/codebased` or falling back to `codebased` on `PATH`), while allowing overrides via `CODEBASED_BIN` or `--codebased-bin` (with `DUETD_BIN` retained as a backward-compatible alias).
 - **Testing**: exercise the CLI with subprocess-based smoke tests (e.g., via `uv run` in CI) and reuse the service protocol tests to lock down JSON envelopes. Add unit tests for any argument parsing helpers.
 - **Future extensions**: a Textual/TUI experience can layer on top of the same control client later. Keep the protocol helpers and command dispatch isolated so richer front-ends can reuse them without duplication.
 
 ### 13.3 Cross-Language Integration Strategy
 
 - **Shared protocol**: define `control::Command`/`control::Response` structs once, document them (e.g., `docs/control-protocol.md`), and version them. Include the protocol version in every handshake so the CLI and runtime can detect mismatches.
-- **Process model**: keep long-lived state in the Rust runtime. The Python CLI should be stateless; on reconnect, it queries status/history via the control API. Optionally ship a lightweight daemon (`duetd`) the CLI launches or connects to.
+- **Process model**: keep long-lived state in the Rust runtime. The Python CLI should be stateless; on reconnect, it queries status/history via the control API. Optionally ship a lightweight daemon (`codebased`) the CLI launches or connects to.
 - **Resilience**: ensure the CLI can surface runtime restarts or protocol errors, offering retry prompts. Conversely, the runtime should time out idle CLI sessions without impacting other clients.
 - **Security**: capabilities already bound in the runtime apply equally to external services triggered by the CLI. Mask credentials in logs and avoid exposing capability attenuation details unless explicitly requested for debugging.
