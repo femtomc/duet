@@ -5,8 +5,54 @@ use crate::runtime::actor::{Activation, Entity, HydratableEntity};
 use crate::runtime::error::{ActorError, ActorResult};
 use crate::runtime::registry::EntityRegistry;
 use crate::runtime::turn::Handle;
+use once_cell::sync::Lazy;
 use preserves::ValueImpl;
+use std::io::Write;
+use std::process::{Command, Stdio};
 use std::sync::Mutex;
+
+/// Global agent configuration shared across runtime instances.
+#[derive(Debug, Clone)]
+struct AgentSettings {
+    mode: AgentMode,
+    command: Option<String>,
+    args: Vec<String>,
+}
+
+impl Default for AgentSettings {
+    fn default() -> Self {
+        Self {
+            mode: AgentMode::Auto,
+            command: None,
+            args: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentMode {
+    Auto,
+    Stub,
+}
+
+static SETTINGS: Lazy<Mutex<AgentSettings>> = Lazy::new(|| Mutex::new(AgentSettings::default()));
+
+/// Force the Claude agent into stub mode (useful for deterministic tests).
+pub fn set_stub_mode(enabled: bool) {
+    let mut settings = SETTINGS.lock().unwrap();
+    settings.mode = if enabled {
+        AgentMode::Stub
+    } else {
+        AgentMode::Auto
+    };
+}
+
+/// Configure the external command used to invoke Claude Code.
+pub fn set_external_command(command: Option<String>, args: Vec<String>) {
+    let mut settings = SETTINGS.lock().unwrap();
+    settings.command = command;
+    settings.args = args;
+}
 
 /// Entity type name registered in the global registry.
 pub const ENTITY_TYPE: &str = "agent-claude-code";
@@ -36,8 +82,57 @@ impl ClaudeCodeAgent {
         }
     }
 
-    fn handle_prompt(prompt: &str) -> String {
-        format!("Claude Code (stub) suggestion: {}", prompt.trim())
+    fn handle_prompt(prompt: &str) -> ActorResult<String> {
+        let (mode, command, args) = {
+            let settings = SETTINGS.lock().unwrap();
+            (
+                settings.mode,
+                settings
+                    .command
+                    .clone()
+                    .unwrap_or_else(|| "claude".to_string()),
+                settings.args.clone(),
+            )
+        };
+
+        match mode {
+            AgentMode::Stub => Ok(format!("Claude Code (stub) suggestion: {}", prompt.trim())),
+            AgentMode::Auto => Self::invoke_external(&command, &args, prompt).map_err(|err| {
+                ActorError::InvalidActivation(format!("Claude CLI invocation failed: {err}"))
+            }),
+        }
+    }
+
+    fn invoke_external(cmd: &str, args: &[String], prompt: &str) -> Result<String, String> {
+        let mut command = Command::new(cmd);
+        if !args.is_empty() {
+            command.args(args);
+        }
+
+        command.stdin(Stdio::piped()).stdout(Stdio::piped());
+
+        let mut child = command
+            .spawn()
+            .map_err(|err| format!("failed to spawn '{cmd}': {err}"))?;
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(prompt.as_bytes())
+                .map_err(|err| format!("failed to write prompt to '{cmd}': {err}"))?;
+        }
+
+        let output = child
+            .wait_with_output()
+            .map_err(|err| format!("failed to read output from '{cmd}': {err}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "'{cmd}' exited with status {}",
+                output.status.code().unwrap_or(-1)
+            ));
+        }
+
+        let response = String::from_utf8(output.stdout)
+            .map_err(|err| format!("non-UTF8 output from '{cmd}': {err}"))?;
+        Ok(response.trim().to_string())
     }
 
     fn parse_request(value: &preserves::IOValue) -> ActorResult<(String, String)> {
@@ -93,7 +188,7 @@ impl ClaudeCodeAgent {
             return Ok(());
         }
 
-        let response = Self::handle_prompt(&prompt);
+        let response = Self::handle_prompt(&prompt)?;
         exchanges.push(AgentExchange {
             request_id: request_id.clone(),
             prompt: prompt.clone(),

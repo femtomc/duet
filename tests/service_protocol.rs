@@ -172,6 +172,7 @@ fn agent_commands_roundtrip() {
     };
 
     Control::init(config.clone()).unwrap();
+    duet::codebase::agent::claude::set_stub_mode(true);
     let mut control = Control::new(config).unwrap();
     codebase::ensure_claude_agent(&mut control).unwrap();
 
@@ -211,6 +212,9 @@ fn agent_commands_roundtrip() {
             .unwrap()
             .contains("quicksort")
     );
+
+    // Restore default behaviour for subsequent tests.
+    duet::codebase::agent::claude::set_stub_mode(false);
 }
 
 struct SharedWriter(Rc<RefCell<Vec<u8>>>);
