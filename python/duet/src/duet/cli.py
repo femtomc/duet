@@ -116,7 +116,14 @@ def main(argv: list[str] | None = None) -> int:
     try:
         asyncio.run(run(args))
     except ProtocolError as exc:
-        console.print(f"[red]Protocol error:[/] {exc}")
+        suffix = f" ({exc.code})" if getattr(exc, "code", None) else ""
+        console.print(f"[red]Protocol error{suffix}:[/] {exc}")
+        details = getattr(exc, "details", None)
+        if details is not None:
+            if isinstance(details, (dict, list)):
+                console.print(JSON.from_data(details))
+            else:
+                console.print(f"[red]Details:[/] {details}")
         return 1
     except FileNotFoundError as exc:
         console.print(f"[red]Failed to launch codebased:[/] {exc}")

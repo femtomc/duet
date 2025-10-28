@@ -14,6 +14,11 @@ PROTOCOL_VERSION = "1.0.0"
 class ProtocolError(RuntimeError):
     """Raised when the runtime reports a protocol-level error."""
 
+    def __init__(self, message: str, *, code: str | None = None, details: Any | None = None):
+        super().__init__(message)
+        self.code = code
+        self.details = details
+
 
 class ControlClient:
     """Minimal asyncio client speaking the Duet NDJSON control protocol."""
@@ -109,6 +114,8 @@ class ControlClient:
         if "error" in response:
             error = response["error"]
             message = error.get("message", "unknown error")
-            raise ProtocolError(message)
+            code = error.get("code")
+            details = error.get("details")
+            raise ProtocolError(message, code=code, details=details)
 
         return response.get("result")

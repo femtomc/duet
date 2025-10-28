@@ -6,7 +6,7 @@
 //! processed sequentially, and unsupported operations return structured errors.
 
 use super::control::Control;
-use super::error::RuntimeError;
+use super::error::{RuntimeError, CapabilityError};
 use super::turn::{ActorId, BranchId, FacetId, TurnId};
 use crate::PROTOCOL_VERSION;
 use preserves::IOValue;
@@ -476,11 +476,33 @@ impl From<ServiceError> for ErrorEnvelope {
                 message,
                 details: None,
             },
-            ServiceError::Runtime(err) => ErrorEnvelope {
-                code: "runtime_error".into(),
-                message: err.to_string(),
-                details: None,
-            },
+            ServiceError::Runtime(err) => {
+                let message = err.to_string();
+                let details = match &err {
+                    RuntimeError::Capability(cap_err) => {
+                        let (variant, cap_id, reason) = match cap_err {
+                            CapabilityError::NotFound(id) => ("NotFound", Some(id), None),
+                            CapabilityError::Revoked(id) => ("Revoked", Some(id), None),
+                            CapabilityError::Denied(id, detail) => {
+                                ("Denied", Some(id), Some(detail.as_str()))
+                            }
+                        };
+                        Some(json!({
+                            "category": "capability",
+                            "variant": variant,
+                            "capability": cap_id.map(|id| id.to_string()),
+                            "reason": reason,
+                        }))
+                    }
+                    _ => None,
+                };
+
+                ErrorEnvelope {
+                    code: "runtime_error".into(),
+                    message,
+                    details,
+                }
+            }
         }
     }
 }
