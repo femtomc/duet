@@ -1,362 +1,387 @@
-"""Command-line interface for the Duet runtime."""
+"""Command-line interface for the Duet runtime using Typer + Rich."""
 
 from __future__ import annotations
 
-import argparse
 import asyncio
+import json
 import os
-import sys
+import traceback
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Optional, Tuple
 
+import rich_click as click  # Must be imported before typer to patch Click
+import typer
 from rich.console import Console
 from rich.json import JSON
 from rich.panel import Panel
 from rich.table import Table
-from rich.syntax import Syntax
 from rich.tree import Tree
 
 from .protocol.client import ControlClient, ProtocolError
 
+# Configure rich-click aesthetics
+click.rich_click.USE_RICH_MARKUP = True
+click.rich_click.SHOW_ARGUMENTS = True
+click.rich_click.STYLE_OPTION = "bold cyan"
+click.rich_click.STYLE_SWITCH = "bold cyan"
+click.rich_click.STYLE_COMMAND = "bold yellow"
+click.rich_click.STYLE_HELPTEXT = "dim"
+click.rich_click.MAX_WIDTH = 100
+
 console = Console()
 
-
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="duet",
-        description="CLI for interacting with the Duet runtime over the NDJSON control protocol.",
-    )
-    parser.add_argument(
-        "--root",
-        type=Path,
-        help="Runtime root directory (passed to codebased).",
-    )
-    parser.add_argument(
-        "--codebased-bin",
-        dest="codebased_bin",
-        type=Path,
-        help="Path to the codebased daemon binary (overrides auto-discovery).",
-    )
-    parser.add_argument(
-        "--duetd-bin",
-        dest="codebased_bin",
-        type=Path,
-        help=argparse.SUPPRESS,
-    )
-    subparsers = parser.add_subparsers(dest="command")
-    parser.set_defaults(command="status", branch=None)
-
-    status_parser = subparsers.add_parser("status", help="Show runtime status.")
-    status_parser.add_argument("--branch", default=None)
-
-    history = subparsers.add_parser("history", help="Show turn history for a branch.")
-    history.add_argument("--branch", default="main")
-    history.add_argument("--start", type=int, default=0)
-    history.add_argument("--limit", type=int, default=20)
-
-    send = subparsers.add_parser("send", help="Send a message to an actor/facet.")
-    send.add_argument("--actor", required=True, help="Actor UUID.")
-    send.add_argument("--facet", required=True, help="Facet UUID.")
-    send.add_argument(
-        "--payload",
-        required=True,
-        help="Preserves text payload (e.g. \"nil\" or \"(greeting \"\"hello\"\")\").",
-    )
-
-    register = subparsers.add_parser("register-entity", help="Register an entity.")
-    register.add_argument("--actor", required=True, help="Actor UUID.")
-    register.add_argument("--facet", required=True, help="Facet UUID.")
-    register.add_argument("--entity-type", required=True)
-    register.add_argument(
-        "--config",
-        default="nil",
-        help="Preserves value describing the entity configuration (default: nil).",
-    )
-
-    list_entities = subparsers.add_parser("list-entities", help="List registered entities.")
-    list_entities.add_argument("--actor", help="Filter by actor UUID.")
-
-    list_capabilities = subparsers.add_parser("list-capabilities", help="List known capabilities.")
-    list_capabilities.add_argument("--actor", help="Filter by actor UUID.")
-
-    goto = subparsers.add_parser("goto", help="Jump to a specific turn.")
-    goto.add_argument("turn_id", help="Turn ID to jump to.")
-    goto.add_argument("--branch", default="main")
-
-    back = subparsers.add_parser("back", help="Rewind by N turns.")
-    back.add_argument("--count", type=int, default=1)
-    back.add_argument("--branch", default="main")
-
-    fork = subparsers.add_parser("fork", help="Fork a new branch.")
-    fork.add_argument("--source", default="main")
-    fork.add_argument("--new-branch", required=True)
-    fork.add_argument("--from-turn")
-
-    merge = subparsers.add_parser("merge", help="Merge source branch into target.")
-    merge.add_argument("--source", required=True)
-    merge.add_argument("--target", required=True)
-
-    invoke = subparsers.add_parser(
-        "invoke-capability",
-        help="Invoke a capability by id with a preserves payload.",
-    )
-    invoke.add_argument("--capability", required=True, help="Capability UUID.")
-    invoke.add_argument(
-        "--payload",
-        required=True,
-        help="Preserves payload (e.g. '(workspace-read \"path\")').",
-    )
-
-    workspace = subparsers.add_parser("workspace", help="Workspace operations")
-    workspace_sub = workspace.add_subparsers(dest="workspace_command", required=True)
-
-    workspace_sub.add_parser("scan", help="Force a workspace rescan.")
-    workspace_sub.add_parser("entries", help="List workspace dataspace entries.")
-
-    read_parser = workspace_sub.add_parser("read", help="Read a file from the workspace.")
-    read_parser.add_argument("path", help="Workspace-relative path to read.")
-
-    write_parser = workspace_sub.add_parser("write", help="Write content to a workspace file.")
-    write_parser.add_argument("path", help="Workspace-relative path to write.")
-    write_parser.add_argument(
-        "--content",
-        "-c",
-        required=True,
-        help="Content to write to the file.",
-    )
-
-    raw = subparsers.add_parser("raw", help="Send a raw command/params JSON payload.")
-    raw.add_argument("rpc_command")
-    raw.add_argument("params", nargs="?", default="{}")
-
-    agent = subparsers.add_parser("agent", help="Agent operations")
-    agent_sub = agent.add_subparsers(dest="agent_command", required=True)
-
-    agent_invoke = agent_sub.add_parser("invoke", help="Invoke the Claude Code agent.")
-    agent_invoke.add_argument("prompt", help="Prompt text to send to the agent.")
-
-    agent_sub.add_parser("responses", help="List cached agent responses.")
-
-    return parser
+app = typer.Typer(
+    add_completion=False,
+    help="Interact with the Duet runtime over the NDJSON control protocol.",
+    rich_markup_mode="rich",
+)
+workspace_app = typer.Typer(
+    help="Workspace operations",
+    add_completion=False,
+    rich_markup_mode="rich",
+)
+agent_app = typer.Typer(
+    help="Agent operations",
+    add_completion=False,
+    rich_markup_mode="rich",
+)
+app.add_typer(workspace_app, name="workspace", rich_help_panel="Workspace")
+app.add_typer(agent_app, name="agent", rich_help_panel="Agents")
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
+@dataclass
+class CLIState:
+    """Runtime configuration shared across commands."""
+
+    root: Optional[Path]
+    codebased_bin: Optional[Path]
+
+
+def _run(coro: asyncio.Future[Any]) -> None:
+    """Execute an async coroutine with unified error handling."""
 
     try:
-        asyncio.run(run(args))
-    except ProtocolError as exc:
-        suffix = f" ({exc.code})" if getattr(exc, "code", None) else ""
-        error_content = f"[bold]{exc}[/bold]"
-        details = getattr(exc, "details", None)
-
-        if details is not None:
-            if isinstance(details, (dict, list)):
-                import json
-                details_str = json.dumps(details, indent=2)
-                error_content += f"\n\n[dim]Details:[/dim]\n{details_str}"
-            else:
-                error_content += f"\n\n[dim]Details:[/dim] {details}"
-
-        console.print(Panel(
-            error_content,
-            title=f"[bold red]Protocol Error{suffix}[/bold red]",
-            border_style="red"
-        ))
-        return 1
-    except FileNotFoundError as exc:
-        console.print(Panel(
-            f"[bold]{exc}[/bold]\n\n[dim]Make sure codebased is installed or use --codebased-bin to specify the path.[/dim]",
-            title="[bold red]Failed to Launch[/bold red]",
-            border_style="red"
-        ))
-        return 1
-    except KeyboardInterrupt:
+        asyncio.run(coro)
+    except ProtocolError as exc:  # pragma: no cover - exercised via integration
+        _print_protocol_error(exc)
+        raise typer.Exit(1)
+    except FileNotFoundError as exc:  # pragma: no cover - exercised manually
+        _print_launch_error(exc)
+        raise typer.Exit(1)
+    except KeyboardInterrupt:  # pragma: no cover - manual interrupt
         console.print("\n[yellow]Interrupted by user[/yellow]")
-        return 130
+        raise typer.Exit(130)
     except Exception as exc:  # pragma: no cover - safety net
-        import traceback
-        tb = traceback.format_exc()
-        console.print(Panel(
-            f"[bold]{exc}[/bold]\n\n[dim]{tb}[/dim]",
-            title="[bold red]Unexpected Error[/bold red]",
-            border_style="red"
-        ))
-        return 1
-    return 0
+        _print_unexpected_error(exc)
+        raise typer.Exit(1)
 
 
-async def run(args: argparse.Namespace) -> None:
-    client = await _connect_client(args)
-    try:
-        if args.command == "status":
-            params: Dict[str, Any] = {}
-            if args.branch:
-                params["branch"] = args.branch
-            result = await client.call("status", params)
-        elif args.command == "history":
-            result = await client.call(
-                "history",
-                {"branch": args.branch, "start": args.start, "limit": args.limit},
-            )
-        elif args.command == "send":
-            result = await client.send_message(args.actor, args.facet, args.payload)
-        elif args.command == "register-entity":
-            result = await client.call(
-                "register_entity",
-                {
-                    "actor": args.actor,
-                    "facet": args.facet,
-                    "entity_type": args.entity_type,
-                    "config": args.config,
-                },
-            )
-        elif args.command == "list-entities":
-            params = {"actor": args.actor} if args.actor else {}
-            result = await client.call("list_entities", params)
-        elif args.command == "list-capabilities":
-            params = {"actor": args.actor} if args.actor else {}
-            result = await client.call("list_capabilities", params)
-        elif args.command == "goto":
-            result = await client.call(
-                "goto",
-                {"branch": args.branch, "turn_id": args.turn_id},
-            )
-        elif args.command == "back":
-            result = await client.call(
-                "back", {"branch": args.branch, "count": args.count}
-            )
-        elif args.command == "fork":
-            params = {"source": args.source, "new_branch": args.new_branch}
-            if args.from_turn:
-                params["from_turn"] = args.from_turn
-            result = await client.call("fork", params)
-        elif args.command == "merge":
-            result = await client.call(
-                "merge", {"source": args.source, "target": args.target}
-            )
-        elif args.command == "invoke-capability":
-            result = await client.invoke_capability(args.capability, args.payload)
-        elif args.command == "workspace":
-            if args.workspace_command == "scan":
-                result = await client.call("workspace_rescan", {})
-            elif args.workspace_command == "entries":
-                result = await client.call("workspace_entries", {})
-            elif args.workspace_command == "read":
-                result = await client.call("workspace_read", {"path": args.path})
-            elif args.workspace_command == "write":
-                result = await client.call(
-                    "workspace_write",
-                    {"path": args.path, "content": args.content},
-                )
-            else:  # pragma: no cover
-                raise ProtocolError(f"Unsupported workspace command: {args.workspace_command}")
-        elif args.command == "agent":
-            if args.agent_command == "invoke":
-                result = await client.call("agent_invoke", {"prompt": args.prompt})
-            elif args.agent_command == "responses":
-                result = await client.call("agent_responses", {})
-            else:  # pragma: no cover
-                raise ProtocolError(f"Unsupported agent command: {args.agent_command}")
-        elif args.command == "raw":
-            try:
-                params = json_loads(args.params)
-            except ValueError as exc:
-                raise ProtocolError(f"Invalid JSON params: {exc}") from exc
-            if not isinstance(params, dict):
-                raise ProtocolError("Raw command params must decode to a JSON object.")
-            result = await client.call(args.rpc_command, params)
-        else:  # pragma: no cover - argparse enforces choices
-            raise ProtocolError(f"Unsupported command: {args.command}")
+@app.callback(invoke_without_command=True)
+def main(
+    ctx: typer.Context,
+    root: Optional[Path] = typer.Option(  # noqa: B008
+        None,
+        help="Runtime root directory passed to codebased.",
+        rich_help_panel="Runtime",
+    ),
+    codebased_bin: Optional[Path] = typer.Option(  # noqa: B008
+        None,
+        help="Path to the codebased daemon binary (overrides auto-discovery).",
+        rich_help_panel="Runtime",
+    ),
+) -> None:
+    """Top-level callback storing shared CLI state."""
 
-        workspace_command = getattr(args, "workspace_command", None)
-        agent_command = getattr(args, "agent_command", None)
+    ctx.obj = CLIState(root=root, codebased_bin=codebased_bin)
 
-        command_key = (
-            f"workspace:{workspace_command}"
-            if args.command == "workspace"
-            else f"agent:{agent_command}"
-            if args.command == "agent"
-            else args.command
-        )
-        _print_result(result, command_key)
-    finally:
-        await client.close()
+    if ctx.invoked_subcommand is None:
+        _run(_run_status(ctx.obj, branch=None))
+        raise typer.Exit()
+
+
+@app.command(rich_help_panel="Runtime")
+def status(
+    ctx: typer.Context,
+    branch: Optional[str] = typer.Option(  # noqa: B008
+        None,
+        help="Show status for a specific branch.",
+    ),
+) -> None:
+    """Show runtime status."""
+
+    _run(_run_status(ctx.obj, branch))
+
+
+@app.command(rich_help_panel="Runtime")
+def history(
+    ctx: typer.Context,
+    branch: str = typer.Option("main", help="Branch to inspect."),
+    start: int = typer.Option(0, help="Starting index of the history slice."),
+    limit: int = typer.Option(20, help="Number of turns to display."),
+) -> None:
+    """Show branch turn history."""
+
+    params = {"branch": branch, "start": start, "limit": limit}
+    _run(_run_call(ctx.obj, "history", params, "history"))
+
+
+@app.command(rich_help_panel="Runtime")
+def send(
+    ctx: typer.Context,
+    actor: str = typer.Argument(..., help="Target actor UUID."),
+    facet: str = typer.Argument(..., help="Target facet UUID."),
+    payload: str = typer.Argument(..., help="Preserves text payload."),
+) -> None:
+    """Send a message to an actor/facet."""
+
+    _run(_run_send_message(ctx.obj, actor, facet, payload))
+
+
+@app.command(rich_help_panel="Runtime")
+def register_entity(
+    ctx: typer.Context,
+    actor: str = typer.Argument(..., help="Actor UUID."),
+    facet: str = typer.Argument(..., help="Facet UUID."),
+    entity_type: str = typer.Argument(..., help="Entity type identifier."),
+    config: str = typer.Option("nil", help="Preserves config value."),
+) -> None:
+    """Register a new entity instance."""
+
+    params = {
+        "actor": actor,
+        "facet": facet,
+        "entity_type": entity_type,
+        "config": config,
+    }
+    _run(_run_call(ctx.obj, "register_entity", params, "register-entity"))
+
+
+@app.command(name="list-entities", rich_help_panel="Runtime")
+def list_entities(ctx: typer.Context, actor: Optional[str] = typer.Option(None, help="Filter by actor UUID.")) -> None:  # noqa: B008,E501
+    """List registered entities."""
+
+    params = {"actor": actor} if actor else {}
+    _run(_run_call(ctx.obj, "list_entities", params, "list-entities"))
+
+
+@app.command(name="list-capabilities", rich_help_panel="Runtime")
+def list_capabilities(
+    ctx: typer.Context,
+    actor: Optional[str] = typer.Option(None, help="Filter by actor UUID."),
+) -> None:
+    """List known capabilities."""
+
+    params = {"actor": actor} if actor else {}
+    _run(_run_call(ctx.obj, "list_capabilities", params, "list-capabilities"))
+
+
+@app.command(rich_help_panel="Runtime")
+def goto(
+    ctx: typer.Context,
+    turn_id: str = typer.Argument(..., help="Turn identifier to jump to."),
+    branch: Optional[str] = typer.Option(None, help="Branch to adjust first."),
+) -> None:
+    """Jump to a specific turn."""
+
+    params: Dict[str, Any] = {"turn_id": turn_id}
+    if branch:
+        params["branch"] = branch
+    _run(_run_call(ctx.obj, "goto", params, "goto"))
+
+
+@app.command(rich_help_panel="Runtime")
+def back(
+    ctx: typer.Context,
+    count: int = typer.Option(1, help="Number of turns to rewind."),
+    branch: Optional[str] = typer.Option(None, help="Branch to adjust first."),
+) -> None:
+    """Rewind the runtime by N turns."""
+
+    params: Dict[str, Any] = {"count": count}
+    if branch:
+        params["branch"] = branch
+    _run(_run_call(ctx.obj, "back", params, "back"))
+
+
+@app.command(rich_help_panel="Runtime")
+def fork(
+    ctx: typer.Context,
+    source: str = typer.Option("main", help="Source branch."),
+    new_branch: str = typer.Option(..., help="Name of the new branch."),
+    from_turn: Optional[str] = typer.Option(None, help="Optional base turn."),
+) -> None:
+    """Fork a new branch."""
+
+    params: Dict[str, Any] = {"source": source, "new_branch": new_branch}
+    if from_turn:
+        params["from_turn"] = from_turn
+    _run(_run_call(ctx.obj, "fork", params, "fork"))
+
+
+@app.command(rich_help_panel="Runtime")
+def merge(
+    ctx: typer.Context,
+    source: str = typer.Option(..., help="Source branch."),
+    target: str = typer.Option(..., help="Target branch."),
+) -> None:
+    """Merge a source branch into a target branch."""
+
+    params = {"source": source, "target": target}
+    _run(_run_call(ctx.obj, "merge", params, "merge"))
+
+
+@app.command(name="invoke-capability", rich_help_panel="Runtime")
+def invoke_capability(
+    ctx: typer.Context,
+    capability: str = typer.Argument(..., help="Capability UUID."),
+    payload: str = typer.Argument(..., help="Preserves payload."),
+) -> None:
+    """Invoke a capability by id."""
+
+    _run(_run_invoke_capability(ctx.obj, capability, payload))
+
+
+@app.command(rich_help_panel="Runtime")
+def raw(
+    ctx: typer.Context,
+    rpc_command: str = typer.Argument(..., help="Command name to invoke."),
+    params: str = typer.Argument("{}", help="JSON object of parameters."),
+) -> None:
+    """Send a raw command with JSON parameters."""
+
+    payload = json_loads(params)
+    if not isinstance(payload, dict):
+        raise typer.BadParameter("Params must decode to a JSON object")
+    _run(_run_call(ctx.obj, rpc_command, payload, "raw"))
+
+
+@workspace_app.command("entries")
+def workspace_entries(ctx: typer.Context) -> None:
+    """List workspace dataspace entries."""
+
+    _run(_run_call(ctx.obj, "workspace_entries", {}, "workspace:entries"))
+
+
+@workspace_app.command("scan")
+def workspace_scan(ctx: typer.Context) -> None:
+    """Trigger a workspace rescan."""
+
+    _run(_run_call(ctx.obj, "workspace_rescan", {}, "workspace:scan"))
+
+
+@workspace_app.command("read")
+def workspace_read(
+    ctx: typer.Context,
+    path: str = typer.Argument(..., help="Workspace-relative path to read."),
+) -> None:
+    """Read a file from the workspace."""
+
+    _run(_run_call(ctx.obj, "workspace_read", {"path": path}, "workspace:read"))
+
+
+@workspace_app.command("write")
+def workspace_write(
+    ctx: typer.Context,
+    path: str = typer.Argument(..., help="Workspace-relative path to write."),
+    content: str = typer.Option(..., "--content", "-c", help="Content to write."),
+) -> None:
+    """Write content to a workspace file."""
+
+    params = {"path": path, "content": content}
+    _run(_run_call(ctx.obj, "workspace_write", params, "workspace:write"))
+
+
+@agent_app.command("invoke")
+def agent_invoke(
+    ctx: typer.Context,
+    prompt: str = typer.Argument(..., help="Prompt text for Claude Code."),
+) -> None:
+    """Invoke the Claude Code agent."""
+
+    params = {"prompt": prompt}
+    _run(_run_call(ctx.obj, "agent_invoke", params, "agent:invoke"))
+
+
+@agent_app.command("responses")
+def agent_responses(ctx: typer.Context) -> None:
+    """List cached agent responses."""
+
+    _run(_run_call(ctx.obj, "agent_responses", {}, "agent:responses"))
 
 
 def json_loads(payload: str) -> Any:
-    import json
+    """Parse JSON with helpful error messages."""
 
     return json.loads(payload)
 
 
-async def _connect_client(args: argparse.Namespace) -> ControlClient:
-    cmd = list(_codebased_command(args))
-    if args.root:
-        cmd.extend(["--root", str(args.root)])
+async def _run_status(state: CLIState, branch: Optional[str]) -> None:
+    params: Dict[str, Any] = {}
+    if branch:
+        params["branch"] = branch
+    await _run_call(state, "status", params, "status")
+
+
+async def _run_send_message(state: CLIState, actor: str, facet: str, payload: str) -> None:
+    client = await _connect_client(state)
+    try:
+        result = await client.send_message(actor, facet, payload)
+        _print_result(result, "send")
+    finally:
+        await client.close()
+
+
+async def _run_invoke_capability(state: CLIState, capability: str, payload: str) -> None:
+    client = await _connect_client(state)
+    try:
+        result = await client.invoke_capability(capability, payload)
+        _print_result(result, "invoke-capability")
+    finally:
+        await client.close()
+
+
+async def _run_call(state: CLIState, rpc_command: str, params: Dict[str, Any], pretty_command: str) -> None:
+    client = await _connect_client(state)
+    try:
+        result = await client.call(rpc_command, params)
+        _print_result(result, pretty_command)
+    finally:
+        await client.close()
+
+
+async def _connect_client(state: CLIState) -> ControlClient:
+    cmd = list(_codebased_command(state))
+    if state.root:
+        cmd.extend(["--root", str(state.root)])
     client = ControlClient(tuple(cmd))
     await client.connect()
     return client
 
 
-def _codebased_command(args: argparse.Namespace) -> Tuple[str, ...]:
-    if args.codebased_bin:
-        return (str(args.codebased_bin), "--stdio")
+def _codebased_command(state: CLIState) -> Tuple[str, ...]:
+    if state.codebased_bin:
+        return (str(state.codebased_bin), "--stdio")
     env_override = os.environ.get("CODEBASED_BIN") or os.environ.get("DUETD_BIN")
     if env_override:
         return (env_override, "--stdio")
-    return discover_codebased_command()
-
-
-def discover_codebased_command() -> Tuple[str, ...]:
     exe_name = "codebased.exe" if os.name == "nt" else "codebased"
     root = Path(__file__).resolve()
-
     for parent in root.parents:
         candidate = parent / "target" / "debug" / exe_name
         if candidate.exists():
             return (str(candidate), "--stdio")
-
         candidate_release = parent / "target" / "release" / exe_name
         if candidate_release.exists():
             return (str(candidate_release), "--stdio")
-
     return (exe_name, "--stdio")
 
 
-def _print_result(result: Any, command: str | None = None) -> None:
-    """Print command result with Rich formatting based on command type."""
-    if command == "status":
-        _print_status(result)
-    elif command == "history":
-        _print_history(result)
-    elif command == "list-entities":
-        _print_entities(result)
-    elif command == "list-capabilities":
-        _print_capabilities(result)
-    elif command in ("send", "register-entity", "invoke-capability"):
-        _print_operation_result(result, command)
-    elif command in ("goto", "back", "fork", "merge"):
-        _print_navigation_result(result, command)
-    elif command == "workspace:entries":
-        _print_workspace_entries(result)
-    elif command == "workspace:read":
-        _print_workspace_read(result)
-    elif command in ("workspace:scan", "workspace:write"):
-        _print_operation_result(result, command)
-    elif command == "agent:invoke":
-        _print_agent_invoke(result)
-    elif command == "agent:responses":
-        _print_agent_responses(result)
-    elif isinstance(result, (dict, list)):
-        console.print(JSON.from_data(result))
-    else:
-        console.print(result)
-
+# ---------------------------------------------------------------------------
+# Rich formatting helpers
+# ---------------------------------------------------------------------------
 
 def _print_status(result: Any) -> None:
-    """Format status output with panels and tree view."""
     if not isinstance(result, dict):
         console.print(JSON.from_data(result))
         return
@@ -371,24 +396,17 @@ def _print_status(result: Any) -> None:
     tree.add(f"[dim]Pending Inputs:[/dim] {pending_inputs}")
     tree.add(f"[dim]Snapshot Interval:[/dim] {snapshot_interval}")
 
-    console.print(
-        Panel.fit(
-            tree,
-            title="[bold]Runtime Status[/bold]",
-            border_style="cyan",
-        )
-    )
+    console.print(Panel.fit(tree, title="[bold]Runtime Status[/bold]", border_style="cyan"))
 
 
 def _print_history(result: Any) -> None:
-    """Format history output as a table."""
     if not isinstance(result, dict) or "turns" not in result:
         console.print(JSON.from_data(result))
         return
 
     turns = result["turns"]
     if not turns:
-        console.print("[yellow]No turns in history[/yellow]")
+        console.print("[yellow]No turns recorded[/yellow]")
         return
 
     table = Table(title="Turn History", border_style="blue")
@@ -402,7 +420,7 @@ def _print_history(result: Any) -> None:
     for turn in turns:
         turn_id = str(turn.get("turn_id", ""))[:16] + "..."
         actor = str(turn.get("actor", ""))[:12] + "..."
-        clock = str(turn.get("clock", "0"))
+        clock = str(turn.get("clock", 0))
         inputs = str(turn.get("input_count", 0))
         outputs = str(turn.get("output_count", 0))
         timestamp = turn.get("timestamp", "N/A")
@@ -412,7 +430,6 @@ def _print_history(result: Any) -> None:
 
 
 def _print_entities(result: Any) -> None:
-    """Format entity list as a table."""
     if not isinstance(result, dict) or "entities" not in result:
         console.print(JSON.from_data(result))
         return
@@ -431,7 +448,7 @@ def _print_entities(result: Any) -> None:
 
     for entity in entities:
         entity_id = str(entity.get("id", ""))[:12] + "..."
-        entity_type = entity.get("entity_type", "N/A")
+        entity_type = entity.get("entity_type", entity.get("type", "N/A"))
         actor = str(entity.get("actor", ""))[:12] + "..."
         facet = str(entity.get("facet", ""))[:12] + "..."
         patterns = str(entity.get("pattern_count", 0))
@@ -441,7 +458,6 @@ def _print_entities(result: Any) -> None:
 
 
 def _print_capabilities(result: Any) -> None:
-    """Format capabilities list as a table."""
     if not isinstance(result, dict) or "capabilities" not in result:
         console.print(JSON.from_data(result))
         return
@@ -454,6 +470,7 @@ def _print_capabilities(result: Any) -> None:
     table = Table(title="Capabilities", border_style="magenta")
     table.add_column("ID", style="cyan", no_wrap=True)
     table.add_column("Kind", style="yellow")
+    table.add_column("Issuer", style="green", no_wrap=True)
     table.add_column("Holder", style="green", no_wrap=True)
     table.add_column("Status", style="blue")
     table.add_column("Attenuation", style="dim")
@@ -461,18 +478,19 @@ def _print_capabilities(result: Any) -> None:
     for cap in capabilities:
         cap_id = str(cap.get("id", ""))[:12] + "..."
         kind = cap.get("kind", "N/A")
+        issuer = str(cap.get("issuer", ""))[:12] + "..."
         holder = str(cap.get("holder", ""))[:12] + "..."
         status = cap.get("status", "unknown")
         attenuation = ", ".join(
-            str(value) for value in cap.get("attenuation", [])
+            value.as_string().as_ref() if hasattr(value, "as_string") else str(value)
+            for value in cap.get("attenuation", [])
         )
-        table.add_row(cap_id, kind, holder, status, attenuation)
+        table.add_row(cap_id, kind, issuer, holder, status, attenuation)
 
     console.print(table)
 
 
 def _print_workspace_entries(result: Any) -> None:
-    """Render workspace entries from the dataspace."""
     if not isinstance(result, dict) or "entries" not in result:
         console.print(JSON.from_data(result))
         return
@@ -485,39 +503,39 @@ def _print_workspace_entries(result: Any) -> None:
     table = Table(title="Workspace Entries", border_style="green")
     table.add_column("Path", style="cyan")
     table.add_column("Kind", style="magenta")
-    table.add_column("Size", justify="right", style="yellow")
+    table.add_column("Size", style="yellow", justify="right")
     table.add_column("Modified", style="green")
     table.add_column("Digest", style="dim")
 
     for entry in entries:
-        path = entry.get("path", "")
-        kind = entry.get("kind", "")
-        size = str(entry.get("size", 0))
-        modified = entry.get("modified") or "--"
-        digest = entry.get("digest") or "--"
-        table.add_row(path, kind, size, modified, digest)
+        table.add_row(
+            entry.get("path", ""),
+            entry.get("kind", ""),
+            str(entry.get("size", 0)),
+            entry.get("modified", "--"),
+            entry.get("digest", "--"),
+        )
 
     console.print(table)
 
 
 def _print_workspace_read(result: Any) -> None:
-    """Display workspace read output."""
     if not isinstance(result, dict) or "content" not in result:
         console.print(JSON.from_data(result))
         return
 
-    content = result.get("content", "")
     path = result.get("path", "")
-    panel = Panel(
-        content,
-        title=f"[bold green]Workspace Read[/bold green] [dim]{path}[/dim]",
-        border_style="green",
+    content = result.get("content", "")
+    console.print(
+        Panel(
+            content,
+            title=f"[bold green]Workspace Read[/bold green] [dim]{path}[/dim]",
+            border_style="green",
+        )
     )
-    console.print(panel)
 
 
 def _print_agent_invoke(result: Any) -> None:
-    """Show the response from an agent invocation."""
     if not isinstance(result, dict) or "response" not in result:
         console.print(JSON.from_data(result))
         return
@@ -527,17 +545,17 @@ def _print_agent_invoke(result: Any) -> None:
     request_id = result.get("request_id", "")
     agent = result.get("agent", "agent")
 
-    panel = Panel(
-        response,
-        title=f"[bold blue]{agent}[/bold blue] [dim]{request_id}[/dim]",
-        subtitle=f"Prompt: {prompt}",
-        border_style="blue",
+    console.print(
+        Panel(
+            response,
+            title=f"[bold blue]{agent}[/bold blue] [dim]{request_id}[/dim]",
+            subtitle=f"Prompt: {prompt}",
+            border_style="blue",
+        )
     )
-    console.print(panel)
 
 
 def _print_agent_responses(result: Any) -> None:
-    """Render cached agent responses."""
     if not isinstance(result, dict) or "responses" not in result:
         console.print(JSON.from_data(result))
         return
@@ -565,43 +583,112 @@ def _print_agent_responses(result: Any) -> None:
 
 
 def _print_operation_result(result: Any, operation: str) -> None:
-    """Format operation results with success panels."""
     if isinstance(result, dict):
-        status = result.get("status", "ok")
+        title = "[bold green]Success[/bold green]"
+        subtitle = ""
         if "queued_turn" in result:
-            title = "[bold green]Message Queued[/bold green]"
-            subtitle = f"Turn {result['queued_turn']}"
+            subtitle = f"Queued turn {result['queued_turn']}"
         elif "entity_id" in result:
-            title = "[bold green]Entity Registered[/bold green]"
-            subtitle = f"ID {result['entity_id']}"
-        else:
-            title = "[bold green]Success[/bold green]" if status == "ok" else "[bold yellow]Result[/bold yellow]"
-            subtitle = ""
+            subtitle = f"Entity {result['entity_id']}"
 
-        content = JSON.from_data(result)
         console.print(
             Panel(
-                content,
+                JSON.from_data(result),
                 title=title,
                 subtitle=subtitle,
                 border_style="green",
             )
         )
     else:
-        console.print(
-            Panel(
-                str(result),
-                title="[bold green]Result[/bold green]",
-                border_style="green",
-            )
-        )
+        console.print(Panel(str(result), title="Result", border_style="green"))
 
 
 def _print_navigation_result(result: Any, operation: str) -> None:
-    """Format navigation operation results."""
     if isinstance(result, dict):
-        title = f"[bold cyan]{operation.title()}[/bold cyan]"
-        content = JSON.from_data(result)
-        console.print(Panel(content, title=title, border_style="cyan"))
+        console.print(
+            Panel(
+                JSON.from_data(result),
+                title=f"[bold cyan]{operation.title()}[/bold cyan]",
+                border_style="cyan",
+            )
+        )
     else:
         console.print(f"[green]{result}[/green]")
+
+
+def _print_workspace_write(result: Any) -> None:
+    _print_operation_result(result, "workspace:write")
+
+
+def _print_result(result: Any, command: str) -> None:
+    if command == "status":
+        _print_status(result)
+    elif command == "history":
+        _print_history(result)
+    elif command == "list-entities":
+        _print_entities(result)
+    elif command == "list-capabilities":
+        _print_capabilities(result)
+    elif command in ("goto", "back", "fork", "merge"):
+        _print_navigation_result(result, command)
+    elif command in ("send", "register-entity", "invoke-capability", "workspace:scan", "workspace:write", "raw"):
+        _print_operation_result(result, command)
+    elif command == "workspace:entries":
+        _print_workspace_entries(result)
+    elif command == "workspace:read":
+        _print_workspace_read(result)
+    elif command == "agent:invoke":
+        _print_agent_invoke(result)
+    elif command == "agent:responses":
+        _print_agent_responses(result)
+    else:
+        console.print(JSON.from_data(result))
+
+
+def _print_protocol_error(exc: ProtocolError) -> None:
+    suffix = f" ({exc.code})" if getattr(exc, "code", None) else ""
+    details = getattr(exc, "details", None)
+
+    content = f"[bold]{exc}[/bold]"
+    if details is not None:
+        if isinstance(details, (dict, list)):
+            content += f"\n\n[dim]Details:[/dim]\n{json.dumps(details, indent=2)}"
+        else:
+            content += f"\n\n[dim]Details:[/dim] {details}"
+
+    console.print(
+        Panel(
+            content,
+            title=f"[bold red]Protocol Error{suffix}[/bold red]",
+            border_style="red",
+        )
+    )
+
+
+def _print_launch_error(exc: FileNotFoundError) -> None:
+    console.print(
+        Panel(
+            f"[bold]{exc}[/bold]\n\n[dim]Ensure codebased is installed or specify --codebased-bin.[/dim]",
+            title="[bold red]Failed to Launch[/bold red]",
+            border_style="red",
+        )
+    )
+
+
+def _print_unexpected_error(exc: Exception) -> None:
+    tb = traceback.format_exc()
+    console.print(
+        Panel(
+            f"[bold]{exc}[/bold]\n\n[dim]{tb}[/dim]",
+            title="[bold red]Unexpected Error[/bold red]",
+            border_style="red",
+        )
+    )
+
+
+def main_entrypoint() -> None:
+    app()
+
+
+if __name__ == "__main__":  # pragma: no cover - manual invocation
+    main_entrypoint()

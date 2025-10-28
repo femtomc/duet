@@ -19,7 +19,7 @@ fmt-rust:
 
 cli:
 	cargo build --bin codebased
-	uv run --project $(PYTHON_PROJECT) python -m duet status
+	uv run --project $(PYTHON_PROJECT) duet status
 
 install:
 	@echo "Installing codebased (release build)..."
