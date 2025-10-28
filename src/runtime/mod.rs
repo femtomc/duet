@@ -3,10 +3,14 @@
 //! This module provides the main `Runtime` struct that coordinates all subsystems
 //! and exposes the public interface for embedding or controlling the runtime.
 
+use once_cell::sync::Lazy;
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 use uuid::Uuid;
-
 // Submodules
 pub mod actor;
 pub mod branch;
@@ -66,6 +70,41 @@ use registry::EntityManager;
 use state::{CapId, CapabilityMetadata, CapabilityStatus};
 use std::collections::{HashMap, HashSet};
 
+/// Message enqueued from asynchronous tasks back into the deterministic scheduler.
+#[derive(Clone)]
+pub struct AsyncMessage {
+    /// Target actor for the synthetic turn input.
+    pub actor: turn::ActorId,
+    /// Facet on the actor that will receive the message.
+    pub facet: turn::FacetId,
+    /// Payload delivered to the actor.
+    pub payload: preserves::IOValue,
+}
+
+static ASYNC_DISPATCHER: Lazy<RwLock<Option<Sender<AsyncMessage>>>> =
+    Lazy::new(|| RwLock::new(None));
+
+/// Submit a message to be delivered on a subsequent turn from a background task.
+pub fn enqueue_async_message(
+    actor: turn::ActorId,
+    facet: turn::FacetId,
+    payload: preserves::IOValue,
+) -> error::Result<()> {
+    if let Some(sender) = ASYNC_DISPATCHER.read().clone() {
+        sender
+            .send(AsyncMessage {
+                actor,
+                facet,
+                payload,
+            })
+            .map_err(|err| error::RuntimeError::Init(format!("async dispatch failed: {err}")))
+    } else {
+        Err(error::RuntimeError::Init(
+            "async dispatcher unavailable".into(),
+        ))
+    }
+}
+
 /// The main runtime orchestrator
 ///
 /// Coordinates all subsystems: scheduler, journal, snapshots, branches, and control.
@@ -89,6 +128,15 @@ pub struct Runtime {
 
     /// Last turn ID for each actor (for causality tracking)
     last_turn_per_actor: HashMap<turn::ActorId, turn::TurnId>,
+
+    /// Turn notifications for long-polling listeners
+    turn_wait: Arc<(Mutex<HashMap<BranchId, TurnId>>, Condvar)>,
+
+    /// Inbound async message queue
+    async_inbox: Receiver<AsyncMessage>,
+
+    /// Sender retained for lifecycle management
+    _async_sender: Sender<AsyncMessage>,
 }
 
 impl Runtime {
@@ -116,12 +164,12 @@ impl Runtime {
             Ok(None) => {
                 let state = BranchManager::default_state();
                 storage::save_branch_state(&storage, &state).map_err(|e| {
-                    RuntimeError::Init(format!("Failed to write branch state: {}", e))
+                    error::RuntimeError::Init(format!("Failed to write branch state: {}", e))
                 })?;
                 state
             }
             Err(e) => {
-                return Err(RuntimeError::Init(format!(
+                return Err(error::RuntimeError::Init(format!(
                     "Failed to load branch state: {}",
                     e
                 )));
@@ -144,34 +192,39 @@ impl Runtime {
         // Validate and repair journal (truncates corrupted segments)
         journal_reader
             .validate_and_repair()
-            .map_err(|e| RuntimeError::Init(format!("Journal validation failed: {}", e)))?;
+            .map_err(|e| error::RuntimeError::Init(format!("Journal validation failed: {}", e)))?;
 
         // Rebuild index from actual segment data
         let clean_index = journal_reader
             .rebuild_index()
-            .map_err(|e| RuntimeError::Init(format!("Index rebuild failed: {}", e)))?;
+            .map_err(|e| error::RuntimeError::Init(format!("Index rebuild failed: {}", e)))?;
 
         // Save the clean index to disk
         let index_path = storage
             .branch_meta_dir(&current_branch)
             .join("journal.index");
         std::fs::create_dir_all(storage.branch_meta_dir(&current_branch))
-            .map_err(|e| RuntimeError::Init(format!("Failed to create meta dir: {}", e)))?;
+            .map_err(|e| error::RuntimeError::Init(format!("Failed to create meta dir: {}", e)))?;
         clean_index
             .save(&index_path)
-            .map_err(|e| RuntimeError::Init(format!("Failed to save index: {}", e)))?;
+            .map_err(|e| error::RuntimeError::Init(format!("Failed to save index: {}", e)))?;
 
         // Now create journal writer with the clean index
         let journal_writer =
             JournalWriter::new_with_index(storage.clone(), current_branch.clone(), clean_index)
                 .map_err(|e| {
-                    RuntimeError::Init(format!("Failed to create journal writer: {}", e))
+                    error::RuntimeError::Init(format!("Failed to create journal writer: {}", e))
                 })?;
 
         // Load entity metadata
         let entity_meta_path = storage.meta_dir().join("entities.json");
         let entity_manager =
             EntityManager::load(&entity_meta_path).unwrap_or_else(|_| EntityManager::new());
+
+        let (async_sender, async_receiver) = channel();
+        {
+            *ASYNC_DISPATCHER.write() = Some(async_sender.clone());
+        }
 
         let mut runtime = Self {
             config,
@@ -185,10 +238,21 @@ impl Runtime {
             entity_manager,
             turn_count: 0,
             last_turn_per_actor: HashMap::new(),
+            turn_wait: Arc::new((Mutex::new(HashMap::new()), Condvar::new())),
+            async_inbox: async_receiver,
+            _async_sender: async_sender,
         };
 
         // Hydrate entities: recreate and attach them from metadata
         runtime.hydrate_entities(None)?;
+
+        if let Some(head) = runtime
+            .branch_manager
+            .head(&runtime.current_branch)
+            .cloned()
+        {
+            runtime.record_branch_head(runtime.current_branch.clone(), head);
+        }
 
         Ok(runtime)
     }
@@ -212,7 +276,7 @@ impl Runtime {
             // Create entity instance using registry
             let mut entity = registry
                 .create(&metadata.entity_type, &metadata.config)
-                .map_err(|e| RuntimeError::Actor(e))?;
+                .map_err(|e| error::RuntimeError::Actor(e))?;
 
             // Restore private state if available
             if let Some(state_map) = entity_states {
@@ -253,6 +317,7 @@ impl Runtime {
     /// Takes the next ready turn from the scheduler, executes it,
     /// records it to the journal, and updates state.
     pub fn execute_turn(&mut self) -> Result<Option<TurnRecord>> {
+        self.poll_async_messages();
         // Get next ready turn from scheduler
         let scheduled_turn = match self.scheduler.next_turn() {
             Some(turn) => turn,
@@ -272,7 +337,7 @@ impl Runtime {
         // Execute the turn
         let (outputs, delta) = actor
             .execute_turn(inputs.clone())
-            .map_err(|e| RuntimeError::Actor(e))?;
+            .map_err(|e| error::RuntimeError::Actor(e))?;
 
         // Update flow control in scheduler (before consuming delta)
         let borrowed = delta.accounts.borrowed;
@@ -302,7 +367,7 @@ impl Runtime {
         // Append to journal
         self.journal_writer
             .append(&turn_record)
-            .map_err(|e| RuntimeError::Journal(e))?;
+            .map_err(|e| error::RuntimeError::Journal(e))?;
 
         // Update turn count
         self.turn_count += 1;
@@ -314,14 +379,17 @@ impl Runtime {
 
         self.branch_manager
             .update_head(&self.current_branch, turn_id.clone())
-            .map_err(|e| RuntimeError::Branch(e))?;
+            .map_err(|e| error::RuntimeError::Branch(e))?;
         self.persist_branch_state()?;
+
+        self.record_branch_head(self.current_branch.clone(), turn_id.clone());
 
         Ok(Some(turn_record))
     }
 
     /// Step the runtime forward by one turn
     pub fn step(&mut self) -> Result<Option<TurnRecord>> {
+        self.poll_async_messages();
         self.execute_turn()
     }
 
@@ -409,9 +477,85 @@ impl Runtime {
 
         self.snapshot_manager
             .save(&snapshot)
-            .map_err(|e| RuntimeError::Snapshot(e))?;
+            .map_err(|e| error::RuntimeError::Snapshot(e))?;
 
         Ok(())
+    }
+
+    fn record_branch_head(&self, branch: BranchId, head: TurnId) {
+        let (lock, cvar) = &*self.turn_wait;
+        let mut guard = lock.lock().unwrap();
+        guard.insert(branch, head);
+        cvar.notify_all();
+    }
+
+    fn poll_async_messages(&mut self) {
+        while let Ok(message) = self.async_inbox.try_recv() {
+            self.scheduler.enqueue(
+                message.actor.clone(),
+                TurnInput::ExternalMessage {
+                    actor: message.actor,
+                    facet: message.facet,
+                    payload: message.payload,
+                },
+                ScheduleCause::External,
+            );
+        }
+    }
+
+    /// Block until the given branch records a turn beyond `since`, or the timeout elapses.
+    pub fn wait_for_turn_after(
+        &self,
+        branch: &BranchId,
+        since: Option<&TurnId>,
+        timeout: Duration,
+    ) -> Result<Option<TurnId>> {
+        let (lock, cvar) = &*self.turn_wait;
+
+        // Fast path: check current head before waiting.
+        {
+            let guard = lock.lock().unwrap();
+            if let Some(current) = guard
+                .get(branch)
+                .cloned()
+                .or_else(|| self.branch_manager.head(branch).cloned())
+            {
+                if since.map_or(true, |s| &current != s) {
+                    return Ok(Some(current));
+                }
+            }
+        }
+
+        if timeout.is_zero() {
+            return Ok(None);
+        }
+
+        let deadline = Instant::now() + timeout;
+        let mut guard = lock.lock().unwrap();
+
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Ok(None);
+            }
+
+            let (g, wait_result) = cvar.wait_timeout(guard, remaining).unwrap();
+            guard = g;
+
+            if let Some(current) = guard
+                .get(branch)
+                .cloned()
+                .or_else(|| self.branch_manager.head(branch).cloned())
+            {
+                if since.map_or(true, |s| &current != s) {
+                    return Ok(Some(current));
+                }
+            }
+
+            if wait_result.timed_out() {
+                return Ok(None);
+            }
+        }
     }
 
     /// Enqueue a message to an actor
@@ -451,16 +595,16 @@ impl Runtime {
         // Create the fork in branch manager
         self.branch_manager
             .fork(&current, new_branch.clone(), base_turn.clone())
-            .map_err(|e| RuntimeError::Branch(e))?;
+            .map_err(|e| error::RuntimeError::Branch(e))?;
 
         // Create journal and snapshot directories for new branch
         let new_journal_dir = self.storage.branch_journal_dir(&new_branch);
         let new_snapshot_dir = self.storage.branch_snapshot_dir(&new_branch);
         std::fs::create_dir_all(&new_journal_dir).map_err(|e| {
-            RuntimeError::Init(format!("Failed to create branch journal dir: {}", e))
+            error::RuntimeError::Init(format!("Failed to create branch journal dir: {}", e))
         })?;
         std::fs::create_dir_all(&new_snapshot_dir).map_err(|e| {
-            RuntimeError::Init(format!("Failed to create branch snapshot dir: {}", e))
+            error::RuntimeError::Init(format!("Failed to create branch snapshot dir: {}", e))
         })?;
 
         self.persist_branch_state()?;
@@ -473,7 +617,7 @@ impl Runtime {
         // Verify branch exists
         self.branch_manager
             .switch_branch(branch.clone())
-            .map_err(|e| RuntimeError::Branch(e))?;
+            .map_err(|e| error::RuntimeError::Branch(e))?;
 
         // Update runtime state
         self.current_branch = branch.clone();
@@ -484,23 +628,23 @@ impl Runtime {
 
         journal_reader
             .validate_and_repair()
-            .map_err(|e| RuntimeError::Init(format!("Journal validation failed: {}", e)))?;
+            .map_err(|e| error::RuntimeError::Init(format!("Journal validation failed: {}", e)))?;
 
         let clean_index = journal_reader
             .rebuild_index()
-            .map_err(|e| RuntimeError::Init(format!("Index rebuild failed: {}", e)))?;
+            .map_err(|e| error::RuntimeError::Init(format!("Index rebuild failed: {}", e)))?;
 
         let index_path = self.storage.branch_meta_dir(&branch).join("journal.index");
         std::fs::create_dir_all(self.storage.branch_meta_dir(&branch))
-            .map_err(|e| RuntimeError::Init(format!("Failed to create meta dir: {}", e)))?;
+            .map_err(|e| error::RuntimeError::Init(format!("Failed to create meta dir: {}", e)))?;
         clean_index
             .save(&index_path)
-            .map_err(|e| RuntimeError::Init(format!("Failed to save index: {}", e)))?;
+            .map_err(|e| error::RuntimeError::Init(format!("Failed to save index: {}", e)))?;
 
         self.journal_writer =
             JournalWriter::new_with_index(self.storage.clone(), branch.clone(), clean_index)
                 .map_err(|e| {
-                    RuntimeError::Init(format!("Failed to create journal writer: {}", e))
+                    error::RuntimeError::Init(format!("Failed to create journal writer: {}", e))
                 })?;
 
         self.persist_branch_state()?;
@@ -517,7 +661,7 @@ impl Runtime {
         let snapshot_turn = self
             .snapshot_manager
             .nearest_snapshot(&self.current_branch, &target_turn)
-            .map_err(|e| RuntimeError::Snapshot(e))?;
+            .map_err(|e| error::RuntimeError::Snapshot(e))?;
 
         let mut entity_state_map: HashMap<uuid::Uuid, snapshot::EntityStateSnapshot> =
             HashMap::new();
@@ -532,7 +676,7 @@ impl Runtime {
             let snapshot = self
                 .snapshot_manager
                 .load_by_count(&self.current_branch, snap_count)
-                .map_err(|e| RuntimeError::Snapshot(e))?;
+                .map_err(|e| error::RuntimeError::Snapshot(e))?;
 
             // Restore state from snapshot
             self.turn_count = snapshot.metadata.turn_count;
@@ -590,15 +734,15 @@ impl Runtime {
 
         // Replay journal from snapshot point to target
         let journal_reader = JournalReader::new(self.storage.clone(), self.current_branch.clone())
-            .map_err(|e| RuntimeError::Journal(e))?;
+            .map_err(|e| error::RuntimeError::Journal(e))?;
 
         // Iterate through all turns and replay them
         let mut iter = journal_reader
             .iter_all()
-            .map_err(|e| RuntimeError::Journal(e))?;
+            .map_err(|e| error::RuntimeError::Journal(e))?;
 
         while let Some(result) = iter.next() {
-            let record = result.map_err(|e| RuntimeError::Journal(e))?;
+            let record = result.map_err(|e| error::RuntimeError::Journal(e))?;
 
             // Stop when we reach the target turn
             // Skip turns before the snapshot
@@ -655,7 +799,7 @@ impl Runtime {
         // Update branch head
         self.branch_manager
             .update_head(&self.current_branch, target_turn)
-            .map_err(|e| RuntimeError::Branch(e))?;
+            .map_err(|e| error::RuntimeError::Branch(e))?;
 
         Ok(())
     }
@@ -674,21 +818,19 @@ impl Runtime {
             .branch_manager
             .find_lca(source, target)
             .ok_or_else(|| {
-                RuntimeError::Branch(error::BranchError::InvalidForkPoint(
+                error::RuntimeError::Branch(error::BranchError::InvalidForkPoint(
                     "No common ancestor found".into(),
                 ))
             })?;
 
         // Get the head turns for both branches
-        let source_head =
-            self.branch_manager.head(source).cloned().ok_or_else(|| {
-                RuntimeError::Branch(error::BranchError::NotFound(source.0.clone()))
-            })?;
+        let source_head = self.branch_manager.head(source).cloned().ok_or_else(|| {
+            error::RuntimeError::Branch(error::BranchError::NotFound(source.0.clone()))
+        })?;
 
-        let target_head =
-            self.branch_manager.head(target).cloned().ok_or_else(|| {
-                RuntimeError::Branch(error::BranchError::NotFound(target.0.clone()))
-            })?;
+        let target_head = self.branch_manager.head(target).cloned().ok_or_else(|| {
+            error::RuntimeError::Branch(error::BranchError::NotFound(target.0.clone()))
+        })?;
 
         // Load state at LCA by replaying up to that turn
         let lca_state = self.load_state_at_turn(&lca_turn, source)?;
@@ -737,14 +879,16 @@ impl Runtime {
         // Record merge turn in journal
         self.journal_writer
             .append(&merge_record)
-            .map_err(|e| RuntimeError::Journal(e))?;
+            .map_err(|e| error::RuntimeError::Journal(e))?;
 
         // Update branch metadata
         self.branch_manager
             .update_head(target, merge_turn_id.clone())
-            .map_err(|e| RuntimeError::Branch(e))?;
+            .map_err(|e| error::RuntimeError::Branch(e))?;
 
         self.persist_branch_state()?;
+
+        self.record_branch_head(target.clone(), merge_turn_id.clone());
 
         Ok(branch::MergeResult {
             merge_turn: merge_turn_id,
@@ -757,15 +901,15 @@ impl Runtime {
     /// Accumulates all state deltas from the beginning up to (and including) the target turn.
     fn load_state_at_turn(&self, turn_id: &TurnId, branch: &BranchId) -> Result<state::StateDelta> {
         let journal_reader = JournalReader::new(self.storage.clone(), branch.clone())
-            .map_err(|e| RuntimeError::Journal(e))?;
+            .map_err(|e| error::RuntimeError::Journal(e))?;
 
         let mut accumulated_delta = state::StateDelta::empty();
         let mut iter = journal_reader
             .iter_all()
-            .map_err(|e| RuntimeError::Journal(e))?;
+            .map_err(|e| error::RuntimeError::Journal(e))?;
 
         while let Some(result) = iter.next() {
-            let record = result.map_err(|e| RuntimeError::Journal(e))?;
+            let record = result.map_err(|e| error::RuntimeError::Journal(e))?;
 
             // Accumulate this turn's delta
             accumulated_delta = accumulated_delta.join(&record.delta);
@@ -866,20 +1010,22 @@ impl Runtime {
             .head(&self.current_branch)
             .cloned()
             .ok_or_else(|| {
-                RuntimeError::Branch(error::BranchError::NotFound("No head turn found".into()))
+                error::RuntimeError::Branch(error::BranchError::NotFound(
+                    "No head turn found".into(),
+                ))
             })?;
 
         // Read journal to find the turn N steps back
         let journal_reader = JournalReader::new(self.storage.clone(), self.current_branch.clone())
-            .map_err(|e| RuntimeError::Journal(e))?;
+            .map_err(|e| error::RuntimeError::Journal(e))?;
 
         let mut turns = Vec::new();
         let mut iter = journal_reader
             .iter_all()
-            .map_err(|e| RuntimeError::Journal(e))?;
+            .map_err(|e| error::RuntimeError::Journal(e))?;
 
         while let Some(result) = iter.next() {
-            let record = result.map_err(|e| RuntimeError::Journal(e))?;
+            let record = result.map_err(|e| error::RuntimeError::Journal(e))?;
             turns.push(record.turn_id.clone());
 
             if record.turn_id == current_head {
@@ -894,9 +1040,9 @@ impl Runtime {
                 self.goto(first_turn.clone())?;
                 Ok(first_turn.clone())
             } else {
-                Err(RuntimeError::Journal(error::JournalError::TurnNotFound(
-                    "No turns in journal".into(),
-                )))
+                Err(error::RuntimeError::Journal(
+                    error::JournalError::TurnNotFound("No turns in journal".into()),
+                ))
             }
         } else {
             let target_idx = turns.len() - count - 1;
@@ -908,29 +1054,32 @@ impl Runtime {
 
     /// Initialize runtime storage directories and metadata
     pub fn init(config: RuntimeConfig) -> Result<()> {
-        storage::init_storage(&config.root)
-            .map_err(|e| RuntimeError::Init(format!("Failed to initialize storage: {}", e)))?;
+        storage::init_storage(&config.root).map_err(|e| {
+            error::RuntimeError::Init(format!("Failed to initialize storage: {}", e))
+        })?;
         storage::write_config(&config)
-            .map_err(|e| RuntimeError::Config(format!("Failed to write config: {}", e)))?;
+            .map_err(|e| error::RuntimeError::Config(format!("Failed to write config: {}", e)))?;
 
         let storage = Storage::new(config.root.clone());
         let branch_state = BranchManager::default_state();
-        storage::save_branch_state(&storage, &branch_state)
-            .map_err(|e| RuntimeError::Config(format!("Failed to write branch state: {}", e)))?;
+        storage::save_branch_state(&storage, &branch_state).map_err(|e| {
+            error::RuntimeError::Config(format!("Failed to write branch state: {}", e))
+        })?;
         Ok(())
     }
 
     /// Load an existing runtime from storage
     pub fn load(root: PathBuf) -> Result<Self> {
         let config = storage::load_config(&root)
-            .map_err(|e| RuntimeError::Config(format!("Failed to load config: {}", e)))?;
+            .map_err(|e| error::RuntimeError::Config(format!("Failed to load config: {}", e)))?;
         Self::new(config)
     }
 
     fn persist_branch_state(&self) -> Result<()> {
         let state = self.branch_manager.state();
-        storage::save_branch_state(&self.storage, &state)
-            .map_err(|e| RuntimeError::Config(format!("Failed to persist branch state: {}", e)))
+        storage::save_branch_state(&self.storage, &state).map_err(|e| {
+            error::RuntimeError::Config(format!("Failed to persist branch state: {}", e))
+        })
     }
 
     /// Get the current configuration
@@ -963,6 +1112,11 @@ impl Runtime {
         &mut self.journal_writer
     }
 
+    /// Drain any asynchronously scheduled messages into the main scheduler queue.
+    pub fn drain_async_messages(&mut self) {
+        self.poll_async_messages();
+    }
+
     /// Get the snapshot manager
     pub fn snapshot_manager(&self) -> &SnapshotManager {
         &self.snapshot_manager
@@ -981,7 +1135,7 @@ impl Runtime {
     /// Create a journal reader for a specific branch
     pub fn journal_reader(&self, branch: &BranchId) -> Result<JournalReader> {
         JournalReader::new(self.storage.clone(), branch.clone())
-            .map_err(|e| RuntimeError::Journal(e))
+            .map_err(|e| error::RuntimeError::Journal(e))
     }
 
     /// Get reference to entity manager
@@ -1089,7 +1243,7 @@ impl CapabilityInvoker {
 
         loop {
             match runtime.execute_turn() {
-                Err(RuntimeError::Actor(err)) => {
+                Err(error::RuntimeError::Actor(err)) => {
                     return Err(CapabilityError::Denied(cap_id, err.to_string()).into());
                 }
                 Err(other) => return Err(other),

@@ -5,7 +5,7 @@
 //! `codebased` command-line daemon and is intentionally conservative: commands are
 //! processed sequentially, and unsupported operations return structured errors.
 
-use super::control::Control;
+use super::control::{AssertionEventFilter, Control};
 use super::error::{CapabilityError, RuntimeError};
 use super::turn::{ActorId, BranchId, FacetId, TurnId};
 use crate::PROTOCOL_VERSION;
@@ -14,18 +14,35 @@ use preserves::IOValue;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::io::{self, BufRead, Write};
+use std::time::Duration;
 use uuid::Uuid;
 
 /// Service entry point: wraps a [`Control`] instance and writes responses to a writer.
-pub struct Service<W: Write> {
+pub struct Service {
     control: Control,
+}
+
+impl Service {
+    /// Create a new service wrapper around the provided control interface.
+    pub fn new(control: Control) -> Self {
+        Self { control }
+    }
+
+    /// Process a single connection by consuming requests from the reader and writing responses.
+    pub fn handle<R: BufRead, W: Write>(&mut self, reader: R, writer: W) -> io::Result<()> {
+        let mut session = Session::new(&mut self.control, writer);
+        session.run(reader)
+    }
+}
+
+struct Session<'a, W: Write> {
+    control: &'a mut Control,
     writer: W,
     handshake_completed: bool,
 }
 
-impl<W: Write> Service<W> {
-    /// Create a new service.
-    pub fn new(control: Control, writer: W) -> Self {
+impl<'a, W: Write> Session<'a, W> {
+    fn new(control: &'a mut Control, writer: W) -> Self {
         Self {
             control,
             writer,
@@ -33,8 +50,7 @@ impl<W: Write> Service<W> {
         }
     }
 
-    /// Run the service, consuming requests from the provided reader.
-    pub fn run<R: BufRead>(&mut self, reader: R) -> io::Result<()> {
+    fn run<R: BufRead>(&mut self, reader: R) -> io::Result<()> {
         for line in reader.lines() {
             let line = line?;
             if line.trim().is_empty() {
@@ -98,8 +114,10 @@ impl<W: Write> Service<W> {
             "workspace_read" => self.cmd_workspace_read(params),
             "workspace_write" => self.cmd_workspace_write(params),
             "agent_invoke" => self.cmd_agent_invoke(params),
-            "agent_responses" => self.cmd_agent_responses(),
+            "agent_responses" => self.cmd_agent_responses(params),
             "invoke_capability" => self.cmd_invoke_capability(params),
+            "dataspace_assertions" => self.cmd_dataspace_assertions(params),
+            "dataspace_events" => self.cmd_dataspace_events(params),
             other => Err(ServiceError::Unsupported(other.to_string())),
         }
     }
@@ -135,7 +153,9 @@ impl<W: Write> Service<W> {
                     "time_travel",
                     "branching",
                     "entity_persistence",
-                    "capability_inspection"
+                    "capability_inspection",
+                    "dataspace_inspection",
+                    "dataspace_events"
                 ]
             }
         }))
@@ -425,21 +445,34 @@ impl<W: Write> Service<W> {
             .ok_or_else(|| ServiceError::invalid_param("prompt"))?;
 
         let handle = self.ensure_claude_handle()?;
-        let response = codebase::invoke_claude_agent(&mut self.control, &handle, prompt)
+        let invocation = codebase::invoke_claude_agent(&mut self.control, &handle, prompt)
             .map_err(ServiceError::from)?;
 
+        let queued_turn = invocation
+            .queued_turn
+            .as_ref()
+            .map(|turn| turn.to_string())
+            .map(Value::from)
+            .unwrap_or(Value::Null);
+
         Ok(json!({
-            "agent": response.agent,
-            "request_id": response.request_id,
-            "prompt": response.prompt,
-            "response": response.response,
+            "agent": invocation.agent,
+            "request_id": invocation.request_id,
+            "prompt": invocation.prompt,
+            "queued_turn": queued_turn,
         }))
     }
 
-    fn cmd_agent_responses(&mut self) -> Result<Value, ServiceError> {
+    fn cmd_agent_responses(&mut self, params: &Value) -> Result<Value, ServiceError> {
         self.ensure_handshake()?;
+        self.control.drain_pending().map_err(ServiceError::from)?;
         let handle = self.ensure_claude_handle()?;
-        let responses = codebase::list_agent_responses(&self.control, &handle);
+        let mut responses = codebase::list_agent_responses(&self.control, &handle);
+
+        if let Some(request_id) = params.get("request_id").and_then(Value::as_str) {
+            responses.retain(|resp| resp.request_id == request_id);
+        }
+
         Ok(json!({ "responses": responses }))
     }
 
@@ -470,6 +503,113 @@ impl<W: Write> Service<W> {
         Ok(json!({ "result": rendered }))
     }
 
+    fn cmd_dataspace_assertions(&mut self, params: &Value) -> Result<Value, ServiceError> {
+        self.ensure_handshake()?;
+
+        let actor_filter = if let Some(actor) = params.get("actor").and_then(Value::as_str) {
+            let uuid = parse_uuid(actor)?;
+            Some(ActorId::from_uuid(uuid))
+        } else {
+            None
+        };
+
+        let label_filter = params
+            .get("label")
+            .and_then(Value::as_str)
+            .map(|s| s.to_string());
+        let request_filter = params
+            .get("request_id")
+            .and_then(Value::as_str)
+            .map(|s| s.to_string());
+        let limit = params
+            .get("limit")
+            .and_then(Value::as_u64)
+            .map(|n| n as usize);
+
+        self.control.drain_pending().map_err(ServiceError::from)?;
+
+        let mut assertions = self.control.list_assertions(actor_filter.as_ref());
+
+        if let Some(label) = &label_filter {
+            assertions.retain(|info| assertion_matches_label(&info.value, label));
+        }
+
+        if let Some(request_id) = &request_filter {
+            assertions.retain(|info| assertion_matches_request_id(&info.value, request_id));
+        }
+
+        if let Some(limit) = limit {
+            assertions.truncate(limit);
+        }
+
+        Ok(json!({ "assertions": assertions }))
+    }
+
+    fn cmd_dataspace_events(&mut self, params: &Value) -> Result<Value, ServiceError> {
+        self.ensure_handshake()?;
+
+        let branch_name = params
+            .get("branch")
+            .and_then(Value::as_str)
+            .unwrap_or("main");
+        let branch = BranchId::new(branch_name);
+
+        let since_turn = params
+            .get("since")
+            .and_then(Value::as_str)
+            .map(|s| TurnId::new(s.to_string()));
+
+        let limit = params
+            .get("limit")
+            .and_then(Value::as_u64)
+            .map(|v| v as usize)
+            .unwrap_or(20);
+
+        let mut filter = AssertionEventFilter::inclusive();
+
+        if let Some(actor) = params.get("actor").and_then(Value::as_str) {
+            let uuid = parse_uuid(actor)?;
+            filter.actor = Some(ActorId::from_uuid(uuid));
+        }
+
+        if let Some(label) = params.get("label").and_then(Value::as_str) {
+            filter.label = Some(label.to_string());
+        }
+
+        if let Some(request_id) = params.get("request_id").and_then(Value::as_str) {
+            filter.request_id = Some(request_id.to_string());
+        }
+
+        if let Some(types) = params.get("event_types").and_then(Value::as_array) {
+            filter.include_asserts = false;
+            filter.include_retracts = false;
+            for ty in types {
+                if let Some(name) = ty.as_str() {
+                    match name {
+                        "assert" | "asserts" => filter.include_asserts = true,
+                        "retract" | "retracts" => filter.include_retracts = true,
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        let wait_duration = params
+            .get("wait_ms")
+            .and_then(Value::as_u64)
+            .map(Duration::from_millis);
+
+        self.control.drain_pending().map_err(ServiceError::from)?;
+
+        let chunk = self
+            .control
+            .assertion_events_since(&branch, since_turn.as_ref(), limit, filter, wait_duration)
+            .map_err(ServiceError::from)?;
+
+        let result = serde_json::to_value(chunk).unwrap_or(Value::Null);
+        Ok(result)
+    }
+
     fn switch_branch(&mut self, branch: &str) -> Result<(), ServiceError> {
         let branch_id = BranchId::new(branch);
         self.control
@@ -487,6 +627,33 @@ impl<W: Write> Service<W> {
             Err(err) => Err(ServiceError::from(err)),
         }
     }
+}
+
+fn assertion_matches_label(value: &IOValue, label: &str) -> bool {
+    if value.is_record() {
+        value
+            .label()
+            .as_symbol()
+            .map(|sym| sym.as_ref() == label)
+            .unwrap_or(false)
+    } else {
+        value
+            .as_symbol()
+            .map(|sym| sym.as_ref() == label)
+            .unwrap_or(false)
+    }
+}
+
+fn assertion_matches_request_id(value: &IOValue, request_id: &str) -> bool {
+    if !value.is_record() || value.len() == 0 {
+        return false;
+    }
+
+    value
+        .index(0)
+        .as_string()
+        .map(|s| s.as_ref() == request_id)
+        .unwrap_or(false)
 }
 
 #[derive(Debug)]

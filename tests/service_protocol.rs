@@ -33,8 +33,7 @@ fn service_handles_basic_commands() {
     let control = Control::new(config).unwrap();
 
     let sink = Rc::new(RefCell::new(Vec::<u8>::new()));
-    let writer = SharedWriter(sink.clone());
-    let mut service = Service::new(control, writer);
+    let mut service = Service::new(control);
 
     let actor = Uuid::new_v4();
     let facet = Uuid::new_v4();
@@ -67,7 +66,7 @@ fn service_handles_basic_commands() {
         .join("\n");
 
     let reader = Cursor::new(format!("{}\n", input_data));
-    service.run(reader).unwrap();
+    service.handle(reader, SharedWriter(sink.clone())).unwrap();
 
     let output = sink.borrow();
     let lines: Vec<_> = output
@@ -115,8 +114,7 @@ fn workspace_commands_expose_entries() {
     fs::write(&file_path, "hello world").unwrap();
 
     let sink = Rc::new(RefCell::new(Vec::<u8>::new()));
-    let writer = SharedWriter(sink.clone());
-    let mut service = Service::new(control, writer);
+    let mut service = Service::new(control);
 
     let requests = vec![
         json!({"id": 1, "command": "handshake", "params": {"client": "test", "protocol_version": duet::PROTOCOL_VERSION}}),
@@ -134,7 +132,7 @@ fn workspace_commands_expose_entries() {
         .join("\n");
 
     let reader = Cursor::new(format!("{}\n", input_data));
-    service.run(reader).unwrap();
+    service.handle(reader, SharedWriter(sink.clone())).unwrap();
 
     let output = sink.borrow();
     let lines: Vec<_> = output
@@ -172,39 +170,88 @@ fn agent_commands_roundtrip() {
     };
 
     Control::init(config.clone()).unwrap();
-    duet::codebase::agent::claude::set_stub_mode(true);
+    duet::codebase::agent::claude::set_external_command(Some("cat".to_string()), vec![]);
     let mut control = Control::new(config).unwrap();
     codebase::ensure_claude_agent(&mut control).unwrap();
 
     let sink = Rc::new(RefCell::new(Vec::<u8>::new()));
-    let writer = SharedWriter(sink.clone());
-    let mut service = Service::new(control, writer);
+    let mut service = Service::new(control);
 
-    let requests = vec![
+    let initial_requests = vec![
         json!({"id": 1, "command": "handshake", "params": {"client": "test", "protocol_version": duet::PROTOCOL_VERSION}}),
         json!({"id": 2, "command": "agent_invoke", "params": {"prompt": "Explain quicksort in Rust"}}),
-        json!({"id": 3, "command": "agent_responses", "params": {}}),
     ];
 
-    let input_data = requests
+    let input_data = initial_requests
         .into_iter()
         .map(|req| serde_json::to_string(&req).unwrap())
         .collect::<Vec<_>>()
-        .join("\n");
+        .join("
+");
 
-    let reader = Cursor::new(format!("{}\n", input_data));
-    service.run(reader).unwrap();
+    service
+        .handle(
+            Cursor::new(format!("{}
+", input_data)),
+            SharedWriter(sink.clone()),
+        )
+        .unwrap();
 
-    let output = sink.borrow();
-    let lines: Vec<_> = output
-        .split(|b| *b == b'\n')
-        .filter(|line| !line.is_empty())
-        .map(|line| serde_json::from_slice::<Value>(line).unwrap())
-        .collect();
+    let (request_id, queued_turn) = {
+        let output = sink.borrow();
+        let lines: Vec<Value> = output
+            .split(|b| *b == b'
+')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice::<Value>(line).unwrap())
+            .collect();
 
-    assert_eq!(lines.len(), 3);
-    assert!(lines[1]["result"].get("response").is_some());
-    let responses = lines[2]["result"]["responses"].as_array().unwrap();
+        assert_eq!(lines.len(), 2);
+        let request_id = lines[1]["result"]["request_id"].as_str().unwrap().to_string();
+        let queued_turn = lines[1]["result"]["queued_turn"].as_str().map(|s| s.to_string());
+        (request_id, queued_turn)
+    };
+
+    sink.borrow_mut().clear();
+
+    let mut follow_requests = vec![
+        json!({"id": 3, "command": "handshake", "params": {"client": "test", "protocol_version": duet::PROTOCOL_VERSION}}),
+        json!({"id": 4, "command": "agent_responses", "params": {}}),
+        json!({"id": 5, "command": "dataspace_assertions", "params": {"label": "agent-response", "request_id": request_id}}),
+        json!({"id": 6, "command": "dataspace_events", "params": {"label": "agent-response", "limit": 5}}),
+    ];
+
+    if let Some(turn) = queued_turn.clone() {
+        follow_requests.push(json!({"id": 7, "command": "dataspace_events", "params": {"label": "agent-response", "since": turn, "limit": 5}}));
+    }
+
+    let follow_input = follow_requests
+        .into_iter()
+        .map(|req| serde_json::to_string(&req).unwrap())
+        .collect::<Vec<_>>()
+        .join("
+");
+
+    service
+        .handle(
+            Cursor::new(format!("{}
+", follow_input)),
+            SharedWriter(sink.clone()),
+        )
+        .unwrap();
+
+    let lines: Vec<Value> = {
+        let output = sink.borrow();
+        output
+            .split(|b| *b == b'
+')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice::<Value>(line).unwrap())
+            .collect()
+    };
+
+    assert!(lines.len() == 4 || lines.len() == 5);
+    let responses = lines[1]["result"]["responses"].as_array().unwrap();
     assert_eq!(responses.len(), 1);
     assert!(
         responses[0]["prompt"]
@@ -213,9 +260,28 @@ fn agent_commands_roundtrip() {
             .contains("quicksort")
     );
 
-    // Restore default behaviour for subsequent tests.
-    duet::codebase::agent::claude::set_stub_mode(false);
+    let assertions = lines[2]["result"]["assertions"].as_array().unwrap();
+    assert_eq!(assertions.len(), 1);
+
+    let first_events = lines[3]["result"]["events"].as_array().unwrap();
+    assert!(!first_events.is_empty());
+
+    if let Some(turn) = queued_turn {
+        if let Some(next_cursor) = lines[3]["result"]["next_cursor"].as_str() {
+            assert_eq!(next_cursor, turn);
+        }
+        if lines.len() >= 5 {
+            let tail_events = lines[4]["result"]["events"].as_array().unwrap();
+            assert!(tail_events.is_empty());
+            let has_more = lines[4]["result"]["has_more"].as_bool().unwrap();
+            assert!(!has_more);
+        }
+    }
+
+    duet::codebase::agent::claude::set_external_command(None, vec![]);
 }
+
+
 
 struct SharedWriter(Rc<RefCell<Vec<u8>>>);
 

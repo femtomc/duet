@@ -2,19 +2,20 @@
 
 use super::{AgentEntity, AgentExchange, exchanges_from_preserves, exchanges_to_preserves};
 use crate::runtime::actor::{Activation, Entity, HydratableEntity};
+use crate::runtime::enqueue_async_message;
 use crate::runtime::error::{ActorError, ActorResult};
 use crate::runtime::registry::EntityRegistry;
-use crate::runtime::turn::Handle;
+use crate::runtime::turn::{Handle, TurnOutput};
 use once_cell::sync::Lazy;
 use preserves::ValueImpl;
 use std::io::Write;
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
+use uuid::Uuid;
 
 /// Global agent configuration shared across runtime instances.
 #[derive(Debug, Clone)]
 struct AgentSettings {
-    mode: AgentMode,
     command: Option<String>,
     args: Vec<String>,
 }
@@ -22,30 +23,13 @@ struct AgentSettings {
 impl Default for AgentSettings {
     fn default() -> Self {
         Self {
-            mode: AgentMode::Auto,
             command: None,
             args: Vec::new(),
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AgentMode {
-    Auto,
-    Stub,
-}
-
 static SETTINGS: Lazy<Mutex<AgentSettings>> = Lazy::new(|| Mutex::new(AgentSettings::default()));
-
-/// Force the Claude agent into stub mode (useful for deterministic tests).
-pub fn set_stub_mode(enabled: bool) {
-    let mut settings = SETTINGS.lock().unwrap();
-    settings.mode = if enabled {
-        AgentMode::Stub
-    } else {
-        AgentMode::Auto
-    };
-}
 
 /// Configure the external command used to invoke Claude Code.
 pub fn set_external_command(command: Option<String>, args: Vec<String>) {
@@ -82,25 +66,17 @@ impl ClaudeCodeAgent {
         }
     }
 
-    fn handle_prompt(prompt: &str) -> ActorResult<String> {
-        let (mode, command, args) = {
-            let settings = SETTINGS.lock().unwrap();
-            (
-                settings.mode,
-                settings
-                    .command
-                    .clone()
-                    .unwrap_or_else(|| "claude".to_string()),
-                settings.args.clone(),
-            )
-        };
+    fn resolve_settings() -> AgentSettings {
+        let settings = SETTINGS.lock().unwrap();
+        settings.clone()
+    }
 
-        match mode {
-            AgentMode::Stub => Ok(format!("Claude Code (stub) suggestion: {}", prompt.trim())),
-            AgentMode::Auto => Self::invoke_external(&command, &args, prompt).map_err(|err| {
-                ActorError::InvalidActivation(format!("Claude CLI invocation failed: {err}"))
-            }),
-        }
+    fn execute_prompt(settings: &AgentSettings, prompt: &str) -> Result<String, String> {
+        let command = settings
+            .command
+            .clone()
+            .unwrap_or_else(|| "claude".to_string());
+        Self::invoke_external(&command, &settings.args, prompt)
     }
 
     fn invoke_external(cmd: &str, args: &[String], prompt: &str) -> Result<String, String> {
@@ -118,6 +94,9 @@ impl ClaudeCodeAgent {
             stdin
                 .write_all(prompt.as_bytes())
                 .map_err(|err| format!("failed to write prompt to '{cmd}': {err}"))?;
+            stdin
+                .write_all(b"\n")
+                .map_err(|err| format!("failed to terminate prompt for '{cmd}': {err}"))?;
         }
 
         let output = child
@@ -133,6 +112,12 @@ impl ClaudeCodeAgent {
         let response = String::from_utf8(output.stdout)
             .map_err(|err| format!("non-UTF8 output from '{cmd}': {err}"))?;
         Ok(response.trim().to_string())
+    }
+
+    fn parse_response(value: &preserves::IOValue) -> ActorResult<(String, String, String, String)> {
+        parse_response_fields(value).ok_or_else(|| {
+            ActorError::InvalidActivation("agent response must use agent-response label and include request, prompt, response, and agent kind".into())
+        })
     }
 
     fn parse_request(value: &preserves::IOValue) -> ActorResult<(String, String)> {
@@ -174,11 +159,61 @@ impl ClaudeCodeAgent {
         Ok((request_id, prompt))
     }
 
-    fn process_request(
+    fn schedule_request(
         &self,
         activation: &mut Activation,
         request_id: String,
         prompt: String,
+    ) -> ActorResult<()> {
+        let actor = activation.actor_id.clone();
+        let facet = activation.current_facet.clone();
+        let request_uuid = Uuid::new_v4();
+        let settings = Self::resolve_settings();
+        activation.outputs.push(TurnOutput::ExternalRequest {
+            request_id: request_uuid,
+            service: "claude-code".to_string(),
+            request: preserves::IOValue::record(
+                preserves::IOValue::symbol(REQUEST_LABEL),
+                vec![
+                    preserves::IOValue::new(request_id.clone()),
+                    preserves::IOValue::new(prompt.clone()),
+                ],
+            ),
+        });
+
+        let agent_kind = self.agent_kind().to_string();
+
+        let settings_clone = settings.clone();
+
+        std::thread::spawn(move || {
+            let response = match Self::execute_prompt(&settings_clone, &prompt) {
+                Ok(value) => value,
+                Err(err) => format!("Claude Code error: {err}"),
+            };
+
+            let response_record = preserves::IOValue::record(
+                preserves::IOValue::symbol(RESPONSE_LABEL),
+                vec![
+                    preserves::IOValue::new(request_id),
+                    preserves::IOValue::new(prompt),
+                    preserves::IOValue::new(response),
+                    preserves::IOValue::symbol(agent_kind),
+                ],
+            );
+
+            let _ = enqueue_async_message(actor, facet, response_record);
+        });
+
+        Ok(())
+    }
+
+    fn record_response(
+        &self,
+        activation: &mut Activation,
+        request_id: String,
+        prompt: String,
+        response: String,
+        agent_kind: String,
     ) -> ActorResult<()> {
         let mut exchanges = self.exchanges.lock().unwrap();
         if exchanges
@@ -188,7 +223,6 @@ impl ClaudeCodeAgent {
             return Ok(());
         }
 
-        let response = Self::handle_prompt(&prompt)?;
         exchanges.push(AgentExchange {
             request_id: request_id.clone(),
             prompt: prompt.clone(),
@@ -202,7 +236,7 @@ impl ClaudeCodeAgent {
                 preserves::IOValue::new(request_id),
                 preserves::IOValue::new(prompt),
                 preserves::IOValue::new(response),
-                preserves::IOValue::symbol(self.agent_kind()),
+                preserves::IOValue::symbol(agent_kind),
             ],
         );
 
@@ -223,9 +257,21 @@ impl Entity for ClaudeCodeAgent {
         activation: &mut Activation,
         payload: &preserves::IOValue,
     ) -> ActorResult<()> {
-        match Self::parse_request(payload) {
-            Ok((request_id, prompt)) => self.process_request(activation, request_id, prompt),
-            Err(_) => Ok(()),
+        match payload
+            .label()
+            .as_symbol()
+            .map(|sym| sym.as_ref() == REQUEST_LABEL)
+        {
+            Some(true) => match Self::parse_request(payload) {
+                Ok((request_id, prompt)) => self.schedule_request(activation, request_id, prompt),
+                Err(_) => Ok(()),
+            },
+            _ => match Self::parse_response(payload) {
+                Ok((request_id, prompt, response, agent)) => {
+                    self.record_response(activation, request_id, prompt, response, agent)
+                }
+                Err(_) => Ok(()),
+            },
         }
     }
 
@@ -236,7 +282,7 @@ impl Entity for ClaudeCodeAgent {
         value: &preserves::IOValue,
     ) -> ActorResult<()> {
         if let Ok((request_id, prompt)) = Self::parse_request(value) {
-            self.process_request(activation, request_id, prompt)?;
+            self.schedule_request(activation, request_id, prompt)?;
         }
         Ok(())
     }
@@ -259,4 +305,34 @@ impl HydratableEntity for ClaudeCodeAgent {
         *guard = exchanges;
         Ok(())
     }
+}
+
+fn parse_response_fields(value: &preserves::IOValue) -> Option<(String, String, String, String)> {
+    if !value.is_record() {
+        return None;
+    }
+
+    if value
+        .label()
+        .as_symbol()
+        .map(|sym| sym.as_ref() == RESPONSE_LABEL)
+        != Some(true)
+    {
+        return None;
+    }
+
+    if value.len() < 4 {
+        return None;
+    }
+
+    let request_id = value.index(0).as_string()?.to_string();
+    let prompt = value.index(1).as_string()?.to_string();
+    let response = value.index(2).as_string()?.to_string();
+    let agent_kind = value
+        .index(3)
+        .as_symbol()
+        .map(|sym| sym.as_ref().to_string())
+        .unwrap_or_default();
+
+    Some((request_id, prompt, response, agent_kind))
 }

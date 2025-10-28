@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
+import signal
+import socket
+import subprocess
+import time
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import rich_click as click  # Must be imported before typer to patch Click
 import typer
@@ -46,9 +51,118 @@ agent_app = typer.Typer(
     add_completion=False,
     rich_markup_mode="rich",
 )
+dataspace_app = typer.Typer(
+    help="Dataspace inspection",
+    add_completion=False,
+    rich_markup_mode="rich",
+)
+daemon_app = typer.Typer(
+    help="Manage the codebased daemon",
+    add_completion=False,
+    rich_markup_mode="rich",
+)
 app.add_typer(workspace_app, name="workspace", rich_help_panel="Workspace")
 app.add_typer(agent_app, name="agent", rich_help_panel="Agents")
+app.add_typer(dataspace_app, name="dataspace", rich_help_panel="Dataspace")
+app.add_typer(daemon_app, name="daemon", rich_help_panel="Runtime")
 
+
+
+DEFAULT_ROOT = Path('.duet')
+DEFAULT_DAEMON_HOST = '127.0.0.1'
+DAEMON_STATE_FILE = 'daemon.json'
+DAEMON_LOG_FILE = 'daemon.log'
+
+
+@dataclass
+class DaemonState:
+    pid: int
+    host: str
+    port: int
+    root: Path
+
+
+
+
+def _resolve_root_path(root: Optional[Path]) -> Path:
+    path = root or DEFAULT_ROOT
+    return path.expanduser()
+
+
+def _ensure_root_dir(root: Optional[Path]) -> Path:
+    path = _resolve_root_path(root)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _daemon_state_path(root: Path) -> Path:
+    return root / DAEMON_STATE_FILE
+
+
+def _load_daemon_state(root: Path) -> Optional[DaemonState]:
+    state_path = _daemon_state_path(root)
+    if not state_path.exists():
+        return None
+    try:
+        data = json.loads(state_path.read_text())
+        state = DaemonState(
+            pid=int(data["pid"]),
+            host=data.get("host", DEFAULT_DAEMON_HOST),
+            port=int(data["port"]),
+            root=root,
+        )
+    except Exception:
+        with contextlib.suppress(OSError):
+            state_path.unlink()
+        return None
+    if not _is_process_alive(state.pid):
+        with contextlib.suppress(OSError):
+            state_path.unlink()
+        return None
+    return state
+
+
+def _save_daemon_state(state: DaemonState) -> None:
+    state_path = _daemon_state_path(state.root)
+    payload = {"pid": state.pid, "host": state.host, "port": state.port}
+    state_path.write_text(json.dumps(payload))
+
+
+def _clear_daemon_state(root: Path) -> None:
+    state_path = _daemon_state_path(root)
+    with contextlib.suppress(OSError):
+        state_path.unlink()
+
+
+def _is_process_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    else:
+        return True
+
+
+def _ping_daemon(host: str, port: int, timeout: float = 0.2) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _pick_free_port(host: str) -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind((host, 0))
+        return sock.getsockname()[1]
+
+
+def _await_daemon(host: str, port: int, retries: int = 50, delay: float = 0.1) -> None:
+    for _ in range(retries):
+        if _ping_daemon(host, port, timeout=delay):
+            return
+        time.sleep(delay)
+    raise RuntimeError("daemon did not become ready in time")
 
 @dataclass
 class CLIState:
@@ -297,17 +411,180 @@ def agent_invoke(
     ctx: typer.Context,
     prompt: str = typer.Argument(..., help="Prompt text for Claude Code."),
 ) -> None:
-    """Invoke the Claude Code agent."""
+    """Queue a prompt for the Claude Code agent."""
 
     params = {"prompt": prompt}
     _run(_run_call(ctx.obj, "agent_invoke", params, "agent:invoke"))
 
 
 @agent_app.command("responses")
-def agent_responses(ctx: typer.Context) -> None:
+def agent_responses(
+    ctx: typer.Context,
+    request_id: Optional[str] = typer.Option(None, help="Filter responses by request id."),
+) -> None:
     """List cached agent responses."""
 
-    _run(_run_call(ctx.obj, "agent_responses", {}, "agent:responses"))
+    params: Dict[str, Any] = {}
+    if request_id:
+        params["request_id"] = request_id
+    _run(_run_call(ctx.obj, "agent_responses", params, "agent:responses"))
+
+
+@dataspace_app.command("assertions")
+def dataspace_assertions(
+    ctx: typer.Context,
+    actor: Optional[str] = typer.Option(None, help="Filter by actor UUID."),
+    label: Optional[str] = typer.Option(None, help="Filter by record label/symbol."),
+    request_id: Optional[str] = typer.Option(
+        None, help="Filter record assertions whose first field matches the id."
+    ),
+    limit: Optional[int] = typer.Option(None, help="Maximum assertions to return."),
+) -> None:
+    """Inspect assertions currently in the dataspace."""
+
+    params: Dict[str, Any] = {}
+    if actor:
+        params["actor"] = actor
+    if label:
+        params["label"] = label
+    if request_id:
+        params["request_id"] = request_id
+    if limit is not None:
+        params["limit"] = limit
+
+    _run(_run_call(ctx.obj, "dataspace_assertions", params, "dataspace:assertions"))
+
+
+
+
+@daemon_app.command("start")
+def daemon_start(
+    ctx: typer.Context,
+    host: str = typer.Option(DEFAULT_DAEMON_HOST, help="Host interface for the daemon."),
+    port: Optional[int] = typer.Option(None, help="Port for the daemon (auto if omitted)."),
+) -> None:
+    root = _ensure_root_dir(ctx.obj.root)
+    existing = _load_daemon_state(root)
+    if existing and _ping_daemon(existing.host, existing.port):
+        console.print(
+            f"[green]Daemon already running on {existing.host}:{existing.port} (pid {existing.pid})[/green]"
+        )
+        return
+
+    if port is None:
+        port = _pick_free_port(host)
+
+    cmd = list(_codebased_command(ctx.obj))
+    if "--stdio" in cmd:
+        cmd.remove("--stdio")
+    cmd.extend(["--root", str(root)])
+    cmd.extend(["--listen", f"{host}:{port}"])
+
+    log_path = root / DAEMON_LOG_FILE
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(log_path, "ab") as log_file:
+        process = subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+        )
+
+    try:
+        _await_daemon(host, port)
+    except RuntimeError:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(process.pid, signal.SIGTERM)
+        console.print("[red]Failed to start daemon[/red]")
+        raise typer.Exit(1)
+
+    _save_daemon_state(DaemonState(pid=process.pid, host=host, port=port, root=root))
+    console.print(
+        f"[green]Daemon listening on {host}:{port} (pid {process.pid}). Log: {log_path}[/green]"
+    )
+
+
+@daemon_app.command("stop")
+def daemon_stop(ctx: typer.Context) -> None:
+    root = _resolve_root_path(ctx.obj.root)
+    state = _load_daemon_state(root)
+    if not state:
+        console.print("[yellow]Daemon is not running.[/yellow]")
+        return
+
+    if _is_process_alive(state.pid):
+        try:
+            os.kill(state.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        else:
+            for _ in range(50):
+                if not _is_process_alive(state.pid):
+                    break
+                time.sleep(0.1)
+            else:
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(state.pid, signal.SIGKILL)
+    _clear_daemon_state(root)
+    console.print("[green]Daemon stopped.[/green]")
+
+
+@daemon_app.command("status")
+def daemon_status(ctx: typer.Context) -> None:
+    root = _resolve_root_path(ctx.obj.root)
+    state = _load_daemon_state(root)
+    if not state:
+        console.print("[yellow]Daemon is not running.[/yellow]")
+        return
+
+    alive = _is_process_alive(state.pid)
+    reachable = _ping_daemon(state.host, state.port)
+    if not alive:
+        console.print(
+            f"[red]Daemon record stale (pid {state.pid}); cleaning up.[/red]"
+        )
+        _clear_daemon_state(root)
+        return
+
+    status = "reachable" if reachable else "not responding"
+    console.print(
+        f"[green]Daemon pid {state.pid} listening on {state.host}:{state.port} ({status}).[/green]"
+    )
+@dataspace_app.command("tail")
+def dataspace_tail(
+    ctx: typer.Context,
+    branch: str = typer.Option("main", help="Branch to inspect."),
+    since: Optional[str] = typer.Option(None, help="Start streaming after this turn id."),
+    limit: int = typer.Option(10, help="Number of turns to return per request.", min=1),
+    actor: Optional[str] = typer.Option(None, help="Filter by actor UUID."),
+    label: Optional[str] = typer.Option(None, help="Filter by record label/symbol."),
+    request_id: Optional[str] = typer.Option(None, help="Filter record assertions whose first field matches the id."),
+    event_type: List[str] = typer.Option([], "--event-type", "-e", help="Restrict to specific event types (assert, retract)."),
+    follow: bool = typer.Option(False, help="Continue polling for new events."),
+    interval: float = typer.Option(1.0, help="Polling interval (seconds) when following.", min=0.1),
+) -> None:
+    """Tail assertion events from the dataspace."""
+
+    params: Dict[str, Any] = {
+        "branch": branch,
+        "limit": limit,
+    }
+    if actor:
+        params["actor"] = actor
+    if label:
+        params["label"] = label
+    if request_id:
+        params["request_id"] = request_id
+    if event_type:
+        params["event_types"] = [et.lower() for et in event_type]
+    if since:
+        params["since"] = since
+    if follow:
+        
+        wait_ms = max(int(interval * 1000), 0)
+        params["wait_ms"] = wait_ms
+
+    _run(_run_dataspace_tail(ctx.obj, params, follow, interval))
 
 
 def json_loads(payload: str) -> Any:
@@ -357,6 +634,35 @@ async def _connect_client(state: CLIState) -> ControlClient:
     client = ControlClient(tuple(cmd))
     await client.connect()
     return client
+
+
+async def _run_dataspace_tail(state: CLIState, params: Dict[str, Any], follow: bool, interval: float) -> None:
+    base_params = params.copy()
+    cursor = base_params.pop("since", None)
+    client = await _connect_client(state)
+    try:
+        while True:
+            query = base_params.copy()
+            if cursor:
+                query["since"] = cursor
+
+            result = await client.call("dataspace_events", query)
+            _print_result(result, "dataspace:events")
+
+            if not isinstance(result, dict):
+                break
+
+            next_cursor = result.get("next_cursor") or cursor
+            has_events = bool(result.get("events"))
+
+            if not follow:
+                break
+
+            cursor = next_cursor
+            if not has_events:
+                continue
+    finally:
+        await client.close()
 
 
 def _codebased_command(state: CLIState) -> Tuple[str, ...]:
@@ -536,20 +842,26 @@ def _print_workspace_read(result: Any) -> None:
 
 
 def _print_agent_invoke(result: Any) -> None:
-    if not isinstance(result, dict) or "response" not in result:
+    if not isinstance(result, dict) or "request_id" not in result:
         console.print(JSON.from_data(result))
         return
 
-    prompt = result.get("prompt", "")
-    response = result.get("response", "")
     request_id = result.get("request_id", "")
+    prompt = result.get("prompt", "")
     agent = result.get("agent", "agent")
+    queued_turn = result.get("queued_turn", "pending")
+
+    body_lines = [
+        f"[bold]Prompt[/bold]\n{prompt}",
+        "",
+        f"[bold]Queued Turn[/bold] {queued_turn or 'pending'}",
+        "[dim]Run `duet agent responses` to inspect replies.[/dim]",
+    ]
 
     console.print(
         Panel(
-            response,
+            "\n".join(body_lines),
             title=f"[bold blue]{agent}[/bold blue] [dim]{request_id}[/dim]",
-            subtitle=f"Prompt: {prompt}",
             border_style="blue",
         )
     )
@@ -580,6 +892,103 @@ def _print_agent_responses(result: Any) -> None:
         )
 
     console.print(table)
+
+
+def _print_dataspace_assertions(result: Any) -> None:
+    if not isinstance(result, dict) or "assertions" not in result:
+        console.print(JSON.from_data(result))
+        return
+
+    assertions = result["assertions"]
+    if not assertions:
+        console.print("[yellow]No assertions matched the filters[/yellow]")
+        return
+
+    table = Table(title="Dataspace Assertions", border_style="cyan")
+    table.add_column("Actor", style="magenta", no_wrap=True)
+    table.add_column("Handle", style="cyan", no_wrap=True)
+    table.add_column("Value", style="white")
+
+    for entry in assertions:
+        actor = _format_uuidish(entry.get("actor", ""))
+        handle = _format_uuidish(entry.get("handle", ""))
+        value = _summarize_value(entry.get("value"))
+        table.add_row(actor, handle, value)
+
+    console.print(table)
+
+
+def _print_dataspace_events(result: Any) -> None:
+    if not isinstance(result, dict) or "events" not in result:
+        console.print(JSON.from_data(result))
+        return
+
+    batches = result["events"]
+    if not batches:
+        console.print("[dim]No new events[/dim]")
+    for batch in batches:
+        turn_id = batch.get("turn_id", "")
+        actor = _format_uuidish(batch.get("actor", ""))
+        clock = batch.get("clock", 0)
+        timestamp = batch.get("timestamp", "")
+
+        table = Table(
+            title=f"Turn {turn_id}",
+            caption=f"Actor {actor} | Clock {clock} | {timestamp}",
+            border_style="cyan",
+        )
+        table.add_column("Action", style="magenta")
+        table.add_column("Handle", style="cyan", no_wrap=True)
+        table.add_column("Value", style="white")
+
+        for event in batch.get("events", []):
+            action = event.get("action", "")
+            handle = _format_uuidish(event.get("handle", ""))
+            value = _summarize_value(event.get("value"))
+            table.add_row(str(action), handle, value)
+
+        console.print(table)
+
+    next_cursor = result.get("next_cursor")
+    has_more = result.get("has_more")
+    if next_cursor or has_more:
+        footer = "[dim]"
+        if next_cursor:
+            footer += f"next cursor: {next_cursor}"
+        if has_more:
+            footer += " | more events available"
+        footer += "[/dim]"
+        console.print(footer)
+
+
+def _format_uuidish(value: Any, length: int = 12) -> str:
+    if isinstance(value, str):
+        text = value
+    elif isinstance(value, dict):
+        if "0" in value:
+            text = str(value["0"])
+        elif "uuid" in value:
+            text = str(value["uuid"])
+        else:
+            text = json.dumps(value, ensure_ascii=False)
+    else:
+        text = str(value)
+
+    if len(text) > length:
+        return f"{text[:length]}..."
+    return text
+
+
+def _summarize_value(value: Any, max_length: int = 80) -> str:
+    if value is None:
+        return "null"
+    try:
+        text = json.dumps(value, ensure_ascii=False)
+    except TypeError:
+        text = str(value)
+    if len(text) > max_length:
+        return f"{text[: max_length - 3]}..."
+    return text
 
 
 def _print_operation_result(result: Any, operation: str) -> None:
@@ -641,6 +1050,10 @@ def _print_result(result: Any, command: str) -> None:
         _print_agent_invoke(result)
     elif command == "agent:responses":
         _print_agent_responses(result)
+    elif command == "dataspace:assertions":
+        _print_dataspace_assertions(result)
+    elif command == "dataspace:events":
+        _print_dataspace_events(result)
     else:
         console.print(JSON.from_data(result))
 

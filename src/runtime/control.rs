@@ -5,12 +5,13 @@
 
 use preserves::IOValue;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 use uuid::Uuid;
 
 use super::actor::Actor;
 use super::error::Result;
 use super::state::{CapId, CapabilityStatus, CapabilityTarget};
-use super::turn::{ActorId, BranchId, FacetId, TurnId, TurnRecord};
+use super::turn::{ActorId, BranchId, FacetId, TurnId, TurnOutput, TurnRecord};
 use super::{Runtime, RuntimeConfig};
 
 /// Control interface for the runtime
@@ -336,6 +337,61 @@ impl Control {
         self.runtime.assertions_for_actor(actor).unwrap_or_default()
     }
 
+    /// List assertions across the runtime, optionally filtered by actor.
+    pub fn list_assertions(&self, actor: Option<&ActorId>) -> Vec<AssertionInfo> {
+        match actor {
+            Some(actor_id) => self
+                .list_assertions_for_actor(actor_id)
+                .into_iter()
+                .map(|(handle, value)| AssertionInfo {
+                    actor: actor_id.clone(),
+                    handle,
+                    value,
+                })
+                .collect(),
+            None => {
+                let mut results = Vec::new();
+                for (actor_id, actor) in &self.runtime.actors {
+                    let assertions = actor.assertions.read();
+                    results.extend(assertions.active.iter().map(
+                        |((_owner, handle), (value, _version))| AssertionInfo {
+                            actor: actor_id.clone(),
+                            handle: handle.clone(),
+                            value: value.clone(),
+                        },
+                    ));
+                }
+                results
+            }
+        }
+    }
+
+    /// Stream assertion-related events from the journal.
+    pub fn assertion_events_since(
+        &self,
+        branch: &BranchId,
+        since: Option<&TurnId>,
+        limit: usize,
+        filter: AssertionEventFilter,
+        wait: Option<Duration>,
+    ) -> Result<AssertionEventChunk> {
+        let mut chunk = self.collect_assertion_events(branch, since, limit, &filter)?;
+
+        if chunk.events.is_empty() {
+            if let Some(timeout) = wait {
+                if self
+                    .runtime
+                    .wait_for_turn_after(branch, since, timeout)?
+                    .is_some()
+                {
+                    chunk = self.collect_assertion_events(branch, since, limit, &filter)?;
+                }
+            }
+        }
+
+        Ok(chunk)
+    }
+
     /// Invoke a capability by id with a payload; runtime enforces attenuation
     pub fn invoke_capability(
         &mut self,
@@ -343,6 +399,120 @@ impl Control {
         payload: preserves::IOValue,
     ) -> Result<preserves::IOValue> {
         self.runtime.invoke_capability(cap_id, payload)
+    }
+
+    /// Drain any queued turns (including async completions) until the scheduler is idle.
+    pub fn drain_pending(&mut self) -> Result<()> {
+        loop {
+            self.runtime.drain_async_messages();
+            match self.runtime.step()? {
+                Some(_) => continue,
+                None => break,
+            }
+        }
+        Ok(())
+    }
+
+    fn collect_assertion_events(
+        &self,
+        branch: &BranchId,
+        since: Option<&TurnId>,
+        limit: usize,
+        filter: &AssertionEventFilter,
+    ) -> Result<AssertionEventChunk> {
+        let reader = self.runtime.journal_reader(branch)?;
+        let iterator = if let Some(turn) = since {
+            let mut iter = reader.iter_from(turn)?;
+            // Skip the turn that matches `since` so callers receive strictly newer events.
+            iter.next();
+            iter
+        } else {
+            reader.iter_all()?
+        };
+
+        let mut iter = iterator.peekable();
+        let mut batches = Vec::new();
+        let mut last_turn: Option<TurnId> = None;
+
+        while batches.len() < limit {
+            let record = match iter.next() {
+                Some(Ok(record)) => record,
+                Some(Err(err)) => return Err(super::error::RuntimeError::Journal(err)),
+                None => break,
+            };
+
+            if let Some(actor_filter) = filter.actor.as_ref() {
+                if &record.actor != actor_filter {
+                    continue;
+                }
+            }
+
+            let mut events = Vec::new();
+            for output in record.outputs.iter() {
+                match output {
+                    TurnOutput::Assert { handle, value } if filter.include_asserts => {
+                        if let Some(label) = &filter.label {
+                            let matches = value
+                                .label()
+                                .as_symbol()
+                                .map(|sym| sym.as_ref() == label)
+                                .unwrap_or(false);
+                            if !matches {
+                                continue;
+                            }
+                        }
+
+                        if let Some(request_id) = &filter.request_id {
+                            let matches = value
+                                .index(0)
+                                .as_string()
+                                .map(|s| s.as_ref() == request_id)
+                                .unwrap_or(false);
+                            if !matches {
+                                continue;
+                            }
+                        }
+
+                        events.push(AssertionEvent {
+                            action: AssertionEventAction::Assert,
+                            handle: handle.clone(),
+                            value: Some(value.clone()),
+                        });
+                    }
+                    TurnOutput::Retract { handle } if filter.include_retracts => {
+                        events.push(AssertionEvent {
+                            action: AssertionEventAction::Retract,
+                            handle: handle.clone(),
+                            value: None,
+                        });
+                    }
+                    _ => {}
+                }
+            }
+
+            if events.is_empty() {
+                continue;
+            }
+
+            last_turn = Some(record.turn_id.clone());
+            batches.push(AssertionEventBatch {
+                turn_id: record.turn_id,
+                actor: record.actor,
+                clock: record.clock.0,
+                timestamp: record.timestamp,
+                events,
+            });
+        }
+
+        let has_more = iter.peek().is_some();
+        let head = self.runtime.branch_manager().head(branch).cloned();
+
+        Ok(AssertionEventChunk {
+            events: batches,
+            next_cursor: last_turn,
+            head,
+            has_more,
+        })
     }
 
     fn collect_capabilities_for_actor(_actor_id: &ActorId, actor: &Actor) -> Vec<CapabilityInfo> {
@@ -409,6 +579,103 @@ pub struct CapabilityInfo {
     pub attenuation: Vec<preserves::IOValue>,
     /// Current capability status
     pub status: CapabilityStatus,
+}
+
+/// Assertion information for dataspace inspection.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssertionInfo {
+    /// Actor publishing the assertion.
+    pub actor: ActorId,
+    /// Handle identifying the assertion.
+    pub handle: super::turn::Handle,
+    /// Assertion payload.
+    pub value: IOValue,
+}
+
+/// Filter describing which assertion events should be surfaced.
+#[derive(Debug, Clone)]
+pub struct AssertionEventFilter {
+    /// Restrict events to a particular actor.
+    pub actor: Option<ActorId>,
+    /// Restrict to assertions whose record label matches.
+    pub label: Option<String>,
+    /// Restrict to assertions whose first field matches the request id.
+    pub request_id: Option<String>,
+    /// Whether assertion events (adds) should be included.
+    pub include_asserts: bool,
+    /// Whether retraction events should be included.
+    pub include_retracts: bool,
+}
+
+impl AssertionEventFilter {
+    /// Construct a filter that includes both asserts and retracts with no additional criteria.
+    pub fn inclusive() -> Self {
+        Self {
+            actor: None,
+            label: None,
+            request_id: None,
+            include_asserts: true,
+            include_retracts: true,
+        }
+    }
+}
+
+impl Default for AssertionEventFilter {
+    fn default() -> Self {
+        Self::inclusive()
+    }
+}
+
+/// Event emitted when the dataspace changes as part of a turn.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssertionEvent {
+    /// Type of event (assert vs retract).
+    pub action: AssertionEventAction,
+    /// Assertion handle affected by the event.
+    pub handle: super::turn::Handle,
+    /// Assertion payload (present for asserts).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<IOValue>,
+}
+
+/// Action performed on an assertion.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AssertionEventAction {
+    /// Assertion was asserted.
+    Assert,
+    /// Assertion was retracted.
+    Retract,
+}
+
+/// Grouping of assertion events that occurred within a single turn.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssertionEventBatch {
+    /// Turn identifier.
+    pub turn_id: TurnId,
+    /// Actor that executed the turn.
+    pub actor: ActorId,
+    /// Logical clock value associated with the turn.
+    pub clock: u64,
+    /// Timestamp recorded for the turn.
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+    /// Events emitted during this turn.
+    pub events: Vec<AssertionEvent>,
+}
+
+/// Chunked response returned when tailing assertion events.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssertionEventChunk {
+    /// Collected event batches.
+    pub events: Vec<AssertionEventBatch>,
+    /// Cursor that can be supplied to retrieve subsequent events.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<TurnId>,
+    /// Current head of the branch while collecting events.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub head: Option<TurnId>,
+    /// Whether additional events are immediately available.
+    pub has_more: bool,
 }
 
 /// Convert a TurnRecord to a TurnSummary

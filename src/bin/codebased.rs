@@ -4,13 +4,15 @@ use duet::codebase;
 use duet::runtime::service::Service;
 use duet::runtime::{Control, RuntimeConfig};
 use std::env;
-use std::io::{self, BufWriter};
+use std::io::{self, BufReader, BufWriter};
+use std::net::TcpListener;
 use std::path::PathBuf;
 
 fn main() -> io::Result<()> {
     let mut args = env::args().skip(1);
     let mut root: Option<PathBuf> = None;
     let mut init_storage = true;
+    let mut listen_addr: Option<String> = None;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -25,6 +27,12 @@ fn main() -> io::Result<()> {
             }
             "--stdio" => {
                 // Stdio is the default transport; accept the flag for compatibility.
+            }
+            "--listen" => {
+                let addr = args
+                    .next()
+                    .unwrap_or_else(|| panic!("--listen requires an address argument"));
+                listen_addr = Some(addr);
             }
             "--help" | "-h" => {
                 print_usage();
@@ -64,13 +72,46 @@ fn main() -> io::Result<()> {
         eprintln!("Failed to ensure Claude agent: {err}");
     }
 
+    if let Some(addr) = listen_addr {
+        return run_tcp(control, &addr);
+    }
+
+    run_stdio(control)
+}
+
+fn run_stdio(control: Control) -> io::Result<()> {
     let stdin = io::stdin();
     let stdout = io::stdout();
     let reader = stdin.lock();
     let writer = BufWriter::new(stdout.lock());
 
-    let mut service = Service::new(control, writer);
-    service.run(reader)
+    let mut service = Service::new(control);
+    service.handle(reader, writer)
+}
+
+fn run_tcp(control: Control, addr: &str) -> io::Result<()> {
+    let listener = TcpListener::bind(addr)?;
+    let actual = listener.local_addr()?;
+    eprintln!("codebased listening on {}", actual);
+
+    let mut service = Service::new(control);
+    for incoming in listener.incoming() {
+        match incoming {
+            Ok(stream) => {
+                let peer = stream.peer_addr().ok();
+                let reader = BufReader::new(stream.try_clone()?);
+                let writer = BufWriter::new(stream);
+                if let Err(err) = service.handle(reader, writer) {
+                    eprintln!("connection error from {:?}: {}", peer, err);
+                }
+            }
+            Err(err) => {
+                eprintln!("failed to accept connection: {err}");
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn print_usage() {

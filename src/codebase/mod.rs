@@ -19,7 +19,7 @@ use crate::runtime::control::Control;
 use crate::runtime::error::{ActorError, ActorResult, Result as RuntimeResult, RuntimeError};
 use crate::runtime::pattern::Pattern;
 use crate::runtime::registry::EntityRegistry;
-use crate::runtime::turn::{ActorId, FacetId, Handle};
+use crate::runtime::turn::{ActorId, FacetId, Handle, TurnId};
 
 pub mod agent;
 pub mod workspace;
@@ -140,6 +140,19 @@ pub struct AgentResponse {
     pub response: String,
     /// Agent kind identifier.
     pub agent: String,
+}
+
+/// Metadata returned when an agent invocation is enqueued.
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentInvocation {
+    /// Prompt supplied with the request.
+    pub prompt: String,
+    /// Agent kind identifier.
+    pub agent: String,
+    /// Request identifier generated for correlation.
+    pub request_id: String,
+    /// Turn that executed the request (if immediately processed).
+    pub queued_turn: Option<TurnId>,
 }
 
 /// Ensure a workspace entity exists for the given root directory.
@@ -267,12 +280,12 @@ pub fn ensure_claude_agent(control: &mut Control) -> RuntimeResult<AgentHandle> 
     })
 }
 
-/// Invoke the Claude Code agent with the given prompt.
+/// Enqueue a prompt for the Claude Code agent to process.
 pub fn invoke_claude_agent(
     control: &mut Control,
     handle: &AgentHandle,
     prompt: &str,
-) -> RuntimeResult<AgentResponse> {
+) -> RuntimeResult<AgentInvocation> {
     let request_id = uuid::Uuid::new_v4().to_string();
     let message = preserves::IOValue::record(
         preserves::IOValue::symbol(agent::claude::REQUEST_LABEL),
@@ -282,13 +295,14 @@ pub fn invoke_claude_agent(
         ],
     );
 
-    control.send_message(handle.actor.clone(), handle.facet.clone(), message)?;
+    let turn_id = control.send_message(handle.actor.clone(), handle.facet.clone(), message)?;
 
-    let responses = list_agent_responses(control, handle);
-    responses
-        .into_iter()
-        .find(|resp| resp.request_id == request_id)
-        .ok_or_else(|| RuntimeError::Actor(ActorError::NotFound(request_id)))
+    Ok(AgentInvocation {
+        prompt: prompt.to_string(),
+        agent: handle.kind.clone(),
+        request_id,
+        queued_turn: Some(turn_id),
+    })
 }
 
 /// List all agent responses currently asserted for a given handle.
