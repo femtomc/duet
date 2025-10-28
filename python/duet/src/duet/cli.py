@@ -43,7 +43,8 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help=argparse.SUPPRESS,
     )
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers = parser.add_subparsers(dest="command")
+    parser.set_defaults(command="status", branch=None)
 
     status_parser = subparsers.add_parser("status", help="Show runtime status.")
     status_parser.add_argument("--branch", default=None)
@@ -269,10 +270,13 @@ async def run(args: argparse.Namespace) -> None:
         else:  # pragma: no cover - argparse enforces choices
             raise ProtocolError(f"Unsupported command: {args.command}")
 
+        workspace_command = getattr(args, "workspace_command", None)
+        agent_command = getattr(args, "agent_command", None)
+
         command_key = (
-            f"workspace:{args.workspace_command}"
+            f"workspace:{workspace_command}"
             if args.command == "workspace"
-            else f"agent:{args.agent_command}"
+            else f"agent:{agent_command}"
             if args.command == "agent"
             else args.command
         )
@@ -357,38 +361,23 @@ def _print_status(result: Any) -> None:
         console.print(JSON.from_data(result))
         return
 
-    # Main status panel
-    status_tree = Tree("[bold cyan]Runtime Status[/bold cyan]")
+    branch = result.get("active_branch", "main")
+    head_turn = result.get("head_turn", "turn_0")
+    pending_inputs = result.get("pending_inputs", 0)
+    snapshot_interval = result.get("snapshot_interval", 0)
 
-    # Branch information
-    if "branch" in result:
-        branch_info = result["branch"]
-        branch_node = status_tree.add(f"[bold]Branch:[/bold] {branch_info.get('name', 'N/A')}")
-        if "head" in branch_info:
-            branch_node.add(f"[dim]Head Turn:[/dim] {branch_info['head']}")
-        if "turn_count" in branch_info:
-            branch_node.add(f"[dim]Turn Count:[/dim] {branch_info['turn_count']}")
+    tree = Tree(f"[bold cyan]Branch[/bold cyan] [white]{branch}[/white]")
+    tree.add(f"[dim]Head Turn:[/dim] {head_turn}")
+    tree.add(f"[dim]Pending Inputs:[/dim] {pending_inputs}")
+    tree.add(f"[dim]Snapshot Interval:[/dim] {snapshot_interval}")
 
-    # Actor information
-    if "actors" in result:
-        actors = result["actors"]
-        actors_node = status_tree.add(f"[bold]Actors:[/bold] {len(actors)} active")
-        for actor in actors[:5]:  # Show first 5
-            actor_id = actor.get("id", "unknown")[:8]
-            actors_node.add(f"[dim]{actor_id}...[/dim]")
-        if len(actors) > 5:
-            actors_node.add(f"[dim]... and {len(actors) - 5} more[/dim]")
-
-    # Show full JSON for any unhandled fields
-    handled_keys = {"branch", "actors"}
-    remaining = {k: v for k, v in result.items() if k not in handled_keys}
-
-    if remaining:
-        status_tree.add("[bold]Additional Data:[/bold]")
-        for key, value in remaining.items():
-            status_tree.add(f"[dim]{key}:[/dim] {value}")
-
-    console.print(Panel(status_tree, border_style="cyan"))
+    console.print(
+        Panel.fit(
+            tree,
+            title="[bold]Runtime Status[/bold]",
+            border_style="cyan",
+        )
+    )
 
 
 def _print_history(result: Any) -> None:
@@ -404,16 +393,20 @@ def _print_history(result: Any) -> None:
 
     table = Table(title="Turn History", border_style="blue")
     table.add_column("Turn ID", style="cyan", no_wrap=True)
-    table.add_column("Index", style="magenta", justify="right")
-    table.add_column("Timestamp", style="green")
-    table.add_column("Type", style="yellow")
+    table.add_column("Actor", style="magenta", no_wrap=True)
+    table.add_column("Clock", style="yellow", justify="right")
+    table.add_column("Inputs", style="green", justify="right")
+    table.add_column("Outputs", style="green", justify="right")
+    table.add_column("Timestamp", style="dim")
 
     for turn in turns:
-        turn_id = str(turn.get("id", ""))[:12] + "..."
-        index = str(turn.get("index", "N/A"))
+        turn_id = str(turn.get("turn_id", ""))[:16] + "..."
+        actor = str(turn.get("actor", ""))[:12] + "..."
+        clock = str(turn.get("clock", "0"))
+        inputs = str(turn.get("input_count", 0))
+        outputs = str(turn.get("output_count", 0))
         timestamp = turn.get("timestamp", "N/A")
-        turn_type = turn.get("type", "N/A")
-        table.add_row(turn_id, index, timestamp, turn_type)
+        table.add_row(turn_id, actor, clock, inputs, outputs, timestamp)
 
     console.print(table)
 
@@ -434,13 +427,15 @@ def _print_entities(result: Any) -> None:
     table.add_column("Type", style="yellow")
     table.add_column("Actor", style="magenta", no_wrap=True)
     table.add_column("Facet", style="blue", no_wrap=True)
+    table.add_column("Patterns", style="dim", justify="right")
 
     for entity in entities:
         entity_id = str(entity.get("id", ""))[:12] + "..."
-        entity_type = entity.get("type", "N/A")
-        actor = str(entity.get("actor", ""))[:8] + "..."
-        facet = str(entity.get("facet", ""))[:8] + "..."
-        table.add_row(entity_id, entity_type, actor, facet)
+        entity_type = entity.get("entity_type", "N/A")
+        actor = str(entity.get("actor", ""))[:12] + "..."
+        facet = str(entity.get("facet", ""))[:12] + "..."
+        patterns = str(entity.get("pattern_count", 0))
+        table.add_row(entity_id, entity_type, actor, facet, patterns)
 
     console.print(table)
 
@@ -456,18 +451,22 @@ def _print_capabilities(result: Any) -> None:
         console.print("[yellow]No capabilities available[/yellow]")
         return
 
-    table = Table(title="Available Capabilities", border_style="magenta")
-    table.add_column("Capability ID", style="cyan", no_wrap=True)
-    table.add_column("Name", style="yellow")
-    table.add_column("Provider", style="green", no_wrap=True)
+    table = Table(title="Capabilities", border_style="magenta")
+    table.add_column("ID", style="cyan", no_wrap=True)
+    table.add_column("Kind", style="yellow")
+    table.add_column("Holder", style="green", no_wrap=True)
     table.add_column("Status", style="blue")
+    table.add_column("Attenuation", style="dim")
 
     for cap in capabilities:
         cap_id = str(cap.get("id", ""))[:12] + "..."
-        name = cap.get("name", "N/A")
-        provider = str(cap.get("provider", ""))[:12] + "..."
-        status = cap.get("status", "active")
-        table.add_row(cap_id, name, provider, status)
+        kind = cap.get("kind", "N/A")
+        holder = str(cap.get("holder", ""))[:12] + "..."
+        status = cap.get("status", "unknown")
+        attenuation = ", ".join(
+            str(value) for value in cap.get("attenuation", [])
+        )
+        table.add_row(cap_id, kind, holder, status, attenuation)
 
     console.print(table)
 
@@ -568,15 +567,34 @@ def _print_agent_responses(result: Any) -> None:
 def _print_operation_result(result: Any, operation: str) -> None:
     """Format operation results with success panels."""
     if isinstance(result, dict):
-        if result.get("success") or "id" in result:
-            title = "[bold green]Success[/bold green]"
+        status = result.get("status", "ok")
+        if "queued_turn" in result:
+            title = "[bold green]Message Queued[/bold green]"
+            subtitle = f"Turn {result['queued_turn']}"
+        elif "entity_id" in result:
+            title = "[bold green]Entity Registered[/bold green]"
+            subtitle = f"ID {result['entity_id']}"
         else:
-            title = "[bold yellow]Result[/bold yellow]"
+            title = "[bold green]Success[/bold green]" if status == "ok" else "[bold yellow]Result[/bold yellow]"
+            subtitle = ""
 
         content = JSON.from_data(result)
-        console.print(Panel(content, title=title, border_style="green"))
+        console.print(
+            Panel(
+                content,
+                title=title,
+                subtitle=subtitle,
+                border_style="green",
+            )
+        )
     else:
-        console.print(Panel(str(result), title="Result", border_style="green"))
+        console.print(
+            Panel(
+                str(result),
+                title="[bold green]Result[/bold green]",
+                border_style="green",
+            )
+        )
 
 
 def _print_navigation_result(result: Any, operation: str) -> None:
