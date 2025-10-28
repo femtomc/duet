@@ -1061,8 +1061,12 @@ impl CapabilityInvoker {
         );
 
         loop {
-            match runtime.execute_turn()? {
-                Some(record) => {
+            match runtime.execute_turn() {
+                Err(RuntimeError::Actor(err)) => {
+                    return Err(CapabilityError::Denied(cap_id, err.to_string()).into());
+                }
+                Err(other) => return Err(other),
+                Ok(Some(record)) => {
                     if let Some(result) = record.outputs.iter().find_map(|output| {
                         if let TurnOutput::CapabilityResult { capability, result } = output {
                             if *capability == cap_id {
@@ -1074,7 +1078,7 @@ impl CapabilityInvoker {
                         return Ok(result);
                     }
                 }
-                None => {
+                Ok(None) => {
                     return Err(CapabilityError::Denied(
                         cap_id,
                         "capability invocation did not produce a result".into(),
