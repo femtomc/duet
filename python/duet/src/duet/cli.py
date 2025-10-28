@@ -106,9 +106,35 @@ def build_parser() -> argparse.ArgumentParser:
         help="Preserves payload (e.g. '(workspace-read \"path\")').",
     )
 
+    workspace = subparsers.add_parser("workspace", help="Workspace operations")
+    workspace_sub = workspace.add_subparsers(dest="workspace_command", required=True)
+
+    workspace_sub.add_parser("scan", help="Force a workspace rescan.")
+    workspace_sub.add_parser("entries", help="List workspace dataspace entries.")
+
+    read_parser = workspace_sub.add_parser("read", help="Read a file from the workspace.")
+    read_parser.add_argument("path", help="Workspace-relative path to read.")
+
+    write_parser = workspace_sub.add_parser("write", help="Write content to a workspace file.")
+    write_parser.add_argument("path", help="Workspace-relative path to write.")
+    write_parser.add_argument(
+        "--content",
+        "-c",
+        required=True,
+        help="Content to write to the file.",
+    )
+
     raw = subparsers.add_parser("raw", help="Send a raw command/params JSON payload.")
     raw.add_argument("rpc_command")
     raw.add_argument("params", nargs="?", default="{}")
+
+    agent = subparsers.add_parser("agent", help="Agent operations")
+    agent_sub = agent.add_subparsers(dest="agent_command", required=True)
+
+    agent_invoke = agent_sub.add_parser("invoke", help="Invoke the Claude Code agent.")
+    agent_invoke.add_argument("prompt", help="Prompt text to send to the agent.")
+
+    agent_sub.add_parser("responses", help="List cached agent responses.")
 
     return parser
 
@@ -211,6 +237,27 @@ async def run(args: argparse.Namespace) -> None:
             )
         elif args.command == "invoke-capability":
             result = await client.invoke_capability(args.capability, args.payload)
+        elif args.command == "workspace":
+            if args.workspace_command == "scan":
+                result = await client.call("workspace_rescan", {})
+            elif args.workspace_command == "entries":
+                result = await client.call("workspace_entries", {})
+            elif args.workspace_command == "read":
+                result = await client.call("workspace_read", {"path": args.path})
+            elif args.workspace_command == "write":
+                result = await client.call(
+                    "workspace_write",
+                    {"path": args.path, "content": args.content},
+                )
+            else:  # pragma: no cover
+                raise ProtocolError(f"Unsupported workspace command: {args.workspace_command}")
+        elif args.command == "agent":
+            if args.agent_command == "invoke":
+                result = await client.call("agent_invoke", {"prompt": args.prompt})
+            elif args.agent_command == "responses":
+                result = await client.call("agent_responses", {})
+            else:  # pragma: no cover
+                raise ProtocolError(f"Unsupported agent command: {args.agent_command}")
         elif args.command == "raw":
             try:
                 params = json_loads(args.params)
@@ -222,7 +269,14 @@ async def run(args: argparse.Namespace) -> None:
         else:  # pragma: no cover - argparse enforces choices
             raise ProtocolError(f"Unsupported command: {args.command}")
 
-        _print_result(result, args.command)
+        command_key = (
+            f"workspace:{args.workspace_command}"
+            if args.command == "workspace"
+            else f"agent:{args.agent_command}"
+            if args.command == "agent"
+            else args.command
+        )
+        _print_result(result, command_key)
     finally:
         await client.close()
 
@@ -281,6 +335,16 @@ def _print_result(result: Any, command: str | None = None) -> None:
         _print_operation_result(result, command)
     elif command in ("goto", "back", "fork", "merge"):
         _print_navigation_result(result, command)
+    elif command == "workspace:entries":
+        _print_workspace_entries(result)
+    elif command == "workspace:read":
+        _print_workspace_read(result)
+    elif command in ("workspace:scan", "workspace:write"):
+        _print_operation_result(result, command)
+    elif command == "agent:invoke":
+        _print_agent_invoke(result)
+    elif command == "agent:responses":
+        _print_agent_responses(result)
     elif isinstance(result, (dict, list)):
         console.print(JSON.from_data(result))
     else:
@@ -404,6 +468,99 @@ def _print_capabilities(result: Any) -> None:
         provider = str(cap.get("provider", ""))[:12] + "..."
         status = cap.get("status", "active")
         table.add_row(cap_id, name, provider, status)
+
+    console.print(table)
+
+
+def _print_workspace_entries(result: Any) -> None:
+    """Render workspace entries from the dataspace."""
+    if not isinstance(result, dict) or "entries" not in result:
+        console.print(JSON.from_data(result))
+        return
+
+    entries = result["entries"]
+    if not entries:
+        console.print("[yellow]Workspace is empty[/yellow]")
+        return
+
+    table = Table(title="Workspace Entries", border_style="green")
+    table.add_column("Path", style="cyan")
+    table.add_column("Kind", style="magenta")
+    table.add_column("Size", justify="right", style="yellow")
+    table.add_column("Modified", style="green")
+    table.add_column("Digest", style="dim")
+
+    for entry in entries:
+        path = entry.get("path", "")
+        kind = entry.get("kind", "")
+        size = str(entry.get("size", 0))
+        modified = entry.get("modified") or "--"
+        digest = entry.get("digest") or "--"
+        table.add_row(path, kind, size, modified, digest)
+
+    console.print(table)
+
+
+def _print_workspace_read(result: Any) -> None:
+    """Display workspace read output."""
+    if not isinstance(result, dict) or "content" not in result:
+        console.print(JSON.from_data(result))
+        return
+
+    content = result.get("content", "")
+    path = result.get("path", "")
+    panel = Panel(
+        content,
+        title=f"[bold green]Workspace Read[/bold green] [dim]{path}[/dim]",
+        border_style="green",
+    )
+    console.print(panel)
+
+
+def _print_agent_invoke(result: Any) -> None:
+    """Show the response from an agent invocation."""
+    if not isinstance(result, dict) or "response" not in result:
+        console.print(JSON.from_data(result))
+        return
+
+    prompt = result.get("prompt", "")
+    response = result.get("response", "")
+    request_id = result.get("request_id", "")
+    agent = result.get("agent", "agent")
+
+    panel = Panel(
+        response,
+        title=f"[bold blue]{agent}[/bold blue] [dim]{request_id}[/dim]",
+        subtitle=f"Prompt: {prompt}",
+        border_style="blue",
+    )
+    console.print(panel)
+
+
+def _print_agent_responses(result: Any) -> None:
+    """Render cached agent responses."""
+    if not isinstance(result, dict) or "responses" not in result:
+        console.print(JSON.from_data(result))
+        return
+
+    responses = result["responses"]
+    if not responses:
+        console.print("[yellow]No agent responses[/yellow]")
+        return
+
+    table = Table(title="Agent Responses", border_style="blue")
+    table.add_column("Request ID", style="cyan", no_wrap=True)
+    table.add_column("Agent", style="magenta")
+    table.add_column("Prompt", style="white")
+    table.add_column("Response", style="green")
+
+    for entry in responses:
+        table.add_row(
+            str(entry.get("request_id", ""))[:12] + "...",
+            entry.get("agent", ""),
+            entry.get("prompt", ""),
+            entry.get("response", ""),
+        )
 
     console.print(table)
 

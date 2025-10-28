@@ -8,18 +8,27 @@
 //!     tests/examples until richer catalogues arrive.
 
 use std::convert::TryFrom;
+use std::path::Path;
 use std::sync::{Mutex, Once};
 
 use preserves::ValueImpl;
+use serde::Serialize;
 
 use crate::runtime::actor::{Activation, Entity, HydratableEntity};
-use crate::runtime::error::{ActorError, ActorResult};
+use crate::runtime::control::Control;
+use crate::runtime::error::{ActorError, ActorResult, Result as RuntimeResult, RuntimeError};
 use crate::runtime::registry::EntityRegistry;
-use crate::runtime::turn::Handle;
+use crate::runtime::turn::{ActorId, FacetId, Handle};
 
 pub mod workspace;
+pub mod agent;
 
 static INIT: Once = Once::new();
+
+const WORKSPACE_READ_KIND: &str = "workspace/read";
+const WORKSPACE_WRITE_KIND: &str = "workspace/write";
+const WORKSPACE_READ_MSG: &str = "workspace-read";
+const WORKSPACE_WRITE_MSG: &str = "workspace-write";
 
 /// Register all built-in entities provided by this crate.
 ///
@@ -29,6 +38,7 @@ pub fn register_codebase_entities() {
         let registry = EntityRegistry::global();
 
         workspace::register(registry);
+        agent::claude::register(registry);
 
         registry.register("echo", |config| {
             let topic = config
@@ -77,6 +87,385 @@ impl CounterEntity {
             value: Mutex::new(initial),
         }
     }
+}
+
+/// Handle to the workspace entity registered in this runtime.
+#[derive(Debug, Clone)]
+pub struct WorkspaceHandle {
+    /// Unique identifier of the workspace entity instance.
+    pub entity_id: uuid::Uuid,
+    /// Actor hosting the workspace entity.
+    pub actor: ActorId,
+    /// Facet the workspace entity is attached to.
+    pub facet: FacetId,
+}
+
+/// Materialised view of a workspace entry published in the dataspace.
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkspaceEntry {
+    /// Normalised workspace-relative path.
+    pub path: String,
+    /// Entry kind (`file`, `dir`, `symlink`, ...).
+    pub kind: String,
+    /// Logical size of the entry (bytes for files, 0 otherwise).
+    pub size: i64,
+    /// Optional last-modified timestamp (RFC3339 string).
+    pub modified: Option<String>,
+    /// Optional digest associated with the entry.
+    pub digest: Option<String>,
+}
+
+/// Handle to a registered agent entity.
+#[derive(Debug, Clone)]
+pub struct AgentHandle {
+    /// Unique identifier of the agent entity instance.
+    pub entity_id: uuid::Uuid,
+    /// Actor hosting the agent entity.
+    pub actor: ActorId,
+    /// Facet the agent entity is attached to.
+    pub facet: FacetId,
+    /// Agent kind identifier (e.g., "claude-code").
+    pub kind: String,
+}
+
+/// Structured representation of an agent response.
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentResponse {
+    /// Request identifier that triggered the response.
+    pub request_id: String,
+    /// Prompt supplied with the request.
+    pub prompt: String,
+    /// Response payload emitted by the agent.
+    pub response: String,
+    /// Agent kind identifier.
+    pub agent: String,
+}
+
+/// Ensure a workspace entity exists for the given root directory.
+pub fn ensure_workspace_entity(control: &mut Control, root: &Path) -> RuntimeResult<WorkspaceHandle> {
+    if let Some(handle) = workspace_handle(control) {
+        return Ok(handle);
+    }
+
+    let actor = ActorId::new();
+    let facet = FacetId::new();
+    let config = preserves::IOValue::new(root.to_string_lossy().to_string());
+
+    let entity_id = control.register_entity(
+        actor.clone(),
+        facet.clone(),
+        "workspace".to_string(),
+        config,
+    )?;
+
+    // Kick off initial scan so the dataspace is populated.
+    control.send_message(
+        actor.clone(),
+        facet.clone(),
+        preserves::IOValue::symbol("workspace-rescan"),
+    )?;
+
+    Ok(WorkspaceHandle {
+        entity_id,
+        actor,
+        facet,
+    })
+}
+
+/// Return the handle for the first registered workspace entity, if any.
+pub fn workspace_handle(control: &Control) -> Option<WorkspaceHandle> {
+    control.list_entities().into_iter().find_map(|entity| {
+        if entity.entity_type == "workspace" {
+            Some(WorkspaceHandle {
+                entity_id: entity.id,
+                actor: entity.actor,
+                facet: entity.facet,
+            })
+        } else {
+            None
+        }
+    })
+}
+
+/// Trigger a rescan of the workspace dataspace.
+pub fn workspace_rescan(control: &mut Control, handle: &WorkspaceHandle) -> RuntimeResult<()> {
+    control.send_message(
+        handle.actor.clone(),
+        handle.facet.clone(),
+        preserves::IOValue::symbol("workspace-rescan"),
+    )?;
+    Ok(())
+}
+
+/// List workspace entries currently asserted in the dataspace.
+pub fn list_workspace_entries(control: &Control, handle: &WorkspaceHandle) -> Vec<WorkspaceEntry> {
+    control
+        .list_assertions_for_actor(&handle.actor)
+        .into_iter()
+        .filter_map(|(_handle, value)| parse_workspace_entry(&value))
+        .collect()
+}
+
+/// Read a workspace file via capability invocation.
+pub fn read_file(
+    control: &mut Control,
+    handle: &WorkspaceHandle,
+    rel_path: &str,
+) -> RuntimeResult<String> {
+    let cap = request_read_capability(control, handle, rel_path)?;
+    let payload = preserves::IOValue::record(
+        preserves::IOValue::symbol("workspace-read"),
+        vec![preserves::IOValue::new(rel_path.to_string())],
+    );
+    let response = control.invoke_capability(cap, payload)?;
+    response
+        .as_string()
+        .map(|s| s.to_string())
+        .ok_or_else(|| RuntimeError::Actor(ActorError::InvalidActivation(
+            "workspace read returned non-string".into(),
+        )))
+}
+
+/// Ensure a Claude Code agent entity exists for this runtime.
+pub fn ensure_claude_agent(control: &mut Control) -> RuntimeResult<AgentHandle> {
+    if let Some(handle) = agent_handle(control, agent::claude::CLAUDE_KIND) {
+        return Ok(handle);
+    }
+
+    let actor = ActorId::new();
+    let facet = FacetId::new();
+    let entity_id = control.register_entity(
+        actor.clone(),
+        facet.clone(),
+        agent::claude::ENTITY_TYPE.to_string(),
+        preserves::IOValue::symbol("default"),
+    )?;
+
+    Ok(AgentHandle {
+        entity_id,
+        actor,
+        facet,
+        kind: agent::claude::CLAUDE_KIND.to_string(),
+    })
+}
+
+/// Invoke the Claude Code agent with the given prompt.
+pub fn invoke_claude_agent(
+    control: &mut Control,
+    handle: &AgentHandle,
+    prompt: &str,
+) -> RuntimeResult<AgentResponse> {
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let message = preserves::IOValue::record(
+        preserves::IOValue::symbol(agent::claude::REQUEST_LABEL),
+        vec![
+            preserves::IOValue::new(request_id.clone()),
+            preserves::IOValue::new(prompt.to_string()),
+        ],
+    );
+
+    control.send_message(handle.actor.clone(), handle.facet.clone(), message)?;
+
+    let responses = list_agent_responses(control, handle);
+    responses
+        .into_iter()
+        .find(|resp| resp.request_id == request_id)
+        .ok_or_else(|| RuntimeError::Actor(ActorError::NotFound(request_id)))
+}
+
+/// List all agent responses currently asserted for a given handle.
+pub fn list_agent_responses(control: &Control, handle: &AgentHandle) -> Vec<AgentResponse> {
+    control
+        .list_assertions_for_actor(&handle.actor)
+        .into_iter()
+        .filter_map(|(_handle, value)| parse_agent_response(&value))
+        .filter(|resp| resp.agent == handle.kind)
+        .collect()
+}
+
+/// Write content to a workspace file via capability invocation.
+pub fn write_file(
+    control: &mut Control,
+    handle: &WorkspaceHandle,
+    rel_path: &str,
+    content: &str,
+) -> RuntimeResult<()> {
+    let cap = request_write_capability(control, handle, rel_path)?;
+    let payload = preserves::IOValue::record(
+        preserves::IOValue::symbol("workspace-write"),
+        vec![
+            preserves::IOValue::new(rel_path.to_string()),
+            preserves::IOValue::new(content.to_string()),
+        ],
+    );
+    let response = control.invoke_capability(cap, payload)?;
+    if response
+        .as_symbol()
+        .map(|sym| sym.as_ref() == "ok")
+        .unwrap_or(false)
+    {
+        Ok(())
+    } else {
+        Err(RuntimeError::Actor(ActorError::InvalidActivation(
+            "workspace write did not return ok".into(),
+        )))
+    }
+}
+
+fn parse_workspace_entry(value: &preserves::IOValue) -> Option<WorkspaceEntry> {
+    if !value.is_record() {
+        return None;
+    }
+
+    let label = value.label();
+    if label
+        .as_symbol()
+        .map(|sym| sym.as_ref() == "workspace-entry")
+        != Some(true)
+    {
+        return None;
+    }
+
+    if value.len() < 3 {
+        return None;
+    }
+
+    let path = value.index(0).as_string()?.to_string();
+    let kind = value.index(1).as_symbol()?.as_ref().to_string();
+    let size = value
+        .index(2)
+        .as_signed_integer()
+        .and_then(|s| i64::try_from(s.as_ref()).ok())
+        .unwrap_or(0);
+
+    let modified_value = value.index(3);
+    let modified = if modified_value.as_symbol().is_some() {
+        None
+    } else {
+        modified_value.as_string().map(|s| s.to_string())
+    };
+
+    let digest = if value.len() > 4 {
+        value.index(4).as_string().map(|s| s.to_string())
+    } else {
+        None
+    };
+
+    Some(WorkspaceEntry {
+        path,
+        kind,
+        size,
+        modified,
+        digest,
+    })
+}
+
+fn agent_handle(control: &Control, kind: &str) -> Option<AgentHandle> {
+    control.list_entities().into_iter().find_map(|entity| {
+        if entity.entity_type == agent::claude::ENTITY_TYPE {
+            Some(AgentHandle {
+                entity_id: entity.id,
+                actor: entity.actor,
+                facet: entity.facet,
+                kind: kind.to_string(),
+            })
+        } else {
+            None
+        }
+    })
+}
+
+fn parse_agent_response(value: &preserves::IOValue) -> Option<AgentResponse> {
+    if !value.is_record() {
+        return None;
+    }
+
+    if value
+        .label()
+        .as_symbol()
+        .map(|sym| sym.as_ref() == agent::claude::RESPONSE_LABEL)
+        != Some(true)
+    {
+        return None;
+    }
+
+    if value.len() < 4 {
+        return None;
+    }
+
+    let request_id = value.index(0).as_string()?.to_string();
+    let prompt = value.index(1).as_string()?.to_string();
+    let response = value.index(2).as_string()?.to_string();
+    let agent_kind = value
+        .index(3)
+        .as_symbol()
+        .map(|sym| sym.as_ref().to_string())
+        .unwrap_or_default();
+
+    Some(AgentResponse {
+        request_id,
+        prompt,
+        response,
+        agent: agent_kind,
+    })
+}
+
+fn request_read_capability(
+    control: &mut Control,
+    handle: &WorkspaceHandle,
+    rel_path: &str,
+) -> RuntimeResult<uuid::Uuid> {
+    request_capability(control, handle, rel_path, WORKSPACE_READ_KIND, WORKSPACE_READ_MSG)
+}
+
+fn request_write_capability(
+    control: &mut Control,
+    handle: &WorkspaceHandle,
+    rel_path: &str,
+) -> RuntimeResult<uuid::Uuid> {
+    request_capability(control, handle, rel_path, WORKSPACE_WRITE_KIND, WORKSPACE_WRITE_MSG)
+}
+
+fn request_capability(
+    control: &mut Control,
+    handle: &WorkspaceHandle,
+    rel_path: &str,
+    kind: &str,
+    label: &str,
+) -> RuntimeResult<uuid::Uuid> {
+    let request = preserves::IOValue::record(
+        preserves::IOValue::symbol(label.to_string()),
+        vec![preserves::IOValue::new(rel_path.to_string())],
+    );
+    control.send_message(handle.actor.clone(), handle.facet.clone(), request)?;
+
+    find_capability(control, &handle.actor, kind, rel_path).ok_or_else(|| {
+        RuntimeError::Actor(ActorError::InvalidActivation(format!(
+            "workspace capability {kind} for {rel_path} not granted",
+        )))
+    })
+}
+
+fn find_capability(
+    control: &Control,
+    actor: &ActorId,
+    kind: &str,
+    rel_path: &str,
+) -> Option<uuid::Uuid> {
+    control
+        .list_capabilities_for_actor(actor)
+        .into_iter()
+        .filter(|cap| cap.kind == kind)
+        .find(|cap| attenuation_matches(&cap.attenuation, rel_path))
+        .map(|cap| cap.id)
+}
+
+fn attenuation_matches(attenuation: &[preserves::IOValue], rel_path: &str) -> bool {
+    attenuation
+        .first()
+        .and_then(|value| value.as_string())
+        .map(|s| s.as_ref() == rel_path)
+        .unwrap_or(false)
 }
 
 impl Entity for CounterEntity {

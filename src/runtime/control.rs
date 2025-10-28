@@ -3,6 +3,7 @@
 //! Provides high-level API for controlling the runtime: sending messages,
 //! stepping, rewinding, forking, merging, and inspecting state.
 
+use preserves::IOValue;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -325,6 +326,16 @@ impl Control {
         } else {
             Vec::new()
         }
+    }
+
+    /// List current assertions made by a specific actor.
+    pub fn list_assertions_for_actor(
+        &self,
+        actor: &ActorId,
+    ) -> Vec<(super::turn::Handle, IOValue)> {
+        self.runtime
+            .assertions_for_actor(actor)
+            .unwrap_or_default()
     }
 
     /// Invoke a capability by id with a payload; runtime enforces attenuation

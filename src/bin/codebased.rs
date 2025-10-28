@@ -1,5 +1,6 @@
 //! `codebased` – Codebase daemon built on the Duet runtime.
 
+use duet::codebase;
 use duet::runtime::service::Service;
 use duet::runtime::{Control, RuntimeConfig};
 use std::env;
@@ -45,13 +46,23 @@ fn main() -> io::Result<()> {
         config.root = root_path;
     }
 
-    let control = if init_storage {
+    let workspace_root = config.root.clone();
+
+    let mut control = if init_storage {
         Control::init(config.clone())
             .and_then(|_| Control::new(config))
             .map_err(to_io_error)?
     } else {
         Control::new(config).map_err(to_io_error)?
     };
+
+    if let Err(err) = codebase::ensure_workspace_entity(&mut control, &workspace_root) {
+        eprintln!("Failed to ensure workspace entity: {err}");
+    }
+
+    if let Err(err) = codebase::ensure_claude_agent(&mut control) {
+        eprintln!("Failed to ensure Claude agent: {err}");
+    }
 
     let stdin = io::stdin();
     let stdout = io::stdout();

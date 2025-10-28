@@ -1012,6 +1012,21 @@ impl Runtime {
         })
     }
 
+    /// Snapshot active assertions for an actor.
+    pub fn assertions_for_actor(
+        &self,
+        actor: &turn::ActorId,
+    ) -> Option<Vec<(turn::Handle, preserves::IOValue)>> {
+        self.actors.get(actor).map(|actor_obj| {
+            let assertions = actor_obj.assertions.read();
+            assertions
+                .active
+                .iter()
+                .map(|((_actor_id, handle), (value, _version))| (handle.clone(), value.clone()))
+                .collect()
+        })
+    }
+
     /// Get the global schema registry
     pub fn schema_registry() -> &'static SchemaRegistry {
         SchemaRegistry::init()

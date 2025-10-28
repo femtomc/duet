@@ -6,8 +6,9 @@
 //! processed sequentially, and unsupported operations return structured errors.
 
 use super::control::Control;
-use super::error::{RuntimeError, CapabilityError};
+use super::error::{CapabilityError, RuntimeError};
 use super::turn::{ActorId, BranchId, FacetId, TurnId};
+use crate::codebase;
 use crate::PROTOCOL_VERSION;
 use preserves::IOValue;
 use serde::{Deserialize, Serialize};
@@ -92,6 +93,12 @@ impl<W: Write> Service<W> {
             "register_entity" => self.cmd_register_entity(params),
             "list_entities" => self.cmd_list_entities(params),
             "list_capabilities" => self.cmd_list_capabilities(params),
+            "workspace_entries" => self.cmd_workspace_entries(),
+            "workspace_rescan" => self.cmd_workspace_rescan(),
+            "workspace_read" => self.cmd_workspace_read(params),
+            "workspace_write" => self.cmd_workspace_write(params),
+            "agent_invoke" => self.cmd_agent_invoke(params),
+            "agent_responses" => self.cmd_agent_responses(),
             "invoke_capability" => self.cmd_invoke_capability(params),
             other => Err(ServiceError::Unsupported(other.to_string())),
         }
@@ -354,6 +361,88 @@ impl<W: Write> Service<W> {
         }
     }
 
+    fn cmd_workspace_entries(&mut self) -> Result<Value, ServiceError> {
+        self.ensure_handshake()?;
+        let handle = self
+            .workspace_handle()
+            .ok_or_else(|| ServiceError::Protocol("workspace entity not registered".into()))?;
+
+        let entries = codebase::list_workspace_entries(&self.control, &handle);
+        Ok(json!({ "entries": entries }))
+    }
+
+    fn cmd_workspace_rescan(&mut self) -> Result<Value, ServiceError> {
+        self.ensure_handshake()?;
+        let handle = self
+            .workspace_handle()
+            .ok_or_else(|| ServiceError::Protocol("workspace entity not registered".into()))?;
+
+        codebase::workspace_rescan(&mut self.control, &handle).map_err(ServiceError::from)?;
+        Ok(json!({ "status": "ok" }))
+    }
+
+    fn cmd_workspace_read(&mut self, params: &Value) -> Result<Value, ServiceError> {
+        self.ensure_handshake()?;
+        let path = params
+            .get("path")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ServiceError::invalid_param("path"))?;
+
+        let handle = self
+            .workspace_handle()
+            .ok_or_else(|| ServiceError::Protocol("workspace entity not registered".into()))?;
+
+        let content = codebase::read_file(&mut self.control, &handle, path)
+            .map_err(ServiceError::from)?;
+        Ok(json!({ "path": path, "content": content }))
+    }
+
+    fn cmd_workspace_write(&mut self, params: &Value) -> Result<Value, ServiceError> {
+        self.ensure_handshake()?;
+        let path = params
+            .get("path")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ServiceError::invalid_param("path"))?;
+        let content = params
+            .get("content")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ServiceError::invalid_param("content"))?;
+
+        let handle = self
+            .workspace_handle()
+            .ok_or_else(|| ServiceError::Protocol("workspace entity not registered".into()))?;
+
+        codebase::write_file(&mut self.control, &handle, path, content)
+            .map_err(ServiceError::from)?;
+        Ok(json!({ "status": "ok" }))
+    }
+
+    fn cmd_agent_invoke(&mut self, params: &Value) -> Result<Value, ServiceError> {
+        self.ensure_handshake()?;
+        let prompt = params
+            .get("prompt")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ServiceError::invalid_param("prompt"))?;
+
+        let handle = self.ensure_claude_handle()?;
+        let response = codebase::invoke_claude_agent(&mut self.control, &handle, prompt)
+            .map_err(ServiceError::from)?;
+
+        Ok(json!({
+            "agent": response.agent,
+            "request_id": response.request_id,
+            "prompt": response.prompt,
+            "response": response.response,
+        }))
+    }
+
+    fn cmd_agent_responses(&mut self) -> Result<Value, ServiceError> {
+        self.ensure_handshake()?;
+        let handle = self.ensure_claude_handle()?;
+        let responses = codebase::list_agent_responses(&self.control, &handle);
+        Ok(json!({ "responses": responses }))
+    }
+
     fn cmd_invoke_capability(&mut self, params: &Value) -> Result<Value, ServiceError> {
         self.ensure_handshake()?;
 
@@ -386,6 +475,17 @@ impl<W: Write> Service<W> {
         self.control
             .switch_branch(branch_id)
             .map_err(ServiceError::from)
+    }
+
+    fn workspace_handle(&self) -> Option<codebase::WorkspaceHandle> {
+        codebase::workspace_handle(&self.control)
+    }
+
+    fn ensure_claude_handle(&mut self) -> Result<codebase::AgentHandle, ServiceError> {
+        match codebase::ensure_claude_agent(&mut self.control) {
+            Ok(handle) => Ok(handle),
+            Err(err) => Err(ServiceError::from(err)),
+        }
     }
 }
 
