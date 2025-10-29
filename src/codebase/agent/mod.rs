@@ -2,6 +2,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::runtime::actor::Entity;
+use crate::util::io_value::record_with_label;
 
 pub mod claude;
 
@@ -44,39 +45,23 @@ pub fn exchanges_to_preserves(exchanges: &[AgentExchange]) -> preserves::IOValue
 
 /// Convenience helper for deserializing exchanges.
 pub fn exchanges_from_preserves(value: &preserves::IOValue) -> Vec<AgentExchange> {
-    if !value.is_record() {
-        return Vec::new();
-    }
-
-    if value
-        .label()
-        .as_symbol()
-        .map(|sym| sym.as_ref() == "history")
-        != Some(true)
-    {
-        return Vec::new();
-    }
+    let history = match record_with_label(value, "history") {
+        Some(view) => view,
+        None => return Vec::new(),
+    };
 
     let mut exchanges = Vec::new();
-    for i in 0..value.len() {
-        let entry = value.index(i);
-        if !entry.is_record() {
-            continue;
-        }
-        if entry
-            .label()
-            .as_symbol()
-            .map(|sym| sym.as_ref() == "exchange")
-            != Some(true)
-        {
-            continue;
-        }
-        if entry.len() < 3 {
-            continue;
-        }
-        let request_id = entry.index(0).as_string().map(|s| s.to_string());
-        let prompt = entry.index(1).as_string().map(|s| s.to_string());
-        let response = entry.index(2).as_string().map(|s| s.to_string());
+    for index in 0..history.len() {
+        let entry = history.field(index);
+        let exchange = match record_with_label(&entry, "exchange") {
+            Some(view) if view.len() >= 3 => view,
+            _ => continue,
+        };
+
+        let request_id = exchange.field_string(0);
+        let prompt = exchange.field_string(1);
+        let response = exchange.field_string(2);
+
         if let (Some(request_id), Some(prompt), Some(response)) = (request_id, prompt, response) {
             exchanges.push(AgentExchange {
                 request_id,

@@ -18,6 +18,7 @@ use crate::runtime::actor::{Activation, CapabilitySpec, Entity};
 use crate::runtime::error::{ActorError, ActorResult};
 use crate::runtime::registry::EntityCatalog;
 use crate::runtime::turn::{FacetId, Handle};
+use crate::util::io_value::record_with_label;
 
 use crate::runtime::state::{CapabilityMetadata, CapabilityTarget};
 #[cfg(test)]
@@ -249,35 +250,21 @@ impl WorkspaceCatalog {
     }
 
     fn parse_path(&self, payload: &preserves::IOValue, label: &str) -> ActorResult<PathBuf> {
-        if !payload.is_record() {
-            return Err(ActorError::InvalidActivation(format!(
-                "expected record payload for {label}",
-            )));
-        }
-
-        let record_label = payload.label();
-        let symbol = record_label.as_symbol().ok_or_else(|| {
-            ActorError::InvalidActivation(format!("expected symbol label for {label} invocation"))
+        let record = record_with_label(payload, label).ok_or_else(|| {
+            ActorError::InvalidActivation(format!("expected '{label}' payload"))
         })?;
 
-        if symbol.as_ref() != label {
-            return Err(ActorError::InvalidActivation(format!(
-                "expected '{label}' payload"
-            )));
-        }
-
-        if payload.len() == 0 {
+        if record.len() == 0 {
             return Err(ActorError::InvalidActivation(format!(
                 "missing path argument for {label}"
             )));
         }
 
-        let path_value = payload.index(0);
-        let path_str = path_value.as_string().ok_or_else(|| {
+        let path_str = record.field_string(0).ok_or_else(|| {
             ActorError::InvalidActivation(format!("expected string path for {label}"))
         })?;
 
-        Ok(PathBuf::from(path_str.as_ref()))
+        Ok(PathBuf::from(path_str))
     }
 
     fn authorize(&self, metadata: &CapabilityMetadata, rel_path: &Path) -> ActorResult<()> {
@@ -385,41 +372,31 @@ impl Entity for WorkspaceCatalog {
             return Ok(());
         }
 
-        if !payload.is_record() {
+        if record_with_label(payload, "workspace-rescan").is_some() {
+            self.rescan(activation)?;
             return Ok(());
         }
 
-        let label = payload.label();
-
-        if let Some(symbol) = label.as_symbol() {
-            match symbol.as_ref() {
-                "workspace-rescan" => {
-                    self.rescan(activation)?;
-                }
-                "workspace-read" => {
-                    if payload.len() > 0 {
-                        if let Some(path) = payload.index(0).as_string() {
-                            self.grant_read_capability(
-                                activation,
-                                activation.current_facet.clone(),
-                                Path::new(path.as_ref()),
-                            );
-                        }
-                    }
-                }
-                "workspace-write" => {
-                    if payload.len() > 0 {
-                        if let Some(path) = payload.index(0).as_string() {
-                            self.grant_write_capability(
-                                activation,
-                                activation.current_facet.clone(),
-                                Path::new(path.as_ref()),
-                            );
-                        }
-                    }
-                }
-                _ => {}
+        if let Some(record) = record_with_label(payload, "workspace-read") {
+            if let Some(path) = record.field_string(0) {
+                self.grant_read_capability(
+                    activation,
+                    activation.current_facet.clone(),
+                    Path::new(&path),
+                );
             }
+            return Ok(());
+        }
+
+        if let Some(record) = record_with_label(payload, "workspace-write") {
+            if let Some(path) = record.field_string(0) {
+                self.grant_write_capability(
+                    activation,
+                    activation.current_facet.clone(),
+                    Path::new(&path),
+                );
+            }
+            return Ok(());
         }
 
         Ok(())

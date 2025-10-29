@@ -12,6 +12,7 @@ use crate::PROTOCOL_VERSION;
 use crate::codebase::{self, transcript};
 use crate::runtime::pattern::Pattern;
 use crate::runtime::reaction::{ReactionDefinition, ReactionEffect, ReactionValue};
+use crate::util::io_value::as_record;
 use preserves::IOValue;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -1088,12 +1089,8 @@ impl<'a, W: Write> Session<'a, W> {
 }
 
 fn assertion_matches_label(value: &IOValue, label: &str) -> bool {
-    if value.is_record() {
-        value
-            .label()
-            .as_symbol()
-            .map(|sym| sym.as_ref() == label)
-            .unwrap_or(false)
+    if let Some(record) = as_record(value) {
+        record.has_label(label)
     } else {
         value
             .as_symbol()
@@ -1103,15 +1100,17 @@ fn assertion_matches_label(value: &IOValue, label: &str) -> bool {
 }
 
 fn assertion_matches_request_id(value: &IOValue, request_id: &str) -> bool {
-    if !value.is_record() || value.len() == 0 {
-        return false;
+    if let Some(record) = as_record(value) {
+        if record.len() == 0 {
+            return false;
+        }
+        record
+            .field_string(0)
+            .map(|s| s == request_id)
+            .unwrap_or(false)
+    } else {
+        false
     }
-
-    value
-        .index(0)
-        .as_string()
-        .map(|s| s.as_ref() == request_id)
-        .unwrap_or(false)
 }
 
 #[derive(Debug)]

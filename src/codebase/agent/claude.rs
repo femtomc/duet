@@ -6,6 +6,7 @@ use crate::runtime::actor::{Activation, Entity, HydratableEntity};
 use crate::runtime::error::{ActorError, ActorResult};
 use crate::runtime::registry::EntityCatalog;
 use crate::runtime::turn::{Handle, TurnOutput};
+use crate::util::io_value::record_with_label;
 use chrono::Utc;
 use once_cell::sync::Lazy;
 use preserves::ValueImpl;
@@ -133,40 +134,23 @@ impl ClaudeCodeAgent {
     }
 
     fn parse_request(value: &preserves::IOValue) -> ActorResult<(String, String)> {
-        if !value.is_record() {
-            return Err(ActorError::InvalidActivation(
-                "agent request must be a record".into(),
-            ));
-        }
+        let record = record_with_label(value, REQUEST_LABEL).ok_or_else(|| {
+            ActorError::InvalidActivation("agent request must use agent-request label".into())
+        })?;
 
-        if value
-            .label()
-            .as_symbol()
-            .map(|sym| sym.as_ref() == REQUEST_LABEL)
-            != Some(true)
-        {
-            return Err(ActorError::InvalidActivation(
-                "agent request must use agent-request label".into(),
-            ));
-        }
-
-        if value.len() < 2 {
+        if record.len() < 2 {
             return Err(ActorError::InvalidActivation(
                 "agent request requires id and prompt".into(),
             ));
         }
 
-        let request_id = value
-            .index(0)
-            .as_string()
-            .ok_or_else(|| ActorError::InvalidActivation("agent request id must be string".into()))?
-            .to_string();
+        let request_id = record
+            .field_string(0)
+            .ok_or_else(|| ActorError::InvalidActivation("agent request id must be string".into()))?;
 
-        let prompt = value
-            .index(1)
-            .as_string()
-            .ok_or_else(|| ActorError::InvalidActivation("agent prompt must be string".into()))?
-            .to_string();
+        let prompt = record
+            .field_string(1)
+            .ok_or_else(|| ActorError::InvalidActivation("agent prompt must be string".into()))?;
 
         Ok((request_id, prompt))
     }
@@ -341,50 +325,26 @@ impl HydratableEntity for ClaudeCodeAgent {
 }
 
 fn parse_response_fields(value: &preserves::IOValue) -> Option<(String, String, String, String)> {
-    if !value.is_record() {
+    let record = record_with_label(value, RESPONSE_LABEL)?;
+    if record.len() < 4 {
         return None;
     }
 
-    if value
-        .label()
-        .as_symbol()
-        .map(|sym| sym.as_ref() == RESPONSE_LABEL)
-        != Some(true)
-    {
-        return None;
-    }
-
-    if value.len() < 4 {
-        return None;
-    }
-
-    let request_id = value.index(0).as_string()?.to_string();
-    let prompt = value.index(1).as_string()?.to_string();
-    let response = value.index(2).as_string()?.to_string();
-    let agent_kind = value
-        .index(3)
-        .as_symbol()
-        .map(|sym| sym.as_ref().to_string())
-        .unwrap_or_default();
+    let request_id = record.field_string(0)?;
+    let prompt = record.field_string(1)?;
+    let response = record.field_string(2)?;
+    let agent_kind = record.field_symbol(3).unwrap_or_default();
 
     Some((request_id, prompt, response, agent_kind))
 }
 
 fn settings_from_config(value: &preserves::IOValue) -> Option<AgentSettings> {
-    if !value.is_record() {
-        return None;
-    }
-
-    let label_value = value.label();
-    let label_symbol = label_value.as_symbol()?;
-    if label_symbol.as_ref() != "claude-config" {
-        return None;
-    }
+    let record = record_with_label(value, "claude-config")?;
 
     let mut settings = AgentSettings::default();
 
-    if value.len() > 0 {
-        if let Some(command) = value.index(0).as_string() {
+    if record.len() > 0 {
+        if let Some(command) = record.field_string(0) {
             let trimmed = command.trim();
             if !trimmed.is_empty() {
                 settings.command = Some(trimmed.to_string());
@@ -392,8 +352,8 @@ fn settings_from_config(value: &preserves::IOValue) -> Option<AgentSettings> {
         }
     }
 
-    if value.len() > 1 {
-        if let Some(args_text) = value.index(1).as_string() {
+    if record.len() > 1 {
+        if let Some(args_text) = record.field_string(1) {
             let args = args_text
                 .split_whitespace()
                 .filter(|arg| !arg.is_empty())

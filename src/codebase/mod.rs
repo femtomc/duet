@@ -21,6 +21,7 @@ use crate::runtime::error::{ActorError, ActorResult, Result as RuntimeResult, Ru
 use crate::runtime::pattern::Pattern;
 use crate::runtime::registry::EntityCatalog;
 use crate::runtime::turn::{ActorId, BranchId, FacetId, Handle, TurnId};
+use crate::util::io_value::record_with_label;
 
 pub mod agent;
 pub mod transcript;
@@ -357,40 +358,32 @@ pub fn write_file(
 }
 
 fn parse_workspace_entry(value: &preserves::IOValue) -> Option<WorkspaceEntry> {
-    if !value.is_record() {
+    let record = record_with_label(value, "workspace-entry")?;
+    if record.len() < 3 {
         return None;
     }
 
-    let label = value.label();
-    if label
-        .as_symbol()
-        .map(|sym| sym.as_ref() == "workspace-entry")
-        != Some(true)
-    {
-        return None;
-    }
-
-    if value.len() < 3 {
-        return None;
-    }
-
-    let path = value.index(0).as_string()?.to_string();
-    let kind = value.index(1).as_symbol()?.as_ref().to_string();
-    let size = value
-        .index(2)
+    let path = record.field_string(0)?;
+    let kind = record.field_symbol(1)?;
+    let size = record
+        .field(2)
         .as_signed_integer()
         .and_then(|s| i64::try_from(s.as_ref()).ok())
         .unwrap_or(0);
 
-    let modified_value = value.index(3);
-    let modified = if modified_value.as_symbol().is_some() {
-        None
+    let modified = if record.len() > 3 {
+        let modified_value = record.field(3);
+        if modified_value.as_symbol().is_some() {
+            None
+        } else {
+            modified_value.as_string().map(|s| s.to_string())
+        }
     } else {
-        modified_value.as_string().map(|s| s.to_string())
+        None
     };
 
-    let digest = if value.len() > 4 {
-        value.index(4).as_string().map(|s| s.to_string())
+    let digest = if record.len() > 4 {
+        record.field_string(4)
     } else {
         None
     };
@@ -422,38 +415,18 @@ fn agent_handle(control: &Control, kind: &str) -> Option<AgentHandle> {
 /// Attempt to interpret a preserves value as an agent response record.
 /// Attempt to interpret a preserves payload as an agent response.
 pub fn parse_agent_response(value: &preserves::IOValue) -> Option<AgentResponse> {
-    if !value.is_record() {
+    let record = record_with_label(value, agent::claude::RESPONSE_LABEL)?;
+    if record.len() < 4 {
         return None;
     }
 
-    if value
-        .label()
-        .as_symbol()
-        .map(|sym| sym.as_ref() == agent::claude::RESPONSE_LABEL)
-        != Some(true)
-    {
-        return None;
-    }
+    let request_id = record.field_string(0)?;
+    let prompt = record.field_string(1)?;
+    let response = record.field_string(2)?;
+    let agent_kind = record.field_symbol(3).unwrap_or_default();
 
-    if value.len() < 4 {
-        return None;
-    }
-
-    let request_id = value.index(0).as_string()?.to_string();
-    let prompt = value.index(1).as_string()?.to_string();
-    let response = value.index(2).as_string()?.to_string();
-    let agent_kind = value
-        .index(3)
-        .as_symbol()
-        .map(|sym| sym.as_ref().to_string())
-        .unwrap_or_default();
-
-    let timestamp = if value.len() > 4 {
-        value
-            .index(4)
-            .as_string()
-            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s.as_ref()).ok())
-            .map(|dt| dt.with_timezone(&Utc))
+    let timestamp = if record.len() > 4 {
+        record.field_timestamp(4)
     } else {
         None
     };

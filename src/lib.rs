@@ -17,6 +17,9 @@ pub mod runtime;
 /// Built-in entities and helpers
 pub mod codebase;
 
+/// Common utility helpers used across modules
+pub mod util;
+
 // Re-export key types for convenience
 pub use codebase::register_codebase_entities;
 pub use runtime::{Runtime, RuntimeConfig};

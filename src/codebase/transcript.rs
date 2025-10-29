@@ -13,6 +13,7 @@ use chrono::{DateTime, Utc};
 use codebase::AgentResponse;
 use preserves::IOValue;
 use std::time::Duration;
+use crate::util::io_value::record_with_label;
 
 /// Snapshot describing the most recent transcript state we observed.
 #[derive(Debug, Clone)]
@@ -171,26 +172,13 @@ pub fn transcript_events(
 }
 
 fn matches_label(value: &IOValue) -> bool {
-    if !value.is_record() {
-        return false;
-    }
-
-    value
-        .label()
-        .as_symbol()
-        .map(|sym| sym.as_ref() == agent::claude::RESPONSE_LABEL)
-        .unwrap_or(false)
+    record_with_label(value, agent::claude::RESPONSE_LABEL).is_some()
 }
 
 fn matches_request(value: &IOValue, request_id: &str) -> bool {
-    if !value.is_record() || value.len() == 0 {
-        return false;
-    }
-
-    value
-        .index(0)
-        .as_string()
-        .map(|s| s.as_ref() == request_id)
+    record_with_label(value, agent::claude::RESPONSE_LABEL)
+        .and_then(|record| record.field_string(0))
+        .map(|s| s == request_id)
         .unwrap_or(false)
 }
 
