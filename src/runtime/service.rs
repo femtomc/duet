@@ -15,7 +15,7 @@ use crate::runtime::reaction::{ReactionDefinition, ReactionEffect, ReactionValue
 use crate::util::io_value::as_record;
 use preserves::IOValue;
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
 use std::time::Duration;
@@ -712,77 +712,7 @@ impl<'a, W: Write> Session<'a, W> {
                 .insert(request_id.to_string(), cursor.clone());
         }
 
-        let events: Vec<Value> = chunk
-            .events
-            .iter()
-            .map(|batch| {
-                let entries: Vec<Value> = batch
-                    .events
-                    .iter()
-                    .map(|event| {
-                        let action = match event.action {
-                            crate::runtime::control::AssertionEventAction::Assert => "assert",
-                            crate::runtime::control::AssertionEventAction::Retract => "retract",
-                        };
-
-                        let mut event_obj = Map::new();
-                        event_obj.insert(
-                            "action".to_string(),
-                            Value::String(action.to_string()),
-                        );
-                        event_obj.insert(
-                            "handle".to_string(),
-                            Value::String(event.handle.to_string()),
-                        );
-
-                        if let Some(value) = event.value.as_ref() {
-                            event_obj.insert(
-                                "value".to_string(),
-                                Value::String(format!("{:?}", value)),
-                            );
-
-                            if let Some(agent_response) = codebase::parse_agent_response(value) {
-                                let codebase::AgentResponse {
-                                    request_id,
-                                    prompt,
-                                    response,
-                                    agent,
-                                    timestamp,
-                                } = agent_response;
-
-                                let mut transcript = Map::new();
-                                transcript
-                                    .insert("request_id".to_string(), Value::String(request_id));
-                                transcript.insert("prompt".to_string(), Value::String(prompt));
-                                transcript.insert("response".to_string(), Value::String(response));
-                                transcript.insert("agent".to_string(), Value::String(agent));
-                                if let Some(ts) = timestamp {
-                                    transcript.insert(
-                                        "response_timestamp".to_string(),
-                                        Value::String(ts.to_rfc3339()),
-                                    );
-                                }
-
-                                event_obj.insert(
-                                    "transcript".to_string(),
-                                    Value::Object(transcript),
-                                );
-                            }
-                        }
-
-                        Value::Object(event_obj)
-                    })
-                    .collect();
-
-                json!({
-                    "turn": batch.turn_id.to_string(),
-                    "actor": batch.actor.to_string(),
-                    "clock": batch.clock,
-                    "timestamp": batch.timestamp.to_rfc3339(),
-                    "events": entries,
-                })
-            })
-            .collect();
+        let events: Vec<Value> = transcript::event_batches_payload(&chunk);
 
         Ok(json!({
             "request_id": request_id,

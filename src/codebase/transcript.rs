@@ -6,13 +6,16 @@
 
 use super::agent;
 use crate::codebase;
-use crate::runtime::control::{AssertionEventChunk, AssertionEventFilter, Control};
+use crate::runtime::control::{
+    AssertionEventAction, AssertionEventChunk, AssertionEventFilter, Control,
+};
 use crate::runtime::error::Result as RuntimeResult;
 use crate::runtime::turn::{ActorId, BranchId, Handle, TurnId};
 use chrono::{DateTime, Utc};
 use codebase::AgentResponse;
 use preserves::IOValue;
 use std::time::Duration;
+use serde_json::{Map, Value, json};
 use crate::util::io_value::record_with_label;
 
 /// Snapshot describing the most recent transcript state we observed.
@@ -184,4 +187,77 @@ fn matches_request(value: &IOValue, request_id: &str) -> bool {
 
 fn parse_agent_response(value: &IOValue) -> Option<AgentResponse> {
     codebase::parse_agent_response(value)
+}
+
+/// Convert an [`AssertionEventChunk`] into JSON-ready batches enriched with transcript metadata.
+pub fn event_batches_payload(chunk: &AssertionEventChunk) -> Vec<Value> {
+    chunk
+        .events
+        .iter()
+        .map(|batch| {
+            let events: Vec<Value> = batch
+                .events
+                .iter()
+                .map(|event| {
+                    let action = match event.action {
+                        AssertionEventAction::Assert => "assert",
+                        AssertionEventAction::Retract => "retract",
+                    };
+
+                    let mut event_obj = Map::new();
+                    event_obj
+                        .insert("action".to_string(), Value::String(action.to_string()));
+                    event_obj.insert(
+                        "handle".to_string(),
+                        Value::String(event.handle.to_string()),
+                    );
+
+                    if let Some(value) = event.value.as_ref() {
+                        event_obj.insert(
+                            "value".to_string(),
+                            Value::String(format!("{:?}", value)),
+                        );
+
+                        if let Some(agent_response) = parse_agent_response(value) {
+                            let mut transcript = Map::new();
+                            transcript.insert(
+                                "request_id".to_string(),
+                                Value::String(agent_response.request_id),
+                            );
+                            transcript.insert(
+                                "prompt".to_string(),
+                                Value::String(agent_response.prompt),
+                            );
+                            transcript.insert(
+                                "response".to_string(),
+                                Value::String(agent_response.response),
+                            );
+                            transcript.insert(
+                                "agent".to_string(),
+                                Value::String(agent_response.agent),
+                            );
+                            if let Some(ts) = agent_response.timestamp {
+                                transcript.insert(
+                                    "response_timestamp".to_string(),
+                                    Value::String(ts.to_rfc3339()),
+                                );
+                            }
+
+                            event_obj.insert("transcript".to_string(), Value::Object(transcript));
+                        }
+                    }
+
+                    Value::Object(event_obj)
+                })
+                .collect();
+
+            json!({
+                "turn": batch.turn_id.to_string(),
+                "actor": batch.actor.to_string(),
+                "clock": batch.clock,
+                "timestamp": batch.timestamp.to_rfc3339(),
+                "events": events,
+            })
+        })
+        .collect()
 }
