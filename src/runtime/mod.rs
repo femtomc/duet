@@ -3,12 +3,10 @@
 //! This module provides the main `Runtime` struct that coordinates all subsystems
 //! and exposes the public interface for embedding or controlling the runtime.
 
-use once_cell::sync::Lazy;
-use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 // Submodules
@@ -18,6 +16,7 @@ pub mod control;
 pub mod error;
 pub mod journal;
 pub mod pattern;
+pub mod reaction;
 pub mod registry;
 pub mod scheduler;
 pub mod schema;
@@ -66,6 +65,8 @@ use storage::Storage;
 use turn::{BranchId, TurnInput, TurnOutput};
 
 use actor::Actor;
+use error::{ActorError, StorageError};
+use reaction::{ReactionDefinition, ReactionId, ReactionInfo, ReactionStore, StoredReaction};
 use registry::EntityManager;
 use state::{CapId, CapabilityMetadata, CapabilityStatus};
 use std::collections::{HashMap, HashSet};
@@ -79,30 +80,6 @@ pub struct AsyncMessage {
     pub facet: turn::FacetId,
     /// Payload delivered to the actor.
     pub payload: preserves::IOValue,
-}
-
-static ASYNC_DISPATCHER: Lazy<RwLock<Option<Sender<AsyncMessage>>>> =
-    Lazy::new(|| RwLock::new(None));
-
-/// Submit a message to be delivered on a subsequent turn from a background task.
-pub fn enqueue_async_message(
-    actor: turn::ActorId,
-    facet: turn::FacetId,
-    payload: preserves::IOValue,
-) -> error::Result<()> {
-    if let Some(sender) = ASYNC_DISPATCHER.read().clone() {
-        sender
-            .send(AsyncMessage {
-                actor,
-                facet,
-                payload,
-            })
-            .map_err(|err| error::RuntimeError::Init(format!("async dispatch failed: {err}")))
-    } else {
-        Err(error::RuntimeError::Init(
-            "async dispatcher unavailable".into(),
-        ))
-    }
 }
 
 /// The main runtime orchestrator
@@ -123,6 +100,13 @@ pub struct Runtime {
     /// Entity metadata manager
     entity_manager: EntityManager,
 
+    /// Entity registry snapshot for this runtime instance
+    entity_registry: registry::EntityRegistry,
+    /// Persisted reaction definitions for this runtime
+    reaction_store: Arc<RwLock<ReactionStore>>,
+    /// Filesystem path where reactions are stored
+    reaction_store_path: PathBuf,
+
     /// Turn counter for snapshot interval
     turn_count: u64,
 
@@ -136,7 +120,7 @@ pub struct Runtime {
     async_inbox: Receiver<AsyncMessage>,
 
     /// Sender retained for lifecycle management
-    _async_sender: Sender<AsyncMessage>,
+    async_sender: Sender<AsyncMessage>,
 }
 
 impl Runtime {
@@ -222,9 +206,13 @@ impl Runtime {
             EntityManager::load(&entity_meta_path).unwrap_or_else(|_| EntityManager::new());
 
         let (async_sender, async_receiver) = channel();
-        {
-            *ASYNC_DISPATCHER.write() = Some(async_sender.clone());
-        }
+
+        let entity_registry = registry::EntityCatalog::global().snapshot();
+
+        let reaction_store_path = storage.meta_dir().join("reactions.json");
+        let reaction_store = ReactionStore::load(&reaction_store_path).map_err(|e| {
+            error::RuntimeError::Init(format!("Failed to load reaction definitions: {}", e))
+        })?;
 
         let mut runtime = Self {
             config,
@@ -236,15 +224,19 @@ impl Runtime {
             current_branch,
             actors: HashMap::new(),
             entity_manager,
+            entity_registry,
+            reaction_store: Arc::new(RwLock::new(reaction_store)),
+            reaction_store_path,
             turn_count: 0,
             last_turn_per_actor: HashMap::new(),
             turn_wait: Arc::new((Mutex::new(HashMap::new()), Condvar::new())),
             async_inbox: async_receiver,
-            _async_sender: async_sender,
+            async_sender,
         };
 
         // Hydrate entities: recreate and attach them from metadata
         runtime.hydrate_entities(None)?;
+        runtime.hydrate_reactions()?;
 
         if let Some(head) = runtime
             .branch_manager
@@ -259,15 +251,13 @@ impl Runtime {
 
     /// Hydrate entities from persisted metadata
     ///
-    /// Recreates entity instances using the global registry, attaches them to
+    /// Recreates entity instances using the runtime registry, attaches them to
     /// actors/facets, and re-registers pattern subscriptions.
     fn hydrate_entities(
         &mut self,
         entity_states: Option<&HashMap<uuid::Uuid, snapshot::EntityStateSnapshot>>,
     ) -> Result<()> {
-        use registry::EntityRegistry;
-
-        let registry = EntityRegistry::global();
+        let registry = &self.entity_registry;
 
         // Clone metadata to avoid borrow conflicts
         let entities: Vec<_> = self.entity_manager.list().into_iter().cloned().collect();
@@ -312,6 +302,24 @@ impl Runtime {
         Ok(())
     }
 
+    /// Hydrate reaction definitions from the persisted store.
+    fn hydrate_reactions(&mut self) -> Result<()> {
+        let stored: Vec<StoredReaction> = {
+            let store = self.reaction_store.read().unwrap();
+            store.iter().map(|(_, entry)| entry.clone()).collect()
+        };
+
+        for stored_reaction in stored {
+            let actor = self
+                .actors
+                .entry(stored_reaction.actor.clone())
+                .or_insert_with(|| Actor::new(stored_reaction.actor.clone()));
+            actor.register_reaction(stored_reaction.definition.clone());
+        }
+
+        Ok(())
+    }
+
     /// Execute a single turn
     ///
     /// Takes the next ready turn from the scheduler, executes it,
@@ -336,7 +344,7 @@ impl Runtime {
 
         // Execute the turn
         let (outputs, delta) = actor
-            .execute_turn(inputs.clone())
+            .execute_turn(inputs.clone(), Some(&self.async_sender))
             .map_err(|e| error::RuntimeError::Actor(e))?;
 
         // Update flow control in scheduler (before consuming delta)
@@ -439,7 +447,7 @@ impl Runtime {
             .unwrap_or_else(|| TurnId::new(format!("turn_{:08}", self.turn_count)));
 
         // Capture entity private state (for HydratableEntity implementations)
-        let registry = registry::EntityRegistry::global();
+        let registry = &self.entity_registry;
         let mut entity_states = Vec::new();
 
         for (actor_id, actor) in self.actors.iter() {
@@ -1148,10 +1156,120 @@ impl Runtime {
         &mut self.entity_manager
     }
 
+    /// Access the runtime's entity registry snapshot
+    pub fn entity_registry(&self) -> &registry::EntityRegistry {
+        &self.entity_registry
+    }
+
     /// Persist entity metadata to disk (atomic write)
     pub fn persist_entities(&self) -> Result<()> {
         let entity_meta_path = self.storage.meta_dir().join("entities.json");
-        self.entity_manager.save(&self.storage, &entity_meta_path)
+        self.entity_manager.save(&entity_meta_path)
+    }
+
+    /// Persist reaction definitions to disk.
+    pub fn persist_reactions(&self) -> Result<()> {
+        let store = self.reaction_store.read().unwrap();
+        store
+            .save(&self.reaction_store_path)
+            .map_err(|e| error::RuntimeError::Storage(StorageError::Io(e)))?;
+        Ok(())
+    }
+
+    /// Register a reaction definition for the given actor.
+    pub fn register_reaction(
+        &mut self,
+        actor_id: turn::ActorId,
+        definition: ReactionDefinition,
+    ) -> Result<ReactionId> {
+        let reaction_id = definition.id;
+
+        if self
+            .reaction_store
+            .read()
+            .unwrap()
+            .get(&reaction_id)
+            .is_some()
+        {
+            self.unregister_reaction(reaction_id)?;
+        }
+
+        let facet_id = definition.pattern.facet.clone();
+
+        let actor = self
+            .actors
+            .entry(actor_id.clone())
+            .or_insert_with(|| Actor::new(actor_id.clone()));
+
+        let has_facet = actor.facets.read().facets.contains_key(&facet_id);
+
+        if !has_facet {
+            return Err(error::RuntimeError::Actor(ActorError::InvalidActivation(
+                format!(
+                    "facet {} not found on actor {} for reaction",
+                    facet_id.0, actor_id.0
+                ),
+            )));
+        }
+
+        actor.register_reaction(definition.clone());
+
+        {
+            let mut store = self.reaction_store.write().unwrap();
+            store.insert(StoredReaction {
+                reaction_id,
+                actor: actor_id,
+                definition,
+            });
+        }
+
+        self.persist_reactions()?;
+        Ok(reaction_id)
+    }
+
+    /// Unregister a reaction definition by identifier.
+    pub fn unregister_reaction(&mut self, reaction_id: ReactionId) -> Result<bool> {
+        let removed = {
+            let mut store = self.reaction_store.write().unwrap();
+            store.remove(&reaction_id)
+        };
+
+        if let Some(stored) = removed {
+            if let Some(actor) = self.actors.get(&stored.actor) {
+                actor.unregister_reaction(reaction_id);
+            }
+            self.persist_reactions()?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// List all registered reactions.
+    pub fn list_reactions(&self) -> Vec<ReactionInfo> {
+        let store = self.reaction_store.read().unwrap();
+        let mut stats_map = HashMap::new();
+        for actor in self.actors.values() {
+            for (reaction_id, stats) in actor.reaction_stats_snapshot() {
+                stats_map.insert(reaction_id, stats);
+            }
+        }
+
+        store
+            .iter()
+            .map(|(_, entry)| {
+                let stats = stats_map
+                    .get(&entry.reaction_id)
+                    .cloned()
+                    .unwrap_or_default();
+                ReactionInfo {
+                    reaction_id: entry.reaction_id,
+                    actor: entry.actor.clone(),
+                    definition: entry.definition.clone(),
+                    stats,
+                }
+            })
+            .collect()
     }
 
     /// Inspect current pattern matches for an actor (testing/diagnostics).

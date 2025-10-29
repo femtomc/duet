@@ -11,6 +11,7 @@ use std::convert::TryFrom;
 use std::path::Path;
 use std::sync::{Mutex, Once};
 
+use chrono::{DateTime, Utc};
 use preserves::ValueImpl;
 use serde::Serialize;
 
@@ -18,10 +19,11 @@ use crate::runtime::actor::{Activation, Entity, HydratableEntity};
 use crate::runtime::control::Control;
 use crate::runtime::error::{ActorError, ActorResult, Result as RuntimeResult, RuntimeError};
 use crate::runtime::pattern::Pattern;
-use crate::runtime::registry::EntityRegistry;
-use crate::runtime::turn::{ActorId, FacetId, Handle, TurnId};
+use crate::runtime::registry::EntityCatalog;
+use crate::runtime::turn::{ActorId, BranchId, FacetId, Handle, TurnId};
 
 pub mod agent;
+pub mod transcript;
 pub mod workspace;
 
 static INIT: Once = Once::new();
@@ -36,12 +38,12 @@ const WORKSPACE_WRITE_MSG: &str = "workspace-write";
 /// The call is idempotent; it is safe to invoke multiple times.
 pub fn register_codebase_entities() {
     INIT.call_once(|| {
-        let registry = EntityRegistry::global();
+        let catalog = EntityCatalog::global();
 
-        workspace::register(registry);
-        agent::claude::register(registry);
+        workspace::register(catalog);
+        agent::claude::register(catalog);
 
-        registry.register("echo", |config| {
+        catalog.register("echo", |config| {
             let topic = config
                 .as_string()
                 .map(|s| s.to_string())
@@ -49,7 +51,7 @@ pub fn register_codebase_entities() {
             Ok(Box::new(EchoEntity { topic }))
         });
 
-        registry.register_hydratable("counter", |config| {
+        catalog.register_hydratable("counter", |config| {
             let initial = config
                 .as_signed_integer()
                 .and_then(|value| i64::try_from(value.as_ref()).ok())
@@ -140,6 +142,9 @@ pub struct AgentResponse {
     pub response: String,
     /// Agent kind identifier.
     pub agent: String,
+    /// Timestamp when the response was recorded (if present).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<DateTime<Utc>>,
 }
 
 /// Metadata returned when an agent invocation is enqueued.
@@ -151,6 +156,10 @@ pub struct AgentInvocation {
     pub agent: String,
     /// Request identifier generated for correlation.
     pub request_id: String,
+    /// Actor hosting the agent entity.
+    pub actor: ActorId,
+    /// Branch where the request turn executed.
+    pub branch: BranchId,
     /// Turn that executed the request (if immediately processed).
     pub queued_turn: Option<TurnId>,
 }
@@ -295,12 +304,15 @@ pub fn invoke_claude_agent(
         ],
     );
 
+    let branch = control.runtime().current_branch().clone();
     let turn_id = control.send_message(handle.actor.clone(), handle.facet.clone(), message)?;
 
     Ok(AgentInvocation {
         prompt: prompt.to_string(),
         agent: handle.kind.clone(),
         request_id,
+        actor: handle.actor.clone(),
+        branch,
         queued_turn: Some(turn_id),
     })
 }
@@ -407,7 +419,9 @@ fn agent_handle(control: &Control, kind: &str) -> Option<AgentHandle> {
     })
 }
 
-fn parse_agent_response(value: &preserves::IOValue) -> Option<AgentResponse> {
+/// Attempt to interpret a preserves value as an agent response record.
+/// Attempt to interpret a preserves payload as an agent response.
+pub fn parse_agent_response(value: &preserves::IOValue) -> Option<AgentResponse> {
     if !value.is_record() {
         return None;
     }
@@ -434,11 +448,22 @@ fn parse_agent_response(value: &preserves::IOValue) -> Option<AgentResponse> {
         .map(|sym| sym.as_ref().to_string())
         .unwrap_or_default();
 
+    let timestamp = if value.len() > 4 {
+        value
+            .index(4)
+            .as_string()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s.as_ref()).ok())
+            .map(|dt| dt.with_timezone(&Utc))
+    } else {
+        None
+    };
+
     Some(AgentResponse {
         request_id,
         prompt,
         response,
         agent: agent_kind,
+        timestamp,
     })
 }
 
@@ -562,9 +587,9 @@ mod tests {
         register_codebase_entities();
         register_codebase_entities();
 
-        let registry = EntityRegistry::global();
-        assert!(registry.has_type("echo"));
-        assert!(registry.has_type("counter"));
-        assert!(registry.has_type("workspace"));
+        let snapshot = EntityCatalog::global().snapshot();
+        assert!(snapshot.has_type("echo"));
+        assert!(snapshot.has_type("counter"));
+        assert!(snapshot.has_type("workspace"));
     }
 }

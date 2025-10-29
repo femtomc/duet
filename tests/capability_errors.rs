@@ -6,7 +6,7 @@
 
 use duet::runtime::actor::{Activation, CapabilitySpec, Entity};
 use duet::runtime::error::{CapabilityError, RuntimeError};
-use duet::runtime::registry::EntityRegistry;
+use duet::runtime::registry::EntityCatalog;
 use duet::runtime::state::CapabilityTarget;
 use duet::runtime::turn::{ActorId, FacetId};
 use duet::runtime::{Control, RuntimeConfig};
@@ -18,7 +18,7 @@ use uuid::Uuid;
 
 /// Register the test entity exactly once for all tests.
 static REGISTER_ENTITY: Lazy<()> = Lazy::new(|| {
-    EntityRegistry::global().register("cap-error-harness", |_config| {
+    EntityCatalog::global().register("cap-error-harness", |_config| {
         Ok(Box::new(CapabilityHarness::default()))
     });
 });

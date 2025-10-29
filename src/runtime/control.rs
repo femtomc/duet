@@ -10,7 +10,8 @@ use uuid::Uuid;
 
 use super::actor::Actor;
 use super::error::Result;
-use super::state::{CapId, CapabilityStatus, CapabilityTarget};
+use super::reaction::{ReactionDefinition, ReactionId, ReactionInfo};
+use super::state::{CapId, CapabilityStatus, CapabilityTarget, FacetMetadata, FacetStatus};
 use super::turn::{ActorId, BranchId, FacetId, TurnId, TurnOutput, TurnRecord};
 use super::{Runtime, RuntimeConfig};
 
@@ -157,10 +158,12 @@ impl Control {
         entity_type: String,
         config: preserves::IOValue,
     ) -> Result<Uuid> {
-        use super::registry::{EntityMetadata, EntityRegistry};
+        use super::registry::EntityMetadata;
 
-        // Create the entity instance using the global registry
-        let entity = EntityRegistry::global()
+        // Create the entity instance using the runtime registry snapshot
+        let entity = self
+            .runtime
+            .entity_registry()
             .create(&entity_type, &config)
             .map_err(|e| super::error::RuntimeError::Actor(e))?;
 
@@ -188,6 +191,19 @@ impl Control {
             .or_insert_with(|| Actor::new(actor.clone()));
 
         actor_obj.attach_entity(entity_id, entity_type, facet.clone(), entity);
+
+        {
+            let mut facets = actor_obj.facets.write();
+            facets
+                .facets
+                .entry(facet.clone())
+                .or_insert_with(|| FacetMetadata {
+                    id: facet.clone(),
+                    parent: Some(actor_obj.root_facet.clone()),
+                    status: FacetStatus::Alive,
+                    actor: actor.clone(),
+                });
+        }
 
         // Persist entity metadata
         self.runtime.persist_entities()?;
@@ -311,6 +327,25 @@ impl Control {
             .collect()
     }
 
+    /// Register a reaction definition for an actor.
+    pub fn register_reaction(
+        &mut self,
+        actor: ActorId,
+        definition: ReactionDefinition,
+    ) -> Result<ReactionId> {
+        self.runtime.register_reaction(actor, definition)
+    }
+
+    /// Remove a previously registered reaction.
+    pub fn unregister_reaction(&mut self, reaction_id: ReactionId) -> Result<bool> {
+        self.runtime.unregister_reaction(reaction_id)
+    }
+
+    /// List all stored reactions.
+    pub fn list_reactions(&self) -> Vec<ReactionInfo> {
+        self.runtime.list_reactions()
+    }
+
     /// List capabilities for all actors
     pub fn list_capabilities(&self) -> Vec<CapabilityInfo> {
         let mut results = Vec::new();
@@ -399,6 +434,16 @@ impl Control {
         payload: preserves::IOValue,
     ) -> Result<preserves::IOValue> {
         self.runtime.invoke_capability(cap_id, payload)
+    }
+
+    /// Wait for a branch head to advance beyond a target turn or until timeout.
+    pub fn wait_for_turn_after(
+        &self,
+        branch: &BranchId,
+        since: Option<&TurnId>,
+        timeout: Duration,
+    ) -> Result<Option<TurnId>> {
+        self.runtime.wait_for_turn_after(branch, since, timeout)
     }
 
     /// Drain any queued turns (including async completions) until the scheduler is idle.
@@ -1042,7 +1087,7 @@ mod tests {
     #[test]
     fn test_entity_registration() {
         use super::super::actor::Activation;
-        use super::super::registry::EntityRegistry;
+        use super::super::registry::EntityCatalog;
 
         struct TestEntity;
 
@@ -1065,7 +1110,7 @@ mod tests {
         };
 
         // Register the entity type in the global registry
-        EntityRegistry::global().register("test-entity", |_config| Ok(Box::new(TestEntity)));
+        EntityCatalog::global().register("test-entity", |_config| Ok(Box::new(TestEntity)));
 
         let mut control = Control::init(config).unwrap();
 

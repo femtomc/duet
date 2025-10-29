@@ -16,7 +16,7 @@ use walkdir::WalkDir;
 
 use crate::runtime::actor::{Activation, CapabilitySpec, Entity};
 use crate::runtime::error::{ActorError, ActorResult};
-use crate::runtime::registry::EntityRegistry;
+use crate::runtime::registry::EntityCatalog;
 use crate::runtime::turn::{FacetId, Handle};
 
 use crate::runtime::state::{CapabilityMetadata, CapabilityTarget};
@@ -443,8 +443,8 @@ impl Entity for WorkspaceCatalog {
 }
 
 /// Register the workspace catalog entity with the global registry.
-pub fn register(registry: &EntityRegistry) {
-    registry.register("workspace", |config| {
+pub fn register(catalog: &EntityCatalog) {
+    catalog.register("workspace", |config| {
         let cfg = WorkspaceConfig::from_value(config);
         Ok(Box::new(WorkspaceCatalog::new(&cfg)))
     });
@@ -469,7 +469,7 @@ mod tests {
         let catalog = WorkspaceCatalog::new(&config);
 
         let actor = Actor::new(ActorId::new());
-        let mut activation = Activation::new(actor.id.clone(), actor.root_facet.clone());
+        let mut activation = Activation::new(actor.id.clone(), actor.root_facet.clone(), None);
 
         catalog.rescan(&mut activation).unwrap();
 
@@ -492,7 +492,7 @@ mod tests {
 
         let actor = Actor::new(ActorId::new());
         let facet = actor.root_facet.clone();
-        let mut activation = Activation::new(actor.id.clone(), facet.clone());
+        let mut activation = Activation::new(actor.id.clone(), facet.clone(), None);
         activation.set_current_entity(Some(uuid::Uuid::new_v4()));
 
         let payload = preserves::IOValue::record(

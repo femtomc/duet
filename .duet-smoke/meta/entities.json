@@ -1,0 +1,24 @@
+{
+  "943223f2-1fd0-47f6-b35b-807e4a4da507": {
+    "id": "943223f2-1fd0-47f6-b35b-807e4a4da507",
+    "actor": "eb5a76a8-77cd-4af9-8db1-15309b3f5f98",
+    "facet": "d9f08f85-20d5-4dd3-9550-3e0bc22bea70",
+    "entity_type": "workspace",
+    "config": "\".duet-smoke\"",
+    "patterns": []
+  },
+  "a90fee2b-c531-45d0-8532-4925a40c77f1": {
+    "id": "a90fee2b-c531-45d0-8532-4925a40c77f1",
+    "actor": "ff82f117-58dc-42f6-9363-dbc7447d6ebe",
+    "facet": "b730901e-1197-4ed5-a8fb-550262fd7a32",
+    "entity_type": "agent-claude-code",
+    "config": "default",
+    "patterns": [
+      {
+        "id": "d32c8f1d-a04c-4e6d-b22a-d19a9020941c",
+        "pattern": "<agent-request '<_>' '<_>'>",
+        "facet": "b730901e-1197-4ed5-a8fb-550262fd7a32"
+      }
+    ]
+  }
+}

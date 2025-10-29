@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import rich_click as click  # Must be imported before typer to patch Click
 import typer
-from rich.console import Console
+from rich.console import Console, Group
 from rich.json import JSON
 from rich.panel import Panel
 from rich.table import Table
@@ -51,6 +51,16 @@ agent_app = typer.Typer(
     add_completion=False,
     rich_markup_mode="rich",
 )
+reaction_app = typer.Typer(
+    help="Reactive automations",
+    add_completion=False,
+    rich_markup_mode="rich",
+)
+transcript_app = typer.Typer(
+    help="Agent transcripts",
+    add_completion=False,
+    rich_markup_mode="rich",
+)
 dataspace_app = typer.Typer(
     help="Dataspace inspection",
     add_completion=False,
@@ -63,6 +73,8 @@ daemon_app = typer.Typer(
 )
 app.add_typer(workspace_app, name="workspace", rich_help_panel="Workspace")
 app.add_typer(agent_app, name="agent", rich_help_panel="Agents")
+app.add_typer(reaction_app, name="reaction", rich_help_panel="Runtime")
+app.add_typer(transcript_app, name="transcript", rich_help_panel="Agents")
 app.add_typer(dataspace_app, name="dataspace", rich_help_panel="Dataspace")
 app.add_typer(daemon_app, name="daemon", rich_help_panel="Runtime")
 
@@ -421,13 +433,199 @@ def agent_invoke(
 def agent_responses(
     ctx: typer.Context,
     request_id: Optional[str] = typer.Option(None, help="Filter responses by request id."),
+    wait: float = typer.Option(0.0, help="Time (seconds) to wait for new responses.", min=0.0),
+    limit: Optional[int] = typer.Option(None, help="Maximum number of responses to return.", min=1),
 ) -> None:
     """List cached agent responses."""
 
     params: Dict[str, Any] = {}
     if request_id:
         params["request_id"] = request_id
+    if wait > 0:
+        params["wait_ms"] = int(wait * 1000)
+    if limit is not None:
+        params["limit"] = limit
     _run(_run_call(ctx.obj, "agent_responses", params, "agent:responses"))
+
+
+@agent_app.command("chat")
+def agent_chat(
+    ctx: typer.Context,
+    prompt: Optional[str] = typer.Argument(None, help="Prompt to send to the agent."),
+    wait_for_response: bool = typer.Option(
+        False,
+        "--wait-for-response",
+        help="Block until at least one response is recorded.",
+    ),
+    wait: float = typer.Option(
+        0.0,
+        help="Extra time (seconds) to wait after the first response is observed (requires --wait-for-response).",
+        min=0.0,
+    ),
+    resume_request_id: Optional[str] = typer.Option(
+        None,
+        "--resume",
+        help="Request ID whose transcript should be prepended as conversation context.",
+    ),
+    history_limit: int = typer.Option(
+        10,
+        "--history-limit",
+        help="Maximum transcript entries to include when using --resume.",
+        min=1,
+        show_default=True,
+    ),
+) -> None:
+    """Send a prompt to the agent. Combine with --wait-for-response to block for results."""
+
+    message = prompt or typer.prompt("Prompt")
+    _run(
+        _run_agent_chat(
+            ctx.obj,
+            message,
+            wait_for_response,
+            wait,
+            resume_request_id,
+            history_limit,
+        )
+    )
+
+
+@reaction_app.command("register")
+def reaction_register(
+    ctx: typer.Context,
+    actor: str = typer.Option(..., help="Actor UUID that owns the reaction."),
+    facet: str = typer.Option(..., help="Facet UUID used for the pattern scope."),
+    pattern: str = typer.Option(..., help="Preserves pattern expression."),
+    effect: str = typer.Option(
+        "assert",
+        help="Reaction effect type.",
+        case_sensitive=False,
+        show_default=True,
+    ),
+    value: Optional[str] = typer.Option(None, help="Preserves value to assert (for assert effect)."),
+    value_from_match: bool = typer.Option(
+        False,
+        help="Use the entire matched value as the asserted value (assert effect).",
+    ),
+    value_match_index: Optional[int] = typer.Option(
+        None,
+        help="Use the Nth element from the matched record/sequence as the asserted value.",
+        min=0,
+    ),
+    target_facet: Optional[str] = typer.Option(None, help="Override facet for asserted value."),
+    target_actor: Optional[str] = typer.Option(None, help="Target actor for send-message effect."),
+    target_facet_msg: Optional[str] = typer.Option(None, help="Target facet for send-message effect."),
+    payload: Optional[str] = typer.Option(None, help="Preserves payload for send-message effect."),
+    payload_from_match: bool = typer.Option(
+        False,
+        help="Use the entire matched value as the message payload (send-message effect).",
+    ),
+    payload_match_index: Optional[int] = typer.Option(
+        None,
+        help="Use the Nth element from the matched value as the message payload.",
+        min=0,
+    ),
+) -> None:
+    """Register a new reaction."""
+
+    effect_key = effect.lower()
+    if effect_key == "assert":
+        if sum(
+            [
+                1 if value is not None else 0,
+                1 if value_from_match else 0,
+                1 if value_match_index is not None else 0,
+            ]
+        ) > 1:
+            raise typer.BadParameter(
+                "Use only one of --value, --value-from-match, or --value-match-index",
+                param_hint="value",
+            )
+        if value_match_index is not None:
+            value_spec: Dict[str, Any] = {
+                "type": "match-index",
+                "index": value_match_index,
+            }
+        elif value_from_match:
+            value_spec: Dict[str, Any] = {"type": "match"}
+        else:
+            if value is None:
+                raise typer.BadParameter(
+                    "--value is required unless --value-from-match or --value-match-index is provided",
+                    param_hint="value",
+                )
+            value_spec = {"type": "literal", "value": value}
+
+        effect_payload = {"type": "assert", "value": value_spec}
+        if target_facet:
+            effect_payload["target_facet"] = target_facet
+    elif effect_key in {"send-message", "send_message"}:
+        if target_actor is None or target_facet_msg is None:
+            raise typer.BadParameter(
+                "--target-actor and --target-facet-msg are required for send-message effect",
+                param_hint="effect",
+            )
+        if sum(
+            [
+                1 if payload is not None else 0,
+                1 if payload_from_match else 0,
+                1 if payload_match_index is not None else 0,
+            ]
+        ) > 1:
+            raise typer.BadParameter(
+                "Use only one of --payload, --payload-from-match, or --payload-match-index",
+                param_hint="payload",
+            )
+        if payload_match_index is not None:
+            payload_spec = {
+                "type": "match-index",
+                "index": payload_match_index,
+            }
+        elif payload_from_match:
+            payload_spec = {"type": "match"}
+        else:
+            if payload is None:
+                raise typer.BadParameter(
+                    "--payload is required unless --payload-from-match or --payload-match-index is provided",
+                    param_hint="payload",
+                )
+            payload_spec = {"type": "literal", "value": payload}
+
+        effect_payload = {
+            "type": "send-message",
+            "actor": target_actor,
+            "facet": target_facet_msg,
+            "payload": payload_spec,
+        }
+    else:
+        raise typer.BadParameter(f"Unsupported effect type: {effect}", param_hint="effect")
+
+    params = {
+        "actor": actor,
+        "facet": facet,
+        "pattern": pattern,
+        "effect": effect_payload,
+    }
+
+    _run(_run_call(ctx.obj, "reaction_register", params, "reaction:register"))
+
+
+@reaction_app.command("unregister")
+def reaction_unregister(
+    ctx: typer.Context,
+    reaction_id: str = typer.Argument(..., help="Reaction identifier to remove."),
+) -> None:
+    """Unregister a reaction."""
+
+    params = {"reaction_id": reaction_id}
+    _run(_run_call(ctx.obj, "reaction_unregister", params, "reaction:unregister"))
+
+
+@reaction_app.command("list")
+def reaction_list(ctx: typer.Context) -> None:
+    """List registered reactions."""
+
+    _run(_run_call(ctx.obj, "reaction_list", {}, "reaction:list"))
 
 
 @dataspace_app.command("assertions")
@@ -627,11 +825,151 @@ async def _run_call(state: CLIState, rpc_command: str, params: Dict[str, Any], p
         await client.close()
 
 
+async def _run_agent_chat(
+    state: CLIState,
+    prompt: str,
+    wait_for_response: bool,
+    extra_wait: float,
+    resume_request_id: Optional[str],
+    history_limit: int,
+) -> None:
+    client = await _connect_client(state)
+    try:
+        final_prompt = prompt
+        if resume_request_id:
+            final_prompt = await _augment_prompt_with_history(
+                client, prompt, resume_request_id, history_limit
+            )
+
+        invoke_result = await client.call("agent_invoke", {"prompt": final_prompt})
+        _print_result(invoke_result, "agent:invoke")
+
+        request_id = None
+        if isinstance(invoke_result, dict):
+            request_id = invoke_result.get("request_id")
+        if not request_id:
+            return
+
+        if not wait_for_response:
+            if extra_wait > 0:
+                console.print(
+                    "[yellow]Ignoring --wait value because --wait-for-response was not supplied.[/yellow]"
+                )
+            console.print(
+                f"[dim]Request {request_id} dispatched. Retrieve results with "
+                f"`duet agent responses --request-id {request_id}` or transcript commands as needed.[/dim]"
+            )
+            return
+
+        params: Dict[str, Any] = {"request_id": request_id}
+
+        while True:
+            responses = await client.call("agent_responses", params)
+            if isinstance(responses, dict):
+                entries = responses.get("responses")
+                if isinstance(entries, list) and entries:
+                    _print_result(responses, "agent:responses")
+                    break
+            await asyncio.sleep(0.1)
+
+        if extra_wait > 0:
+            params["wait_ms"] = int(extra_wait * 1000)
+            follow_up = await client.call("agent_responses", params)
+            _print_result(follow_up, "agent:responses")
+    finally:
+        await client.close()
+
+
+async def _augment_prompt_with_history(
+    client: ControlClient, prompt: str, resume_request_id: str, history_limit: int
+) -> str:
+    params = {"request_id": resume_request_id, "limit": history_limit}
+    try:
+        transcript = await client.call("transcript_show", params)
+    except ProtocolError as exc:
+        console.print(
+            Panel(
+                f"[bold red]Failed to fetch transcript for {resume_request_id}[/bold red]\n\n{exc}",
+                border_style="red",
+            )
+        )
+        return prompt
+
+    if not isinstance(transcript, dict):
+        console.print(
+            Panel(
+                f"[yellow]Unexpected transcript payload for {resume_request_id}; proceeding without context.[/yellow]",
+                border_style="yellow",
+            )
+        )
+        return prompt
+
+    entries = transcript.get("entries") or []
+    if not entries:
+        console.print(
+            Panel(
+                f"[yellow]No transcript entries found for {resume_request_id}; proceeding without context.[/yellow]",
+                border_style="yellow",
+            )
+        )
+        return prompt
+
+    history_lines: List[str] = []
+    for entry in entries[-history_limit:]:
+        prior_prompt = entry.get("prompt")
+        prior_response = entry.get("response")
+        if prior_prompt:
+            history_lines.append(f"User: {prior_prompt}")
+        if prior_response:
+            history_lines.append(f"Assistant: {prior_response}")
+
+    history_text = "\n\n".join(history_lines).strip()
+    if not history_text:
+        console.print(
+            Panel(
+                f"[yellow]Transcript for {resume_request_id} contained no usable text; proceeding without context.[/yellow]",
+                border_style="yellow",
+            )
+        )
+        return prompt
+
+    included = len(entries[-history_limit:])
+    console.print(
+        Panel(
+            f"[bold]Resuming conversation[/bold]\nRequest: {resume_request_id}\nEntries included: {included}",
+            border_style="blue",
+        )
+    )
+
+    combined_prompt = f"{history_text}\n\nUser: {prompt}"
+    if len(combined_prompt) > 16000:
+        console.print(
+            Panel(
+                "[yellow]Combined prompt exceeds 16k characters; Claude may truncate context.[/yellow]",
+                border_style="yellow",
+            )
+        )
+    return combined_prompt
+
+
 async def _connect_client(state: CLIState) -> ControlClient:
-    cmd = list(_codebased_command(state))
-    if state.root:
-        cmd.extend(["--root", str(state.root)])
-    client = ControlClient(tuple(cmd))
+    root = _resolve_root_path(state.root)
+    daemon_state = _load_daemon_state(root)
+    runtime_addr: Optional[Tuple[str, int]] = None
+
+    if daemon_state:
+        if _is_process_alive(daemon_state.pid) and _ping_daemon(daemon_state.host, daemon_state.port):
+            runtime_addr = (daemon_state.host, daemon_state.port)
+        else:
+            _clear_daemon_state(root)
+
+    if runtime_addr:
+        client = ControlClient(runtime_addr=runtime_addr)
+    else:
+        cmd = list(_codebased_command(state))
+        if state.root:
+            cmd.extend(["--root", str(state.root)])
+        client = ControlClient(tuple(cmd))
     await client.connect()
     return client
 
@@ -663,6 +1001,100 @@ async def _run_dataspace_tail(state: CLIState, params: Dict[str, Any], follow: b
                 continue
     finally:
         await client.close()
+
+
+async def _run_transcript_tail(state: CLIState, params: Dict[str, Any], follow: bool, interval: float) -> None:
+    base_params = params.copy()
+    cursor = base_params.pop("since", None)
+    client = await _connect_client(state)
+    wait_ms = max(int(interval * 1000), 0)
+    try:
+        while True:
+            query = base_params.copy()
+            if cursor:
+                query["since"] = cursor
+            if follow and wait_ms > 0:
+                query["wait_ms"] = wait_ms
+
+            result = await client.call("transcript_tail", query)
+            _print_result(result, "transcript:tail")
+
+            if not isinstance(result, dict):
+                break
+
+            cursor = result.get("next_cursor") or cursor
+            events = result.get("events") or []
+
+            if not follow:
+                break
+
+            if not events:
+                continue
+    finally:
+        await client.close()
+
+
+async def _run_transcript_export(
+    state: CLIState,
+    request_id: str,
+    branch: Optional[str],
+    limit: int,
+    destination: Optional[Path],
+) -> None:
+    client = await _connect_client(state)
+    try:
+        params: Dict[str, Any] = {"request_id": request_id, "limit": limit}
+        if branch:
+            params["branch"] = branch
+        result = await client.call("transcript_show", params)
+    finally:
+        await client.close()
+
+    if not isinstance(result, dict):
+        console.print(JSON.from_data(result))
+        return
+
+    entries = result.get("entries") or []
+    branch = branch or result.get("branch", "main")
+    header = f"Transcript for {request_id} (branch {branch})"
+
+    if not entries:
+        content = header + "\n\n[No transcript entries recorded]"
+    else:
+        lines: List[str] = [header, ""]
+        for idx, entry in enumerate(entries[-limit:], start=1):
+            timestamp = entry.get("timestamp")
+            agent = entry.get("agent", "agent")
+            if timestamp:
+                lines.append(f"[{idx}] {timestamp} — {agent}")
+            else:
+                lines.append(f"[{idx}] {agent}")
+
+            prompt = entry.get("prompt", "")
+            response = entry.get("response", "")
+            if prompt:
+                lines.append(f"User: {prompt}")
+            if response:
+                lines.append(f"Assistant: {response}")
+            lines.append("")
+        content = "\n".join(lines).rstrip()
+
+    if destination:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(content, encoding="utf-8")
+        console.print(
+            Panel(
+                f"[green]Transcript exported to[/green] {destination}",
+                border_style="green",
+            )
+        )
+    else:
+        console.print(
+            Panel(
+                content,
+                border_style="blue",
+            )
+        )
 
 
 def _codebased_command(state: CLIState) -> Tuple[str, ...]:
@@ -849,12 +1281,17 @@ def _print_agent_invoke(result: Any) -> None:
     request_id = result.get("request_id", "")
     prompt = result.get("prompt", "")
     agent = result.get("agent", "agent")
-    queued_turn = result.get("queued_turn", "pending")
+    queued_turn_value = result.get("queued_turn")
+    queued_turn = queued_turn_value if queued_turn_value else "pending"
+    branch = result.get("branch", "main")
+    actor = result.get("actor", "")
 
     body_lines = [
         f"[bold]Prompt[/bold]\n{prompt}",
         "",
-        f"[bold]Queued Turn[/bold] {queued_turn or 'pending'}",
+        f"[bold]Branch[/bold] {branch}",
+        f"[bold]Actor[/bold] {actor}",
+        f"[bold]Queued Turn[/bold] {queued_turn}",
         "[dim]Run `duet agent responses` to inspect replies.[/dim]",
     ]
 
@@ -877,21 +1314,32 @@ def _print_agent_responses(result: Any) -> None:
         console.print("[yellow]No agent responses[/yellow]")
         return
 
-    table = Table(title="Agent Responses", border_style="blue")
-    table.add_column("Request ID", style="cyan", no_wrap=True)
-    table.add_column("Agent", style="magenta")
-    table.add_column("Prompt", style="white")
-    table.add_column("Response", style="green")
-
+    panels = []
     for entry in responses:
-        table.add_row(
-            str(entry.get("request_id", ""))[:12] + "...",
-            entry.get("agent", ""),
-            entry.get("prompt", ""),
-            entry.get("response", ""),
+        request_id = entry.get("request_id", "")
+        agent = entry.get("agent", "agent")
+        prompt = entry.get("prompt", "")
+        response = entry.get("response", "")
+        timestamp = entry.get("timestamp")
+
+        sections = [
+            f"[bold]Agent[/bold] {agent}",
+            f"[bold]Request[/bold] {request_id}",
+        ]
+        if timestamp:
+            sections.append(f"[bold]Timestamp[/bold] {timestamp}")
+        sections.append(f"[bold]Prompt[/bold]\n{prompt or '[dim]—[/dim]'}")
+        sections.append(f"[bold]Response[/bold]\n{response or '[dim]—[/dim]'}")
+
+        panels.append(
+            Panel(
+                "\n\n".join(sections),
+                title="Agent Response",
+                border_style="blue",
+            )
         )
 
-    console.print(table)
+    console.print(Group(*panels) if len(panels) > 1 else panels[0])
 
 
 def _print_dataspace_assertions(result: Any) -> None:
@@ -904,18 +1352,28 @@ def _print_dataspace_assertions(result: Any) -> None:
         console.print("[yellow]No assertions matched the filters[/yellow]")
         return
 
-    table = Table(title="Dataspace Assertions", border_style="cyan")
-    table.add_column("Actor", style="magenta", no_wrap=True)
-    table.add_column("Handle", style="cyan", no_wrap=True)
-    table.add_column("Value", style="white")
-
+    panels = []
     for entry in assertions:
-        actor = _format_uuidish(entry.get("actor", ""))
-        handle = _format_uuidish(entry.get("handle", ""))
-        value = _summarize_value(entry.get("value"))
-        table.add_row(actor, handle, value)
+        actor = entry.get("actor", "")
+        handle = entry.get("handle", "")
+        value = entry.get("value")
 
-    console.print(table)
+        sections = [
+            f"[bold]Actor[/bold] {actor}",
+            f"[bold]Handle[/bold] {handle}",
+        ]
+        sections.append(
+            "[bold]Value[/bold]\n" + _summarize_value(value, max_length=200)
+        )
+
+        panels.append(
+            Panel(
+                "\n\n".join(sections),
+                border_style="cyan",
+            )
+        )
+
+    console.print(Group(*panels) if len(panels) > 1 else panels[0])
 
 
 def _print_dataspace_events(result: Any) -> None:
@@ -926,28 +1384,149 @@ def _print_dataspace_events(result: Any) -> None:
     batches = result["events"]
     if not batches:
         console.print("[dim]No new events[/dim]")
+        return
+
+    panels = []
     for batch in batches:
         turn_id = batch.get("turn_id", "")
-        actor = _format_uuidish(batch.get("actor", ""))
-        clock = batch.get("clock", 0)
-        timestamp = batch.get("timestamp", "")
+        actor = batch.get("actor", "")
+        clock = batch.get("clock")
+        timestamp = batch.get("timestamp")
 
-        table = Table(
-            title=f"Turn {turn_id}",
-            caption=f"Actor {actor} | Clock {clock} | {timestamp}",
-            border_style="cyan",
-        )
-        table.add_column("Action", style="magenta")
-        table.add_column("Handle", style="cyan", no_wrap=True)
-        table.add_column("Value", style="white")
+        sections = [
+            f"[bold]Turn[/bold] {turn_id}",
+            f"[bold]Actor[/bold] {actor}",
+        ]
+        if clock is not None:
+            sections.append(f"[bold]Clock[/bold] {clock}")
+        if timestamp:
+            sections.append(f"[bold]Timestamp[/bold] {timestamp}")
 
+        event_lines: List[str] = []
         for event in batch.get("events", []):
-            action = event.get("action", "")
-            handle = _format_uuidish(event.get("handle", ""))
-            value = _summarize_value(event.get("value"))
-            table.add_row(str(action), handle, value)
+            action = (event.get("action") or "").upper()
+            handle = event.get("handle", "")
+            value = event.get("value")
+            rendered = f"[bold]{action}[/bold] {handle}"
+            if value:
+                rendered += f"\n{_summarize_value(value, max_length=200)}"
+            event_lines.append(rendered)
 
-        console.print(table)
+        if event_lines:
+            sections.append("[bold]Events[/bold]\n" + "\n\n".join(event_lines))
+
+        panels.append(
+            Panel(
+                "\n\n".join(sections),
+                border_style="cyan",
+            )
+        )
+
+    console.print(Group(*panels) if len(panels) > 1 else panels[0])
+
+
+def _print_transcript_show(result: Any) -> None:
+    if not isinstance(result, dict) or "entries" not in result:
+        console.print(JSON.from_data(result))
+        return
+
+    entries = result["entries"]
+    if not entries:
+        console.print("[yellow]No transcript data[/yellow]")
+        return
+
+    request_id = result.get("request_id")
+    branch = result.get("branch")
+    header_lines = []
+    if request_id:
+        header_lines.append(f"[bold]Request[/bold] {request_id}")
+    if branch:
+        header_lines.append(f"[bold]Branch[/bold] {branch}")
+    if header_lines:
+        console.print(
+            Panel(
+                "\n".join(header_lines),
+                title="Transcript",
+                border_style="blue",
+            )
+        )
+
+    panels = []
+    for entry in entries:
+        agent = entry.get("agent", "agent")
+        actor = entry.get("actor", "")
+        handle = entry.get("handle", "")
+        timestamp = entry.get("timestamp")
+        prompt = entry.get("prompt", "")
+        response = entry.get("response", "")
+
+        sections = [
+            f"[bold]Agent[/bold] {agent}",
+            f"[bold]Actor[/bold] {actor}",
+        ]
+        if handle:
+            sections.append(f"[bold]Handle[/bold] {handle}")
+        if timestamp:
+            sections.append(f"[bold]Timestamp[/bold] {timestamp}")
+        sections.append(f"[bold]Prompt[/bold]\n{prompt or '[dim]—[/dim]'}")
+        sections.append(f"[bold]Response[/bold]\n{response or '[dim]—[/dim]'}")
+
+        panels.append(
+            Panel(
+                "\n\n".join(sections),
+                border_style="blue",
+            )
+        )
+
+    console.print(Group(*panels) if len(panels) > 1 else panels[0])
+
+
+def _print_transcript_tail(result: Any) -> None:
+    if not isinstance(result, dict):
+        console.print(JSON.from_data(result))
+        return
+
+    events = result.get("events", [])
+    if not events:
+        console.print("[yellow]No new events[/yellow]")
+        return
+    panels = []
+    for batch in events:
+        turn_id = batch.get("turn", "")
+        actor = batch.get("actor", "")
+        clock = batch.get("clock")
+        timestamp = batch.get("timestamp")
+
+        sections = [
+            f"[bold]Turn[/bold] {turn_id}",
+            f"[bold]Actor[/bold] {actor}",
+        ]
+        if clock is not None:
+            sections.append(f"[bold]Clock[/bold] {clock}")
+        if timestamp:
+            sections.append(f"[bold]Timestamp[/bold] {timestamp}")
+
+        event_lines: List[str] = []
+        for event in batch.get("events", []):
+            action = (event.get("action") or "").upper()
+            handle = event.get("handle", "")
+            value = event.get("value", "")
+            line = f"[bold]{action}[/bold] {handle}"
+            if value:
+                line += f"\n{value}"
+            event_lines.append(line)
+
+        if event_lines:
+            sections.append("[bold]Events[/bold]\n" + "\n\n".join(event_lines))
+
+        panels.append(
+            Panel(
+                "\n\n".join(sections),
+                border_style="blue",
+            )
+        )
+
+    console.print(Group(*panels) if len(panels) > 1 else panels[0])
 
     next_cursor = result.get("next_cursor")
     has_more = result.get("has_more")
@@ -959,6 +1538,139 @@ def _print_dataspace_events(result: Any) -> None:
             footer += " | more events available"
         footer += "[/dim]"
         console.print(footer)
+
+
+def _print_reaction_register(result: Any) -> None:
+    if isinstance(result, dict) and "reaction_id" in result:
+        reaction_id = result.get("reaction_id", "")
+        console.print(
+            Panel(
+                f"[bold green]Reaction registered[/bold green]\nID: {reaction_id}",
+                border_style="green",
+            )
+        )
+    else:
+        console.print(JSON.from_data(result))
+
+
+def _print_reaction_unregister(result: Any) -> None:
+    if isinstance(result, dict) and "removed" in result:
+        removed = result.get("removed")
+        message = "Removed" if removed else "Nothing to remove"
+        console.print(
+            Panel(
+                f"[bold]Reaction unregister[/bold]\n{message}",
+                border_style="yellow" if not removed else "green",
+            )
+        )
+    else:
+        console.print(JSON.from_data(result))
+
+
+def _print_reaction_list(result: Any) -> None:
+    if not isinstance(result, dict) or "reactions" not in result:
+        console.print(JSON.from_data(result))
+        return
+
+    reactions = result.get("reactions", [])
+    if not reactions:
+        console.print("[yellow]No reactions registered[/yellow]")
+        return
+
+    panels = []
+    for entry in reactions:
+        reaction_id = entry.get("reaction_id", "")
+        actor = entry.get("actor", "")
+        definition = entry.get("definition", {})
+        pattern = definition.get("pattern", {})
+        effect = definition.get("effect", {})
+
+        pattern_expr = pattern.get("pattern", "")
+        pattern_facet = pattern.get("facet", "")
+
+        sections = [
+            f"[bold]Reaction[/bold] {reaction_id}",
+            f"[bold]Actor[/bold] {actor}",
+            f"[bold]Pattern Facet[/bold] {pattern_facet}",
+            f"[bold]Pattern[/bold]\n{pattern_expr}",
+        ]
+
+        effect_type = effect.get("type") if isinstance(effect, dict) else None
+        if effect_type == "assert":
+            value_info = effect.get("value", {})
+            if isinstance(value_info, dict):
+                value_type = value_info.get("type")
+                if value_type == "literal":
+                    sections.append(
+                        "[bold]Effect[/bold]\nAssert literal: {}".format(
+                            value_info.get("value", "")
+                        )
+                    )
+                elif value_type == "match":
+                    sections.append("[bold]Effect[/bold]\nAssert match value")
+                elif value_type == "match-index":
+                    sections.append(
+                        "[bold]Effect[/bold]\nAssert match index {}".format(
+                            value_info.get("index", "")
+                        )
+                    )
+                else:
+                    sections.append(
+                        "[bold]Effect[/bold]\n" + json.dumps(value_info, indent=2)
+                    )
+            if effect.get("target_facet"):
+                sections.append(
+                    f"[bold]Target Facet[/bold] {effect.get('target_facet')}"
+                )
+        elif effect_type == "send-message":
+            sections.append(
+                "[bold]Effect[/bold]\nSend message to actor {actor} facet {facet}".format(
+                    actor=effect.get("actor", ""),
+                    facet=effect.get("facet", ""),
+                )
+            )
+            payload_info = effect.get("payload", {})
+            if isinstance(payload_info, dict):
+                payload_type = payload_info.get("type")
+                if payload_type == "literal":
+                    sections.append(
+                        "[bold]Payload[/bold]\n{}".format(payload_info.get("value", ""))
+                    )
+                elif payload_type == "match":
+                    sections.append("[bold]Payload[/bold]\nMatch value")
+                elif payload_type == "match-index":
+                    sections.append(
+                        "[bold]Payload[/bold]\nMatch index {}".format(
+                            payload_info.get("index", "")
+                        )
+                    )
+                else:
+                    sections.append(
+                        "[bold]Payload[/bold]\n" + json.dumps(payload_info, indent=2)
+                    )
+            else:
+                sections.append(f"[bold]Payload[/bold]\n{payload_info}")
+        else:
+            sections.append("[bold]Effect[/bold]\n" + json.dumps(effect, indent=2))
+
+        stats = entry.get("stats", {})
+        if isinstance(stats, dict):
+            trigger_count = stats.get("trigger_count", 0)
+            last_trigger = stats.get("last_trigger", "-")
+            last_error = stats.get("last_error")
+            sections.append(f"[bold]Triggers[/bold] {trigger_count}")
+            sections.append(f"[bold]Last Trigger[/bold] {last_trigger}")
+            if last_error:
+                sections.append(f"[bold]Last Error[/bold]\n{last_error}")
+
+        panels.append(
+            Panel(
+                "\n\n".join(sections),
+                border_style="blue",
+            )
+        )
+
+    console.print(Group(*panels) if len(panels) > 1 else panels[0])
 
 
 def _format_uuidish(value: Any, length: int = 12) -> str:
@@ -1054,6 +1766,16 @@ def _print_result(result: Any, command: str) -> None:
         _print_dataspace_assertions(result)
     elif command == "dataspace:events":
         _print_dataspace_events(result)
+    elif command == "transcript:show":
+        _print_transcript_show(result)
+    elif command == "transcript:tail":
+        _print_transcript_tail(result)
+    elif command == "reaction:register":
+        _print_reaction_register(result)
+    elif command == "reaction:unregister":
+        _print_reaction_unregister(result)
+    elif command == "reaction:list":
+        _print_reaction_list(result)
     else:
         console.print(JSON.from_data(result))
 
@@ -1095,6 +1817,70 @@ def _print_unexpected_error(exc: Exception) -> None:
             f"[bold]{exc}[/bold]\n\n[dim]{tb}[/dim]",
             title="[bold red]Unexpected Error[/bold red]",
             border_style="red",
+        )
+    )
+
+
+@transcript_app.command("show")
+def transcript_show(
+    ctx: typer.Context,
+    request_id: str = typer.Argument(..., help="Request identifier to inspect."),
+    branch: Optional[str] = typer.Option(None, help="Branch to query."),
+    limit: int = typer.Option(20, help="Maximum assertions to display."),
+) -> None:
+    """Show stored agent transcript data."""
+
+    params: Dict[str, Any] = {
+        "request_id": request_id,
+        "limit": limit,
+    }
+    if branch:
+        params["branch"] = branch
+
+    _run(_run_call(ctx.obj, "transcript_show", params, "transcript:show"))
+
+
+@transcript_app.command("tail")
+def transcript_tail(
+    ctx: typer.Context,
+    request_id: str = typer.Argument(..., help="Request identifier to follow."),
+    branch: str = typer.Option("main", help="Branch to follow."),
+    follow: bool = typer.Option(True, help="Continue polling for new events."),
+    interval: float = typer.Option(1.0, help="Polling interval when following.", min=0.1),
+    limit: int = typer.Option(10, help="Maximum turns to return per poll."),
+) -> None:
+    """Tail agent transcript events for a request."""
+
+    params: Dict[str, Any] = {
+        "branch": branch,
+        "request_id": request_id,
+        "limit": limit,
+    }
+    _run(_run_transcript_tail(ctx.obj, params, follow, interval))
+
+
+@transcript_app.command("export")
+def transcript_export(
+    ctx: typer.Context,
+    request_id: str = typer.Argument(..., help="Request identifier to export."),
+    branch: Optional[str] = typer.Option(None, help="Branch to query."),
+    limit: int = typer.Option(50, help="Maximum transcript entries to include.", min=1),
+    output: Optional[Path] = typer.Option(
+        None,
+        "--output",
+        "-o",
+        help="Write transcript to this file instead of stdout.",
+    ),
+) -> None:
+    """Export transcript history as plain text."""
+
+    _run(
+        _run_transcript_export(
+            ctx.obj,
+            request_id=request_id,
+            branch=branch,
+            limit=limit,
+            destination=output,
         )
     )
 

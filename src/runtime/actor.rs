@@ -10,10 +10,13 @@ use parking_lot::RwLock;
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::mpsc::Sender;
 use uuid::Uuid;
 
+use super::AsyncMessage;
 use super::error::{ActorError, ActorResult};
-use super::pattern::{Pattern, PatternEngine};
+use super::pattern::{Pattern, PatternEngine, PatternId, PatternMatch};
+use super::reaction::{ReactionDefinition, ReactionEffect, ReactionId, ReactionStats};
 use super::state::{
     AccountDelta, AssertionDelta, AssertionSet, CapId, CapabilityDelta, CapabilityMap,
     CapabilityMetadata, CapabilityStatus, CapabilityTarget, FacetDelta, FacetMap, FacetMetadata,
@@ -46,6 +49,20 @@ pub struct Actor {
 
     /// Pattern engine for subscriptions
     pub pattern_engine: Arc<RwLock<PatternEngine>>,
+
+    /// Registered reactions indexed by pattern identifier
+    reactions: Arc<RwLock<HashMap<PatternId, ReactionEntry>>>,
+
+    /// Lookup from reaction identifier to pattern identifier
+    reaction_index: Arc<RwLock<HashMap<ReactionId, PatternId>>>,
+}
+
+#[derive(Debug, Clone)]
+struct ReactionEntry {
+    reaction_id: ReactionId,
+    effect: ReactionEffect,
+    default_facet: FacetId,
+    stats: ReactionStats,
 }
 
 pub(crate) struct EntityEntry {
@@ -79,6 +96,8 @@ impl Actor {
             account: Arc::new(RwLock::new(PNCounter::new())),
             entities: Arc::new(RwLock::new(HashMap::new())),
             pattern_engine: Arc::new(RwLock::new(PatternEngine::new())),
+            reactions: Arc::new(RwLock::new(HashMap::new())),
+            reaction_index: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -125,6 +144,8 @@ impl Actor {
                     result?;
                 }
             }
+
+            self.trigger_reactions(activation, &pattern_match)?;
         }
 
         Ok(())
@@ -212,9 +233,14 @@ impl Actor {
     pub fn execute_turn(
         &self,
         inputs: Vec<TurnInput>,
+        async_sender: Option<&Sender<AsyncMessage>>,
     ) -> ActorResult<(Vec<TurnOutput>, StateDelta)> {
         // Create activation context
-        let mut activation = Activation::new(self.id.clone(), self.root_facet.clone());
+        let mut activation = Activation::new(
+            self.id.clone(),
+            self.root_facet.clone(),
+            async_sender.cloned(),
+        );
 
         // Process each input
         for input in inputs {
@@ -444,6 +470,116 @@ impl Actor {
         let mut engine = self.pattern_engine.write();
         engine.unregister(pattern_id);
     }
+
+    /// Register a reaction definition with this actor.
+    pub fn register_reaction(&self, definition: ReactionDefinition) -> ReactionId {
+        let ReactionDefinition {
+            id,
+            pattern,
+            effect,
+        } = definition;
+        let default_facet = pattern.facet.clone();
+        let pattern_id = self.register_pattern(pattern);
+
+        {
+            let mut reactions = self.reactions.write();
+            reactions.insert(
+            pattern_id,
+            ReactionEntry {
+                reaction_id: id,
+                effect,
+                default_facet,
+                stats: ReactionStats::default(),
+            },
+        );
+    }
+
+        self.reaction_index.write().insert(id, pattern_id);
+        id
+    }
+
+    /// Remove a previously registered reaction definition.
+    pub fn unregister_reaction(&self, reaction_id: ReactionId) {
+        if let Some(pattern_id) = self.reaction_index.write().remove(&reaction_id) {
+            self.reactions.write().remove(&pattern_id);
+            self.unregister_pattern(pattern_id);
+        }
+    }
+
+    /// Return a snapshot of runtime statistics for this actor's reactions.
+    pub fn reaction_stats_snapshot(&self) -> HashMap<ReactionId, ReactionStats> {
+        let reactions = self.reactions.read();
+        reactions
+            .values()
+            .map(|entry| (entry.reaction_id, entry.stats.clone()))
+            .collect()
+    }
+
+    fn trigger_reactions(
+        &self,
+        activation: &mut Activation,
+        pattern_match: &PatternMatch,
+    ) -> ActorResult<()> {
+        let reaction_data = {
+            let reactions = self.reactions.read();
+            reactions.get(&pattern_match.pattern_id).map(|entry| {
+                (
+                    entry.reaction_id,
+                    entry.effect.clone(),
+                    entry.default_facet.clone(),
+                )
+            })
+        };
+
+        if let Some((reaction_id, effect, default_facet)) = reaction_data {
+            let outcome: Result<(), String> = match effect {
+                ReactionEffect::Assert {
+                    value,
+                    target_facet,
+                } => {
+                    let target = target_facet.unwrap_or(default_facet);
+                    let previous = std::mem::replace(&mut activation.current_facet, target);
+                    let result = value
+                        .resolve(pattern_match)
+                        .map(|resolved| {
+                            activation.assert(Handle::new(), resolved);
+                        })
+                        .ok_or_else(|| "unable to resolve assertion value".to_string());
+                    activation.current_facet = previous;
+                    result
+                }
+                ReactionEffect::SendMessage {
+                    actor,
+                    facet,
+                    payload,
+                } => payload
+                    .resolve(pattern_match)
+                    .map(|resolved| activation.send_message(actor, facet, resolved))
+                    .ok_or_else(|| "unable to resolve payload".to_string()),
+            };
+
+            {
+                let mut reactions = self.reactions.write();
+                if let Some(entry) = reactions.get_mut(&pattern_match.pattern_id) {
+                    match &outcome {
+                        Ok(()) => entry.stats.record_success(),
+                        Err(err) => entry.stats.record_error(err.clone()),
+                    }
+                }
+            }
+
+            if let Err(err) = &outcome {
+                tracing::warn!(
+                    pattern = ?pattern_match.pattern_id,
+                    reaction = ?reaction_id,
+                    "reaction execution failed: {}",
+                    err
+                );
+            }
+        }
+
+        Ok(())
+    }
 }
 
 /// Activation context: mutable state during a turn
@@ -489,6 +625,9 @@ pub struct Activation {
 
     /// Currently executing entity (if any)
     current_entity: Option<Uuid>,
+
+    /// Async dispatcher handle (if available)
+    async_sender: Option<Sender<AsyncMessage>>,
 }
 
 /// Specification for granting a capability during a turn
@@ -507,7 +646,11 @@ pub struct CapabilitySpec {
 
 impl Activation {
     /// Create a new activation context
-    pub fn new(actor_id: ActorId, current_facet: FacetId) -> Self {
+    pub fn new(
+        actor_id: ActorId,
+        current_facet: FacetId,
+        async_sender: Option<Sender<AsyncMessage>>,
+    ) -> Self {
         Self {
             actor_id,
             current_facet: current_facet.clone(),
@@ -523,6 +666,7 @@ impl Activation {
             capabilities_granted: Vec::new(),
             capabilities_revoked: Vec::new(),
             current_entity: None,
+            async_sender,
         }
     }
 
@@ -551,6 +695,11 @@ impl Activation {
 
     pub(crate) fn set_current_entity(&mut self, entity: Option<Uuid>) {
         self.current_entity = entity;
+    }
+
+    /// Clone the async sender handle, if available.
+    pub fn async_sender(&self) -> Option<Sender<AsyncMessage>> {
+        self.async_sender.clone()
     }
 
     /// Send a message to another actor/facet
@@ -902,7 +1051,7 @@ mod tests {
     fn test_activation_assert_retract() {
         let actor_id = ActorId::new();
         let facet_id = FacetId::new();
-        let mut activation = Activation::new(actor_id, facet_id);
+        let mut activation = Activation::new(actor_id, facet_id, None);
 
         let handle = Handle::new();
         let value = preserves::IOValue::symbol("test-data");
@@ -934,7 +1083,7 @@ mod tests {
             payload: preserves::IOValue::symbol("test-message"),
         };
 
-        let result = actor.execute_turn(vec![input]);
+        let result = actor.execute_turn(vec![input], None);
         assert!(result.is_ok());
 
         let (outputs, _delta) = result.unwrap();
@@ -1018,7 +1167,7 @@ mod tests {
             value,
         }];
 
-        let (outputs, _) = actor.execute_turn(inputs).unwrap();
+        let (outputs, _) = actor.execute_turn(inputs, None).unwrap();
 
         // Should have triggered on_assert callback
         assert_eq!(assert_count.load(Ordering::SeqCst), 1);
@@ -1036,7 +1185,7 @@ mod tests {
             handle,
         }];
 
-        let (outputs, _) = actor.execute_turn(inputs).unwrap();
+        let (outputs, _) = actor.execute_turn(inputs, None).unwrap();
 
         // Should have triggered on_retract callback
         assert_eq!(retract_count.load(Ordering::SeqCst), 1);
@@ -1092,7 +1241,7 @@ mod tests {
             payload: preserves::IOValue::symbol("trigger"),
         };
 
-        let (outputs, _) = actor.execute_turn(vec![input]).unwrap();
+        let (outputs, _) = actor.execute_turn(vec![input], None).unwrap();
 
         assert!(
             outputs
@@ -1106,7 +1255,7 @@ mod tests {
     fn test_grant_capability_emits_output_with_metadata() {
         let actor_id = ActorId::new();
         let actor = Actor::new(actor_id.clone());
-        let mut activation = Activation::new(actor_id.clone(), actor.root_facet.clone());
+        let mut activation = Activation::new(actor_id.clone(), actor.root_facet.clone(), None);
         let entity_id = Uuid::new_v4();
         activation.set_current_entity(Some(entity_id));
 
@@ -1147,7 +1296,7 @@ mod tests {
     fn test_revoke_capability_emits_event() {
         let actor_id = ActorId::new();
         let actor = Actor::new(actor_id.clone());
-        let mut activation = Activation::new(actor_id.clone(), actor.root_facet.clone());
+        let mut activation = Activation::new(actor_id.clone(), actor.root_facet.clone(), None);
         let entity_id = Uuid::new_v4();
         activation.set_current_entity(Some(entity_id));
 

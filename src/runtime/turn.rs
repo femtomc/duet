@@ -144,6 +144,12 @@ impl Default for Handle {
     }
 }
 
+impl fmt::Display for Handle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 /// Input to a turn (external event or internal message)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TurnInput {

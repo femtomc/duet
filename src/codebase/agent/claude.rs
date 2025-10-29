@@ -1,11 +1,12 @@
 //! Stub implementation of a Claude Code agent entity.
 
 use super::{AgentEntity, AgentExchange, exchanges_from_preserves, exchanges_to_preserves};
+use crate::runtime::AsyncMessage;
 use crate::runtime::actor::{Activation, Entity, HydratableEntity};
-use crate::runtime::enqueue_async_message;
 use crate::runtime::error::{ActorError, ActorResult};
-use crate::runtime::registry::EntityRegistry;
+use crate::runtime::registry::EntityCatalog;
 use crate::runtime::turn::{Handle, TurnOutput};
+use chrono::Utc;
 use once_cell::sync::Lazy;
 use preserves::ValueImpl;
 use std::io::Write;
@@ -13,7 +14,7 @@ use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use uuid::Uuid;
 
-/// Global agent configuration shared across runtime instances.
+/// Global default configuration used when instantiating Claude agents.
 #[derive(Debug, Clone)]
 struct AgentSettings {
     command: Option<String>,
@@ -23,17 +24,23 @@ struct AgentSettings {
 impl Default for AgentSettings {
     fn default() -> Self {
         Self {
-            command: None,
-            args: Vec::new(),
+            command: std::env::var("DUET_CLAUDE_COMMAND")
+                .ok()
+                .filter(|s| !s.is_empty()),
+            args: std::env::var("DUET_CLAUDE_ARGS")
+                .ok()
+                .map(|value| value.split_whitespace().map(str::to_string).collect())
+                .unwrap_or_default(),
         }
     }
 }
 
-static SETTINGS: Lazy<Mutex<AgentSettings>> = Lazy::new(|| Mutex::new(AgentSettings::default()));
+static DEFAULT_SETTINGS: Lazy<Mutex<AgentSettings>> =
+    Lazy::new(|| Mutex::new(AgentSettings::default()));
 
 /// Configure the external command used to invoke Claude Code.
 pub fn set_external_command(command: Option<String>, args: Vec<String>) {
-    let mut settings = SETTINGS.lock().unwrap();
+    let mut settings = DEFAULT_SETTINGS.lock().unwrap();
     settings.command = command;
     settings.args = args;
 }
@@ -55,20 +62,25 @@ pub const REQUEST_LABEL: &str = "agent-request";
 /// demonstrating the persistence/time-travel pipeline. Real integrations can
 /// swap in their own implementation while reusing the surrounding helpers.
 pub struct ClaudeCodeAgent {
+    settings: AgentSettings,
     exchanges: Mutex<Vec<AgentExchange>>,
 }
 
 impl ClaudeCodeAgent {
     /// Create a new agent with empty history.
     pub fn new() -> Self {
-        Self {
-            exchanges: Mutex::new(Vec::new()),
-        }
+        let settings = {
+            let guard = DEFAULT_SETTINGS.lock().unwrap();
+            guard.clone()
+        };
+        Self::with_settings(settings)
     }
 
-    fn resolve_settings() -> AgentSettings {
-        let settings = SETTINGS.lock().unwrap();
-        settings.clone()
+    fn with_settings(settings: AgentSettings) -> Self {
+        Self {
+            settings,
+            exchanges: Mutex::new(Vec::new()),
+        }
     }
 
     fn execute_prompt(settings: &AgentSettings, prompt: &str) -> Result<String, String> {
@@ -168,7 +180,8 @@ impl ClaudeCodeAgent {
         let actor = activation.actor_id.clone();
         let facet = activation.current_facet.clone();
         let request_uuid = Uuid::new_v4();
-        let settings = Self::resolve_settings();
+        let settings = self.settings.clone();
+        let async_sender = activation.async_sender();
         activation.outputs.push(TurnOutput::ExternalRequest {
             request_id: request_uuid,
             service: "claude-code".to_string(),
@@ -185,24 +198,34 @@ impl ClaudeCodeAgent {
 
         let settings_clone = settings.clone();
 
-        std::thread::spawn(move || {
-            let response = match Self::execute_prompt(&settings_clone, &prompt) {
-                Ok(value) => value,
-                Err(err) => format!("Claude Code error: {err}"),
-            };
+        if let Some(async_sender) = async_sender {
+            std::thread::spawn(move || {
+                let response = match Self::execute_prompt(&settings_clone, &prompt) {
+                    Ok(value) => value,
+                    Err(err) => format!("Claude Code error: {err}"),
+                };
 
-            let response_record = preserves::IOValue::record(
-                preserves::IOValue::symbol(RESPONSE_LABEL),
-                vec![
-                    preserves::IOValue::new(request_id),
-                    preserves::IOValue::new(prompt),
-                    preserves::IOValue::new(response),
-                    preserves::IOValue::symbol(agent_kind),
-                ],
-            );
+                let timestamp = Utc::now().to_rfc3339();
+                let response_record = preserves::IOValue::record(
+                    preserves::IOValue::symbol(RESPONSE_LABEL),
+                    vec![
+                        preserves::IOValue::new(request_id),
+                        preserves::IOValue::new(prompt),
+                        preserves::IOValue::new(response),
+                        preserves::IOValue::symbol(agent_kind),
+                        preserves::IOValue::new(timestamp),
+                    ],
+                );
 
-            let _ = enqueue_async_message(actor, facet, response_record);
-        });
+                let message = AsyncMessage {
+                    actor,
+                    facet,
+                    payload: response_record,
+                };
+
+                let _ = async_sender.send(message);
+            });
+        }
 
         Ok(())
     }
@@ -230,6 +253,8 @@ impl ClaudeCodeAgent {
         });
         drop(exchanges);
 
+        let timestamp = Utc::now().to_rfc3339();
+
         let response_record = preserves::IOValue::record(
             preserves::IOValue::symbol(RESPONSE_LABEL),
             vec![
@@ -237,6 +262,7 @@ impl ClaudeCodeAgent {
                 preserves::IOValue::new(prompt),
                 preserves::IOValue::new(response),
                 preserves::IOValue::symbol(agent_kind),
+                preserves::IOValue::new(timestamp),
             ],
         );
 
@@ -288,9 +314,16 @@ impl Entity for ClaudeCodeAgent {
     }
 }
 
-/// Register the Claude Code agent in the entity registry.
-pub fn register(registry: &EntityRegistry) {
-    registry.register_hydratable(ENTITY_TYPE, |_config| Ok(ClaudeCodeAgent::new()));
+/// Register the Claude Code agent in the entity catalog.
+pub fn register(catalog: &EntityCatalog) {
+    catalog.register_hydratable(ENTITY_TYPE, |config| {
+        let defaults = {
+            let guard = DEFAULT_SETTINGS.lock().unwrap();
+            guard.clone()
+        };
+        let settings = settings_from_config(config).unwrap_or(defaults);
+        Ok(ClaudeCodeAgent::with_settings(settings))
+    });
 }
 
 impl HydratableEntity for ClaudeCodeAgent {
@@ -335,4 +368,40 @@ fn parse_response_fields(value: &preserves::IOValue) -> Option<(String, String, 
         .unwrap_or_default();
 
     Some((request_id, prompt, response, agent_kind))
+}
+
+fn settings_from_config(value: &preserves::IOValue) -> Option<AgentSettings> {
+    if !value.is_record() {
+        return None;
+    }
+
+    let label_value = value.label();
+    let label_symbol = label_value.as_symbol()?;
+    if label_symbol.as_ref() != "claude-config" {
+        return None;
+    }
+
+    let mut settings = AgentSettings::default();
+
+    if value.len() > 0 {
+        if let Some(command) = value.index(0).as_string() {
+            let trimmed = command.trim();
+            if !trimmed.is_empty() {
+                settings.command = Some(trimmed.to_string());
+            }
+        }
+    }
+
+    if value.len() > 1 {
+        if let Some(args_text) = value.index(1).as_string() {
+            let args = args_text
+                .split_whitespace()
+                .filter(|arg| !arg.is_empty())
+                .map(str::to_string)
+                .collect();
+            settings.args = args;
+        }
+    }
+
+    Some(settings)
 }

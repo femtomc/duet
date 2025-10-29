@@ -5,7 +5,7 @@
 use duet::runtime::actor::{Activation, CapabilitySpec, Entity, HydratableEntity};
 use duet::runtime::error::{ActorError, ActorResult, RuntimeError};
 use duet::runtime::pattern::Pattern;
-use duet::runtime::registry::{EntityMetadata, EntityRegistry};
+use duet::runtime::registry::{EntityCatalog, EntityMetadata};
 use duet::runtime::state::CapabilityTarget;
 use duet::runtime::turn::{ActorId, FacetId, Handle};
 use duet::runtime::{Control, RuntimeConfig};
@@ -91,9 +91,9 @@ const PRODUCER_HANDLE_UUID: Uuid = Uuid::from_u128(0xfeedfacefeedcafe1234567890a
 static PATTERN_ASSERT_COUNT: Lazy<Arc<AtomicUsize>> = Lazy::new(|| Arc::new(AtomicUsize::new(0)));
 
 static REGISTER_PATTERN_FIXTURE: Lazy<()> = Lazy::new(|| {
-    EntityRegistry::global().register("pattern-producer", |_config| Ok(Box::new(PatternProducer)));
+    EntityCatalog::global().register("pattern-producer", |_config| Ok(Box::new(PatternProducer)));
 
-    EntityRegistry::global().register("pattern-watcher", |_config| {
+    EntityCatalog::global().register("pattern-watcher", |_config| {
         Ok(Box::new(PatternWatcher {
             on_assert: Arc::clone(&PATTERN_ASSERT_COUNT),
         }))
@@ -156,7 +156,7 @@ impl Entity for PatternWatcher {
 #[test]
 fn test_entity_registration_persists_across_restart() {
     // Register the entity type in the global registry
-    EntityRegistry::global().register("counter", |_config| {
+    EntityCatalog::global().register("counter", |_config| {
         Ok(Box::new(CounterEntity {
             count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }))
@@ -204,7 +204,7 @@ fn test_entity_registration_persists_across_restart() {
 
 #[test]
 fn test_entity_survives_time_travel() {
-    EntityRegistry::global().register("test-entity", |_config| {
+    EntityCatalog::global().register("test-entity", |_config| {
         Ok(Box::new(CounterEntity {
             count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }))
@@ -372,7 +372,7 @@ fn test_workspace_capability_read_and_write() {
 
 #[test]
 fn test_entity_patterns_persist_through_restart_and_time_travel() {
-    EntityRegistry::global().register("pattern-entity", |_config| {
+    EntityCatalog::global().register("pattern-entity", |_config| {
         Ok(Box::new(CounterEntity {
             count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }))
@@ -618,7 +618,7 @@ fn test_hydratable_entity_state_restored_on_goto() {
 
     let restored = Arc::new(AtomicI64::new(0));
 
-    EntityRegistry::global().register_hydratable("hydrated-counter", {
+    EntityCatalog::global().register_hydratable("hydrated-counter", {
         let restored = restored.clone();
         move |_config| {
             Ok(HydratedCounter {
@@ -667,7 +667,7 @@ fn test_hydratable_entity_state_restored_on_goto() {
 
 #[test]
 fn test_capabilities_persist_across_time_travel_and_restart() {
-    EntityRegistry::global().register("cap-issuer", |_config| Ok(Box::new(CapabilityIssuerEntity)));
+    EntityCatalog::global().register("cap-issuer", |_config| Ok(Box::new(CapabilityIssuerEntity)));
 
     let temp = TempDir::new().unwrap();
     let config = RuntimeConfig {
@@ -751,7 +751,7 @@ fn test_capabilities_persist_across_time_travel_and_restart() {
 
 #[test]
 fn test_flow_control_account_balance_and_time_travel() {
-    EntityRegistry::global().register("flow-control", |_config| Ok(Box::new(FlowControlEntity)));
+    EntityCatalog::global().register("flow-control", |_config| Ok(Box::new(FlowControlEntity)));
 
     let temp = TempDir::new().unwrap();
     let config = RuntimeConfig {

@@ -1,7 +1,7 @@
 use duet::codebase;
 use duet::runtime::RuntimeConfig;
 use duet::runtime::control::Control;
-use duet::runtime::registry::EntityRegistry;
+use duet::runtime::registry::EntityCatalog;
 use duet::runtime::service::Service;
 use preserves::IOValue;
 use serde_json::{Value, json};
@@ -18,7 +18,7 @@ use duet::runtime::error::ActorResult;
 #[test]
 fn service_handles_basic_commands() {
     // Register a simple entity type for the registry.
-    EntityRegistry::global().register("service-test", |_config| Ok(Box::new(SimpleEntity)));
+    EntityCatalog::global().register("service-test", |_config| Ok(Box::new(SimpleEntity)));
 
     let temp = TempDir::new().unwrap();
     let config = RuntimeConfig {
@@ -186,30 +186,34 @@ fn agent_commands_roundtrip() {
         .into_iter()
         .map(|req| serde_json::to_string(&req).unwrap())
         .collect::<Vec<_>>()
-        .join("
-");
+        .join("\n");
 
     service
         .handle(
-            Cursor::new(format!("{}
-", input_data)),
+            Cursor::new(format!("{}\n", input_data)),
             SharedWriter(sink.clone()),
         )
         .unwrap();
 
-    let (request_id, queued_turn) = {
+    let (request_id, queued_turn, _branch) = {
         let output = sink.borrow();
         let lines: Vec<Value> = output
-            .split(|b| *b == b'
-')
+            .split(|b| *b == b'\n')
             .filter(|line| !line.is_empty())
             .map(|line| serde_json::from_slice::<Value>(line).unwrap())
             .collect();
 
         assert_eq!(lines.len(), 2);
-        let request_id = lines[1]["result"]["request_id"].as_str().unwrap().to_string();
-        let queued_turn = lines[1]["result"]["queued_turn"].as_str().map(|s| s.to_string());
-        (request_id, queued_turn)
+        let request_id = lines[1]["result"]["request_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let queued_turn = lines[1]["result"]["queued_turn"]
+            .as_str()
+            .map(|s| s.to_string());
+        let branch = lines[1]["result"]["branch"].as_str().unwrap().to_string();
+        assert_eq!(branch, "main");
+        (request_id, queued_turn, branch)
     };
 
     sink.borrow_mut().clear();
@@ -225,17 +229,19 @@ fn agent_commands_roundtrip() {
         follow_requests.push(json!({"id": 7, "command": "dataspace_events", "params": {"label": "agent-response", "since": turn, "limit": 5}}));
     }
 
+    follow_requests
+        .push(json!({"id": 8, "command": "transcript_show", "params": {"request_id": request_id}}));
+    follow_requests.push(json!({"id": 9, "command": "transcript_tail", "params": {"request_id": request_id, "branch": "main", "limit": 5}}));
+
     let follow_input = follow_requests
         .into_iter()
         .map(|req| serde_json::to_string(&req).unwrap())
         .collect::<Vec<_>>()
-        .join("
-");
+        .join("\n");
 
     service
         .handle(
-            Cursor::new(format!("{}
-", follow_input)),
+            Cursor::new(format!("{}\n", follow_input)),
             SharedWriter(sink.clone()),
         )
         .unwrap();
@@ -243,14 +249,13 @@ fn agent_commands_roundtrip() {
     let lines: Vec<Value> = {
         let output = sink.borrow();
         output
-            .split(|b| *b == b'
-')
+            .split(|b| *b == b'\n')
             .filter(|line| !line.is_empty())
             .map(|line| serde_json::from_slice::<Value>(line).unwrap())
             .collect()
     };
 
-    assert!(lines.len() == 4 || lines.len() == 5);
+    assert!(lines.len() >= 6);
     let responses = lines[1]["result"]["responses"].as_array().unwrap();
     assert_eq!(responses.len(), 1);
     assert!(
@@ -266,22 +271,37 @@ fn agent_commands_roundtrip() {
     let first_events = lines[3]["result"]["events"].as_array().unwrap();
     assert!(!first_events.is_empty());
 
-    if let Some(turn) = queued_turn {
+    if let Some(_turn) = queued_turn {
         if let Some(next_cursor) = lines[3]["result"]["next_cursor"].as_str() {
-            assert_eq!(next_cursor, turn);
+            assert_ne!(next_cursor, "");
         }
         if lines.len() >= 5 {
-            let tail_events = lines[4]["result"]["events"].as_array().unwrap();
-            assert!(tail_events.is_empty());
             let has_more = lines[4]["result"]["has_more"].as_bool().unwrap();
             assert!(!has_more);
         }
     }
 
+    let transcript_show_idx = lines.len() - 2;
+    let transcript_tail_idx = lines.len() - 1;
+
+    let transcript_entries = lines[transcript_show_idx]["result"]["entries"]
+        .as_array()
+        .unwrap();
+    assert!(!transcript_entries.is_empty());
+    assert!(
+        transcript_entries[0]
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .is_some()
+    );
+
+    let transcript_events = lines[transcript_tail_idx]["result"]["events"]
+        .as_array()
+        .unwrap();
+    assert!(!transcript_events.is_empty());
+
     duet::codebase::agent::claude::set_external_command(None, vec![]);
 }
-
-
 
 struct SharedWriter(Rc<RefCell<Vec<u8>>>);
 

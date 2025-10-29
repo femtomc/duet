@@ -198,7 +198,7 @@ All writes must be atomic: write to temporary file and rename; fsync directories
 
 The runtime provides infrastructure for registering entity types and persisting entity instances across restarts and time-travel:
 
-- **Entity Registry** (`runtime::registry`): Global singleton mapping type names to factory functions. Application code registers types at startup via `EntityRegistry::global().register(name, factory)`. Factories take a `preserves::IOValue` config and return `Box<dyn Entity>`.
+- **Entity Registry** (`runtime::registry`): Global catalog capturing entity factories; each runtime clones an immutable snapshot (`EntityCatalog::global().snapshot()`) so execution remains deterministic. Application code registers types at startup via `EntityCatalog::global().register(name, factory)`.
 
 - **Entity Manager**: Tracks metadata for all entity instances (actor, facet, type, config, pattern subscriptions) in `.duet/meta/entities.json`. Metadata persists independently of turn execution so entities can be reconstructed during replay.
 
@@ -211,7 +211,7 @@ The runtime provides infrastructure for registering entity types and persisting 
 - **HydratableEntity Trait** (optional): For rare cases where private state can't live in the dataspace (e.g., expensive caches, ephemeral derived data):
   - Implement `snapshot_state()` to capture private state as `preserves::IOValue`.
   - Implement `restore_state()` to hydrate from snapshot during replay.
-  - Register the type with `EntityRegistry::register_hydratable`, which stores snapshot/restore adapters and ensures snapshots include the private state blob. During `goto`/replay the runtime restores these blobs before entities resume.
+  - Register the type with `EntityCatalog::global().register_hydratable(...)`, which stores snapshot/restore adapters and ensures snapshots include the private state blob. During `goto`/replay the runtime restores these blobs before entities resume.
   - **Merge behavior**: If two branches have different private state, a merge warning is generated and one state wins arbitrarily. This is unavoidable for non-CRDT state—prefer dataspace-backed state when possible.
 
 - **Pattern Subscriptions**: Entity metadata persists the full pattern specification, so hydration and time-travel re-register watches automatically. Declarative assertions made inside a turn (via `Activation::assert`) are routed through the pattern engine, meaning local assertions trigger `PatternMatched` notifications the same way external assertions do.
@@ -224,7 +224,7 @@ The crate ships with a small catalog of entities registered via `codebase::regis
 - `echo` – Accepts incoming messages and asserts `(echo <topic> <payload>)` into the dataspace. The topic defaults to `"echo"`, or you can configure it by passing a preserves string as the entity config.
 - `counter` – A hydratable counter that maintains an integer value across time travel. Each message increments by the signed integer payload (defaulting to `1`) and asserts `(counter <value>)`.
 
-Applications can register their own entity types alongside these defaults using the global `EntityRegistry`.
+Applications can register their own entity types alongside these defaults using the global `EntityCatalog` before instantiating a runtime.
 
 ### 6.4 `runtime::scheduler`
 - Maintain ready queues per actor, keyed by logical clock and causal dependencies.  
