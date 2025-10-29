@@ -56,6 +56,11 @@ reaction_app = typer.Typer(
     add_completion=False,
     rich_markup_mode="rich",
 )
+workflow_app = typer.Typer(
+    help="Programmable workflows",
+    add_completion=False,
+    rich_markup_mode="rich",
+)
 transcript_app = typer.Typer(
     help="Agent transcripts",
     add_completion=False,
@@ -74,6 +79,7 @@ daemon_app = typer.Typer(
 app.add_typer(workspace_app, name="workspace", rich_help_panel="Workspace")
 app.add_typer(agent_app, name="agent", rich_help_panel="Agents")
 app.add_typer(reaction_app, name="reaction", rich_help_panel="Runtime")
+app.add_typer(workflow_app, name="workflow", rich_help_panel="Automation")
 app.add_typer(transcript_app, name="transcript", rich_help_panel="Agents")
 app.add_typer(dataspace_app, name="dataspace", rich_help_panel="Dataspace")
 app.add_typer(daemon_app, name="daemon", rich_help_panel="Runtime")
@@ -1578,6 +1584,47 @@ def _print_transcript_tail(result: Any) -> None:
         console.print(footer)
 
 
+def _print_workflow_list(result: Any) -> None:
+    if not isinstance(result, dict):
+        console.print(JSON.from_data(result))
+        return
+
+    workflows = result.get("workflows")
+    if not workflows:
+        console.print("[yellow]No workflows found.[/yellow]")
+        return
+
+    table = Table(title="Workflows", show_lines=False, header_style="bold cyan")
+    table.add_column("ID", style="bold")
+    table.add_column("Status")
+    table.add_column("Description")
+
+    for item in workflows:
+        if isinstance(item, dict):
+            identifier = item.get("id") or item.get("workflow_id") or "?"
+            status = item.get("status") or "-"
+            description = item.get("description") or ""
+            table.add_row(str(identifier), str(status), str(description))
+        else:
+            table.add_row(str(item), "-", "")
+
+    console.print(table)
+
+
+def _print_workflow_start(result: Any) -> None:
+    if isinstance(result, dict):
+        message = result.get("message", "Workflow request submitted.")
+        status = result.get("status", "accepted")
+        console.print(
+            Panel(
+                f"[bold]Status[/bold] {status}\n{message}",
+                border_style="green" if status == "accepted" else "yellow",
+            )
+        )
+    else:
+        console.print(JSON.from_data(result))
+
+
 def _print_reaction_register(result: Any) -> None:
     if isinstance(result, dict) and "reaction_id" in result:
         reaction_id = result.get("reaction_id", "")
@@ -1808,6 +1855,10 @@ def _print_result(result: Any, command: str) -> None:
         _print_transcript_show(result)
     elif command == "transcript:tail":
         _print_transcript_tail(result)
+    elif command == "workflow:list":
+        _print_workflow_list(result)
+    elif command == "workflow:start":
+        _print_workflow_start(result)
     elif command == "reaction:register":
         _print_reaction_register(result)
     elif command == "reaction:unregister":
@@ -1921,6 +1972,41 @@ def transcript_export(
             destination=output,
         )
     )
+
+
+@workflow_app.command("list")
+def workflow_list(ctx: typer.Context) -> None:
+    """List workflow definitions and running instances."""
+    params: Dict[str, Any] = {}
+    _run(_run_call(ctx.obj, "workflow_list", params, "workflow:list"))
+
+
+@workflow_app.command("start")
+def workflow_start(
+    ctx: typer.Context,
+    definition: Path = typer.Argument(
+        ...,
+        exists=True,
+        dir_okay=False,
+        readable=True,
+        resolve_path=True,
+        help="Path to a workflow definition file.",
+    ),
+    label: Optional[str] = typer.Option(
+        None,
+        "--label",
+        help="Optional label for the workflow instance.",
+    ),
+) -> None:
+    """Start a workflow using the provided definition file."""
+    definition_text = definition.read_text(encoding="utf-8")
+    params: Dict[str, Any] = {
+        "definition": definition_text,
+        "definition_path": str(definition),
+    }
+    if label:
+        params["label"] = label
+    _run(_run_call(ctx.obj, "workflow_start", params, "workflow:start"))
 
 
 def main_entrypoint() -> None:

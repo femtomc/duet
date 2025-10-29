@@ -131,6 +131,8 @@ impl<'a, W: Write> Session<'a, W> {
             "agent_responses" => self.cmd_agent_responses(params),
             "transcript_show" => self.cmd_transcript_show(params),
             "transcript_tail" => self.cmd_transcript_tail(params),
+            "workflow_list" => self.cmd_workflow_list(params),
+            "workflow_start" => self.cmd_workflow_start(params),
             "reaction_register" => self.cmd_reaction_register(params),
             "reaction_unregister" => self.cmd_reaction_unregister(params),
             "reaction_list" => self.cmd_reaction_list(),
@@ -175,7 +177,8 @@ impl<'a, W: Write> Session<'a, W> {
                     "capability_inspection",
                     "dataspace_inspection",
                     "dataspace_events",
-                    "reactions"
+                    "reactions",
+                    "workflow_scaffolding"
                 ]
             }
         }))
@@ -740,6 +743,39 @@ impl<'a, W: Write> Session<'a, W> {
             "next_cursor": chunk.next_cursor.map(|t| t.to_string()),
             "head": chunk.head.map(|t| t.to_string()),
             "has_more": chunk.has_more,
+        }))
+    }
+
+    fn cmd_workflow_list(&mut self, _params: &Value) -> Result<Value, ServiceError> {
+        self.ensure_handshake()?;
+        Ok(json!({
+            "workflows": Value::Array(vec![])
+        }))
+    }
+
+    fn cmd_workflow_start(&mut self, params: &Value) -> Result<Value, ServiceError> {
+        self.ensure_handshake()?;
+        let definition = params
+            .get("definition")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ServiceError::invalid_param("definition"))?;
+        let label = params.get("label").and_then(Value::as_str);
+
+        // Placeholder response until the workflow interpreter lands.
+        let mut message = "workflow orchestration is not implemented yet".to_string();
+        if let Some(path) = params.get("definition_path").and_then(Value::as_str) {
+            message.push_str(&format!(" (definition: {path})"));
+        }
+        if let Some(id) = label {
+            message.push_str(&format!(" [label: {id}]"));
+        }
+
+        // Touch `definition` so it is considered used.
+        let _ = definition;
+
+        Ok(json!({
+            "status": "accepted",
+            "message": message,
         }))
     }
 
