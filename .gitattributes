@@ -1,0 +1,14 @@
+# Documentation files
+paper/** linguist-documentation
+
+# Generated files and build artifacts
+target/** linguist-generated=true
+dist/** linguist-generated=true
+build/** linguist-generated=true
+
+# Generated documentation
+*.html linguist-generated=true
+
+# Coverage reports
+htmlcov/** linguist-generated=true
+coverage.xml linguist-generated=true
