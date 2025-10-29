@@ -171,8 +171,9 @@ end of the line.
 ## Compiler / Interpreter Pipeline
 
 1. **Parse** the S-expression into an AST (`WorkflowProgram`).
-2. **Validate** (check roles, state references, required modules).
-3. **Instantiate** – spawn a workflow interpreter actor per instance with:
+2. **Validate / Build IR** – translate forms into a typed `ProgramIr`, resolving
+   roles, states, actions, waits, and branches.
+3. **Instantiate** – spawn an interpreter entity per instance with:
    * In-memory state (current state name, pending waits, request tags).
    * Dataspace handles for logging progress.
 4. **Execute** – interpret instructions turn-by-turn, emitting runtime commands
@@ -191,9 +192,9 @@ that consumes the AST.
 
 ## Next Steps
 
-1. Implement the interpreter parser (currently in progress) and extend it with
-   macro/templating support as needed.
-2. Implement the interpreter runtime in `src/interpreter/runtime.rs`.
+1. Extend the parser/IR builder with macro/templating support as needed.
+2. Implement the interpreter runtime in `src/interpreter/runtime.rs` so programs
+   emit real actor VM actions.
 3. Extend service RPCs to enumerate definitions/instances and start programs (currently stubs).
 4. Flesh out CLI commands (`duet workflow define/start/watch/list`).
 5. Provide template definitions for common orchestrations (planner/worker, self-review, etc.).

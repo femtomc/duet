@@ -12,8 +12,14 @@ pub mod ast;
 pub mod runtime;
 /// Parser for the interpreter DSL.
 pub mod parser;
+/// Typed intermediate representation structures.
+pub mod ir;
+/// Builders that translate parsed programs into the IR.
+pub mod builder;
 
 pub use ast::{Expr, Program};
+pub use builder::build_ir;
+pub use ir::{Action, BranchArm, Condition, Instruction, ProgramIr, RoleBinding, State, WaitCondition};
 pub use parser::parse_program;
 pub use runtime::WorkflowRuntime;
 
