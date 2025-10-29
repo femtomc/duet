@@ -322,7 +322,7 @@ mod tests {
 
         fn poll_wait(&mut self, wait: &WaitCondition) -> std::result::Result<bool, Self::Error> {
             match wait {
-                WaitCondition::TranscriptResponse { tag } => Ok(self.ready_responses.remove(tag)),
+                WaitCondition::TranscriptResponse { tag } => Ok(self.ready_responses.contains(tag)),
                 WaitCondition::Signal { label } => Ok(self.ready_signals.contains(label)),
             }
         }
