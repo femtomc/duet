@@ -14,6 +14,7 @@ use uuid::Uuid;
 
 const DEFINE_LABEL: &str = "interpreter-define";
 const RUN_LABEL: &str = "interpreter-run";
+const INSTANCE_LABEL: &str = "interpreter-instance";
 
 /// Entity that executes interpreter programs inside the Syndicated Actor runtime.
 pub struct InterpreterEntity;
@@ -87,34 +88,63 @@ fn run_program(activation: &mut Activation, program: ProgramIr) -> ActorResult<(
         .iter()
         .map(|binding| (binding.name.clone(), binding.clone()))
         .collect();
-    let host = ActivationHost::new(activation, roles);
-    let mut runtime = InterpreterRuntime::new(host, program);
 
-    loop {
-        match runtime.tick() {
-            Ok(RuntimeEvent::Progress) => continue,
-            Ok(RuntimeEvent::Transition { .. }) => continue,
-            Ok(RuntimeEvent::Waiting(wait)) => {
-                return Err(ActorError::InvalidActivation(format!(
-                    "interpreter waiting is not yet supported: {:?}",
-                    wait
-                )));
-            }
-            Ok(RuntimeEvent::Completed) => break,
-            Err(RuntimeError::Host(err)) => return Err(err),
-            Err(RuntimeError::UnknownState(state)) => {
-                return Err(ActorError::InvalidActivation(format!(
-                    "unknown state: {}",
-                    state
-                )))
-            }
-            Err(RuntimeError::NoStates) => {
-                return Err(ActorError::InvalidActivation(
-                    "program must define at least one state".into(),
-                ))
+    let instance_id = Uuid::new_v4();
+    activation.assert(
+        Handle::new(),
+        IOValue::record(
+            IOValue::symbol(INSTANCE_LABEL),
+            vec![
+                IOValue::new(instance_id.to_string()),
+                IOValue::new(program.name.clone()),
+                IOValue::new("running"),
+            ],
+        ),
+    );
+
+    let program_name = program.name.clone();
+    {
+        let host = ActivationHost::new(activation, roles);
+        let mut runtime = InterpreterRuntime::new(host, program);
+
+        loop {
+            match runtime.tick() {
+                Ok(RuntimeEvent::Progress) => continue,
+                Ok(RuntimeEvent::Transition { .. }) => continue,
+                Ok(RuntimeEvent::Waiting(wait)) => {
+                    return Err(ActorError::InvalidActivation(format!(
+                        "interpreter waiting is not yet supported: {:?}",
+                        wait
+                    )));
+                }
+                Ok(RuntimeEvent::Completed) => break,
+                Err(RuntimeError::Host(err)) => return Err(err),
+                Err(RuntimeError::UnknownState(state)) => {
+                    return Err(ActorError::InvalidActivation(format!(
+                        "unknown state: {}",
+                        state
+                    )))
+                }
+                Err(RuntimeError::NoStates) => {
+                    return Err(ActorError::InvalidActivation(
+                        "program must define at least one state".into(),
+                    ))
+                }
             }
         }
     }
+
+    activation.assert(
+        Handle::new(),
+        IOValue::record(
+            IOValue::symbol(INSTANCE_LABEL),
+            vec![
+                IOValue::new(instance_id.to_string()),
+                IOValue::new(program_name),
+                IOValue::new("completed"),
+            ],
+        ),
+    );
 
     Ok(())
 }
@@ -135,11 +165,14 @@ impl<'a> ActivationHost<'a> {
             .ok_or_else(|| ActorError::InvalidActivation(format!("unknown role: {name}")))
     }
 
-    fn property<'b>(&self, binding: &'b RoleBinding, key: &str) -> Result<&'b String, ActorError> {
-        binding
+    fn uuid_property(&self, binding: &RoleBinding, key: &str) -> Result<Uuid, ActorError> {
+        let value = binding
             .properties
             .get(key)
-            .ok_or_else(|| ActorError::InvalidActivation(format!("role '{}' missing property '{}'", binding.name, key)))
+            .ok_or_else(|| ActorError::InvalidActivation(format!("role '{}' missing property '{}'", binding.name, key)))?;
+        Uuid::parse_str(value).map_err(|_| {
+            ActorError::InvalidActivation(format!("invalid UUID '{}' for role '{}' property '{}'", value, binding.name, key))
+        })
     }
 }
 
@@ -169,14 +202,8 @@ impl<'a> InterpreterHost for ActivationHost<'a> {
                 tag,
             } => {
                 let binding = self.resolve_role(agent_role)?;
-                let actor_text = self.property(binding, "actor")?;
-                let facet_text = self.property(binding, "facet")?;
-                let actor_uuid = Uuid::parse_str(actor_text).map_err(|_| {
-                    ActorError::InvalidActivation(format!("invalid actor UUID: {actor_text}"))
-                })?;
-                let facet_uuid = Uuid::parse_str(facet_text).map_err(|_| {
-                    ActorError::InvalidActivation(format!("invalid facet UUID: {facet_text}"))
-                })?;
+                let actor_uuid = self.uuid_property(binding, "actor")?;
+                let facet_uuid = self.uuid_property(binding, "facet")?;
 
                 let mut fields = vec![IOValue::new(template.clone())];
                 if let Some(tag) = tag {
@@ -206,15 +233,24 @@ impl<'a> InterpreterHost for ActivationHost<'a> {
 mod tests {
     use super::*;
     use crate::runtime::actor::Actor;
-    use crate::runtime::turn::ActorId;
+    use crate::runtime::turn::{ActorId, FacetId, TurnOutput};
 
     #[test]
-    fn interpreter_entity_emits_log() {
+    fn interpreter_entity_emits_log_and_prompt() {
         let entity = InterpreterEntity;
         let actor = Actor::new(ActorId::new());
         let mut activation = Activation::new(actor.id.clone(), actor.root_facet.clone(), None);
 
-        let program = "(workflow demo) (state start (emit (log \"hello\")))";
+        let target_actor = ActorId::new();
+        let target_facet = FacetId::new();
+
+        let program = format!(
+            "(workflow demo)
+               (roles (planner :actor \"{}\" :facet \"{}\"))
+               (state start (enter (send-prompt :agent planner :template \"hello\") (emit (log \"hello\"))) (terminal))",
+            target_actor.0,
+            target_facet.0
+        );
         let payload = IOValue::record(
             IOValue::symbol(RUN_LABEL),
             vec![IOValue::new(program.to_string())],
@@ -226,5 +262,11 @@ mod tests {
             .assertions_added
             .iter()
             .any(|(_, value)| matches!(value.label().as_symbol(), Some(sym) if sym.as_ref() == "interpreter-log")));
+
+        assert!(activation.outputs.iter().any(|output| matches!(
+            output,
+            TurnOutput::Message { target_actor: actor, target_facet: facet, .. }
+                if actor == &target_actor && facet == &target_facet
+        )));
     }
 }
