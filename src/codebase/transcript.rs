@@ -42,6 +42,10 @@ pub struct TranscriptEntry {
     pub prompt: String,
     /// Response emitted by the agent.
     pub response: String,
+    /// Role associated with the response, if provided.
+    pub role: Option<String>,
+    /// Tool metadata associated with the response, if provided.
+    pub tool: Option<String>,
     /// Timestamp recorded for the response, if provided by the agent.
     pub response_timestamp: Option<DateTime<Utc>>,
 }
@@ -76,13 +80,24 @@ pub fn transcript_entries(
                 continue;
             }
             if let Some(agent_resp) = parse_agent_response(&value) {
+                let AgentResponse {
+                    prompt,
+                    response,
+                    agent,
+                    timestamp,
+                    role,
+                    tool,
+                    ..
+                } = agent_resp;
                 entries.push(TranscriptEntry {
                     actor: actor_id.clone(),
                     handle,
-                    agent: agent_resp.agent,
-                    prompt: agent_resp.prompt,
-                    response: agent_resp.response,
-                    response_timestamp: agent_resp.timestamp,
+                    agent,
+                    prompt,
+                    response,
+                    role,
+                    tool,
+                    response_timestamp: timestamp,
                 });
                 if entries.len() >= limit {
                     break;
@@ -99,14 +114,25 @@ pub fn transcript_entries(
             }
 
             if let Some(agent_resp) = parse_agent_response(&assertion.value) {
+                let AgentResponse {
+                    prompt,
+                    response,
+                    agent,
+                    timestamp,
+                    role,
+                    tool,
+                    ..
+                } = agent_resp;
                 resolved_cursor.actor.get_or_insert(assertion.actor.clone());
                 entries.push(TranscriptEntry {
                     actor: assertion.actor.clone(),
                     handle: assertion.handle.clone(),
-                    agent: agent_resp.agent,
-                    prompt: agent_resp.prompt,
-                    response: agent_resp.response,
-                    response_timestamp: agent_resp.timestamp,
+                    agent,
+                    prompt,
+                    response,
+                    role,
+                    tool,
+                    response_timestamp: timestamp,
                 });
                 if entries.len() >= limit {
                     break;
@@ -219,28 +245,32 @@ pub fn event_batches_payload(chunk: &AssertionEventChunk) -> Vec<Value> {
                         );
 
                         if let Some(agent_response) = parse_agent_response(value) {
+                            let AgentResponse {
+                                request_id,
+                                prompt,
+                                response,
+                                agent,
+                                timestamp,
+                                role,
+                                tool,
+                            } = agent_response;
                             let mut transcript = Map::new();
-                            transcript.insert(
-                                "request_id".to_string(),
-                                Value::String(agent_response.request_id),
-                            );
-                            transcript.insert(
-                                "prompt".to_string(),
-                                Value::String(agent_response.prompt),
-                            );
-                            transcript.insert(
-                                "response".to_string(),
-                                Value::String(agent_response.response),
-                            );
-                            transcript.insert(
-                                "agent".to_string(),
-                                Value::String(agent_response.agent),
-                            );
-                            if let Some(ts) = agent_response.timestamp {
+                            transcript
+                                .insert("request_id".to_string(), Value::String(request_id));
+                            transcript.insert("prompt".to_string(), Value::String(prompt));
+                            transcript.insert("response".to_string(), Value::String(response));
+                            transcript.insert("agent".to_string(), Value::String(agent));
+                            if let Some(ts) = timestamp {
                                 transcript.insert(
                                     "response_timestamp".to_string(),
                                     Value::String(ts.to_rfc3339()),
                                 );
+                            }
+                            if let Some(role) = role {
+                                transcript.insert("role".to_string(), Value::String(role));
+                            }
+                            if let Some(tool) = tool {
+                                transcript.insert("tool".to_string(), Value::String(tool));
                             }
 
                             event_obj.insert("transcript".to_string(), Value::Object(transcript));

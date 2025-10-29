@@ -294,6 +294,10 @@ fn agent_commands_roundtrip() {
             .and_then(Value::as_str)
             .is_some()
     );
+    assert_eq!(
+        transcript_entries[0].get("role").and_then(Value::as_str),
+        Some("assistant")
+    );
 
     let transcript_events = lines[transcript_tail_idx]["result"]["events"]
         .as_array()
@@ -307,6 +311,12 @@ fn agent_commands_roundtrip() {
         first_event["transcript"]["response_timestamp"]
             .as_str()
             .is_some()
+    );
+    assert_eq!(
+        first_event["transcript"]
+            .get("role")
+            .and_then(Value::as_str),
+        Some("assistant")
     );
 
     duet::codebase::agent::claude::set_external_command(None, vec![]);

@@ -1457,6 +1457,8 @@ def _print_transcript_show(result: Any) -> None:
         actor = entry.get("actor", "")
         handle = entry.get("handle", "")
         timestamp = entry.get("timestamp")
+        role = entry.get("role")
+        tool = entry.get("tool")
         prompt = entry.get("prompt", "")
         response = entry.get("response", "")
 
@@ -1468,6 +1470,10 @@ def _print_transcript_show(result: Any) -> None:
             sections.append(f"[bold]Handle[/bold] {handle}")
         if timestamp:
             sections.append(f"[bold]Timestamp[/bold] {timestamp}")
+        if role:
+            sections.append(f"[bold]Role[/bold] {role}")
+        if tool:
+            sections.append(f"[bold]Tool[/bold] {tool}")
         sections.append(f"[bold]Prompt[/bold]\n{prompt or '[dim]—[/dim]'}")
         sections.append(f"[bold]Response[/bold]\n{response or '[dim]—[/dim]'}")
 
@@ -1517,6 +1523,8 @@ def _print_transcript_tail(result: Any) -> None:
                 request_id = transcript.get("request_id")
                 agent_name = transcript.get("agent")
                 response_timestamp = transcript.get("response_timestamp")
+                role = transcript.get("role")
+                tool = transcript.get("tool")
                 if request_id:
                     sections_lines.append(f"[bold]Request[/bold] {request_id}")
                 if agent_name:
@@ -1525,6 +1533,10 @@ def _print_transcript_tail(result: Any) -> None:
                     sections_lines.append(
                         f"[bold]Response Timestamp[/bold] {response_timestamp}"
                     )
+                if role:
+                    sections_lines.append(f"[bold]Role[/bold] {role}")
+                if tool:
+                    sections_lines.append(f"[bold]Tool[/bold] {tool}")
 
                 prompt_text = transcript.get("prompt") or ""
                 response_text = transcript.get("response") or ""

@@ -57,6 +57,9 @@ pub const RESPONSE_LABEL: &str = "agent-response";
 /// Record label consumed for requests.
 pub const REQUEST_LABEL: &str = "agent-request";
 
+/// Default conversational role emitted for responses.
+const DEFAULT_ROLE: &str = "assistant";
+
 /// Minimal Claude Code agent entity.
 ///
 /// This stub implements deterministic behaviour suitable for testing and for
@@ -192,13 +195,15 @@ impl ClaudeCodeAgent {
                 let timestamp = Utc::now().to_rfc3339();
                 let response_record = preserves::IOValue::record(
                     preserves::IOValue::symbol(RESPONSE_LABEL),
-                    vec![
-                        preserves::IOValue::new(request_id),
-                        preserves::IOValue::new(prompt),
-                        preserves::IOValue::new(response),
-                        preserves::IOValue::symbol(agent_kind),
-                        preserves::IOValue::new(timestamp),
-                    ],
+                    Self::response_fields(
+                        request_id,
+                        prompt,
+                        response,
+                        agent_kind,
+                        timestamp,
+                        Some(DEFAULT_ROLE),
+                        None,
+                    ),
                 );
 
                 let message = AsyncMessage {
@@ -241,17 +246,47 @@ impl ClaudeCodeAgent {
 
         let response_record = preserves::IOValue::record(
             preserves::IOValue::symbol(RESPONSE_LABEL),
-            vec![
-                preserves::IOValue::new(request_id),
-                preserves::IOValue::new(prompt),
-                preserves::IOValue::new(response),
-                preserves::IOValue::symbol(agent_kind),
-                preserves::IOValue::new(timestamp),
-            ],
+            Self::response_fields(
+                request_id,
+                prompt,
+                response,
+                agent_kind,
+                timestamp,
+                Some(DEFAULT_ROLE),
+                None,
+            ),
         );
 
         activation.assert(Handle::new(), response_record);
         Ok(())
+    }
+
+    fn response_fields(
+        request_id: String,
+        prompt: String,
+        response: String,
+        agent_kind: String,
+        timestamp: String,
+        role: Option<&str>,
+        tool: Option<&str>,
+    ) -> Vec<preserves::IOValue> {
+        let mut fields = vec![
+            preserves::IOValue::new(request_id),
+            preserves::IOValue::new(prompt),
+            preserves::IOValue::new(response),
+            preserves::IOValue::symbol(agent_kind),
+            preserves::IOValue::new(timestamp),
+        ];
+
+        if let Some(role) = role {
+            fields.push(preserves::IOValue::symbol(role.to_string()));
+        }
+
+        if let Some(tool) = tool {
+            fields.push(preserves::IOValue::new(tool.to_string()));
+        }
+
+        fields
     }
 }
 

@@ -143,6 +143,12 @@ pub struct AgentResponse {
     pub response: String,
     /// Agent kind identifier.
     pub agent: String,
+    /// Role associated with the response (assistant, tool, etc.).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    /// Tool identifier associated with the response, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
     /// Timestamp when the response was recorded (if present).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<DateTime<Utc>>,
@@ -431,11 +437,27 @@ pub fn parse_agent_response(value: &preserves::IOValue) -> Option<AgentResponse>
         None
     };
 
+    let role = if record.len() > 5 {
+        record
+            .field_symbol(5)
+            .or_else(|| record.field_string(5))
+    } else {
+        None
+    };
+
+    let tool = if record.len() > 6 {
+        record.field_string(6)
+    } else {
+        None
+    };
+
     Some(AgentResponse {
         request_id,
         prompt,
         response,
         agent: agent_kind,
+        role,
+        tool,
         timestamp,
     })
 }

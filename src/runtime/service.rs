@@ -632,18 +632,37 @@ impl<'a, W: Write> Session<'a, W> {
         let entries: Vec<Value> = entries
             .into_iter()
             .map(|entry| {
+                let transcript::TranscriptEntry {
+                    actor,
+                    handle,
+                    agent,
+                    prompt,
+                    response,
+                    role,
+                    tool,
+                    response_timestamp,
+                } = entry;
+
                 let mut value = json!({
-                    "actor": entry.actor.to_string(),
-                    "handle": entry.handle.to_string(),
-                    "agent": entry.agent,
-                    "prompt": entry.prompt,
-                    "response": entry.response,
+                    "actor": actor.to_string(),
+                    "handle": handle.to_string(),
+                    "agent": agent,
+                    "prompt": prompt,
+                    "response": response,
                 });
-                if let Some(timestamp) = entry.response_timestamp {
-                    if let Some(map) = value.as_object_mut() {
+
+                if let Some(map) = value.as_object_mut() {
+                    if let Some(timestamp) = response_timestamp {
                         map.insert("timestamp".to_string(), Value::from(timestamp.to_rfc3339()));
                     }
+                    if let Some(role) = role {
+                        map.insert("role".to_string(), Value::from(role));
+                    }
+                    if let Some(tool) = tool {
+                        map.insert("tool".to_string(), Value::from(tool));
+                    }
                 }
+
                 value
             })
             .collect();
