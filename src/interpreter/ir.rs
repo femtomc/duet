@@ -42,8 +42,17 @@ pub enum Instruction {
     Action(Action),
     /// Wait until a condition is satisfied.
     Await(WaitCondition),
-    /// Conditional or looping branch.
-    Branch(Vec<BranchArm>, Option<Vec<Instruction>>),
+    /// Conditional branch with optional `otherwise` body.
+    Branch {
+        /// Conditional arms evaluated in order.
+        arms: Vec<BranchArm>,
+        /// Fallback body executed when no conditions match.
+        otherwise: Option<Vec<Instruction>>,
+    },
+    /// Repeat the enclosed instructions until a transition breaks out.
+    Loop(Vec<Instruction>),
+    /// Transition to another named state.
+    Transition(String),
 }
 
 /// One arm of a conditional branch.

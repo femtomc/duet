@@ -1,6 +1,0 @@
-{
-  "root": ".duet-smoke",
-  "snapshot_interval": 50,
-  "flow_control_limit": 1000,
-  "debug": false
-}
