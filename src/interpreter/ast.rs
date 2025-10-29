@@ -20,11 +20,11 @@ pub enum Expr {
     List(Vec<Expr>),
 }
 
-/// Workflow program container. Future passes will translate `forms` into
-/// strongly typed structures (states, actions, waits, etc.).
+/// Program container. Future passes will translate `forms` into strongly typed
+/// structures (states, actions, waits, etc.).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Program {
-    /// Program identifier, usually derived from `(workflow <name> …)`.
+    /// Program identifier, usually derived from the top-level form name.
     pub name: String,
     /// Parsed forms (the raw S-expressions).
     pub forms: Vec<Expr>,

@@ -1,13 +1,14 @@
-//! Workflow interpreter scaffolding.
+//! Interpreter scaffolding for the Duet language runtime.
 //!
-//! This module houses the workflow DSL (AST/parser) and the runtime that
-//! executes workflow programs on top of the Syndicated Actor VM. The language
-//! is still under construction; current functionality is limited to stubs so
-//! other components can depend on the public API.
+//! Programs expressed in our DSL are translated into Syndicated Actor VM
+//! actions—spawning facets, sending messages, awaiting assertions, and so on.
+//! This module provides the AST, parser, and runtime hooks that let higher-level
+//! tools (like `codebased`) interpret those programs without hand-writing actor
+//! logic.
 
-/// Abstract syntax tree definitions for the workflow DSL.
+/// Abstract syntax tree definitions for the interpreter language.
 pub mod ast;
-/// Runtime driver that will execute workflow programs.
+/// Runtime driver that will execute programs against the actor VM.
 pub mod runtime;
 
 pub use ast::{Expr, Program};
@@ -18,18 +19,18 @@ use thiserror::Error;
 /// Convenience result alias for interpreter operations.
 pub type Result<T> = std::result::Result<T, WorkflowError>;
 
-/// Errors surfaced by the workflow parser/interpreter.
+/// Errors surfaced by the parser/interpreter.
 #[derive(Debug, Error)]
 pub enum WorkflowError {
     /// Parsing failed due to invalid syntax.
-    #[error("invalid workflow syntax: {0}")]
+    #[error("invalid interpreter syntax: {0}")]
     Syntax(String),
 
     /// Semantic validation failed (unknown symbol, missing state, etc.).
-    #[error("workflow validation failed: {0}")]
+    #[error("interpreter validation failed: {0}")]
     Validation(String),
 
     /// Placeholder error while the interpreter is still being implemented.
-    #[error("workflow interpreter is not yet implemented")]
+    #[error("interpreter runtime is not yet implemented")]
     Unimplemented,
 }
