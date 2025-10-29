@@ -136,6 +136,7 @@ Actions (non-exhaustive):
 * `(invoke-tool :role <role> :capability <symbol> :payload <expr> :tag <id>)`
 * `(emit (log <text>))`
 * `(emit (assert <value>))`
+* `(emit (retract <value>))`
 
 Expressions available in templates / args may include:
 
