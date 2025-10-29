@@ -20,6 +20,9 @@ pub mod codebase;
 /// Common utility helpers used across modules
 pub mod util;
 
+/// Workflow language interpreter and DSL scaffolding
+pub mod interpreter;
+
 // Re-export key types for convenience
 pub use codebase::register_codebase_entities;
 pub use runtime::{Runtime, RuntimeConfig};
