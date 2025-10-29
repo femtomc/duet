@@ -34,7 +34,7 @@ We adopt a Lisp-style S-expression syntax because:
 * Nesting expresses branching/looping clearly without JSON ceremony.
 * Future macros/templates become natural (`defworkflow`, `defstep`, etc.).
 
-Example (pseudocode; concrete grammar TBD):
+Example (pseudocode; concrete grammar below):
 
 ```
 (workflow planner-worker-review
@@ -146,6 +146,27 @@ Expressions available in templates / args may include:
 These derive from the standard library modules. The core interpreter only understands
 action/condition skeletons; specific helpers are provided by modules.
 
+## Syntax Reference
+
+The surface language is an S-expression grammar with the following tokens:
+
+```
+program   ::= form*
+form      ::= list | atom
+list      ::= '(' form* ')'
+atom      ::= symbol | keyword | string | integer | float | boolean
+symbol    ::= [^\s();"]+
+keyword   ::= ':' symbol
+string    ::= '"' (<any char except " or \> | escape)* '"'
+escape    ::= '\\"' | '\\\\' | '\\n' | '\\r' | '\\t'
+integer   ::= ['+'|'-']? [0-9]+
+float     ::= ['+'|'-']? [0-9]+ '.' [0-9]+
+boolean   ::= 'true' | 'false'
+```
+
+Whitespace is insignificant. Line comments start with `;` and continue to the
+end of the line.
+
 ## Compiler / Interpreter Pipeline
 
 1. **Parse** the S-expression into an AST (`WorkflowProgram`).
@@ -169,8 +190,9 @@ that consumes the AST.
 
 ## Next Steps
 
-1. Formalise the grammar (using `nom`, `pest`, or the Preserves text parser).
-2. Implement the interpreter entity skeleton in `src/runtime/workflow`.
-3. Extend service RPCs to enumerate definitions/instances and start workflows (currently stubs).
+1. Implement the interpreter parser (currently in progress) and extend it with
+   macro/templating support as needed.
+2. Implement the interpreter runtime in `src/interpreter/runtime.rs`.
+3. Extend service RPCs to enumerate definitions/instances and start programs (currently stubs).
 4. Flesh out CLI commands (`duet workflow define/start/watch/list`).
 5. Provide template definitions for common orchestrations (planner/worker, self-review, etc.).

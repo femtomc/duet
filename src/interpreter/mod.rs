@@ -10,8 +10,11 @@
 pub mod ast;
 /// Runtime driver that will execute programs against the actor VM.
 pub mod runtime;
+/// Parser for the interpreter DSL.
+pub mod parser;
 
 pub use ast::{Expr, Program};
+pub use parser::parse_program;
 pub use runtime::WorkflowRuntime;
 
 use thiserror::Error;
