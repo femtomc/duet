@@ -3,6 +3,9 @@
 /dist/
 /build/
 
+# Rust library lock file (keep for binaries, ignore for libraries)
+Cargo.lock
+
 # Runtime state
 /.duet/
 
@@ -25,10 +28,37 @@ venv/
 coverage.xml
 htmlcov/
 
+# LaTeX artifacts
+*.aux
+*.bbl
+*.blg
+*.fdb_latexmk
+*.fls
+*.out
+*.pdf
+*.synctex.gz
+*.toc
+*.lof
+*.lot
+*.nav
+*.snm
+*.vrb
+*.bcf
+*.run.xml
+
+# Lean build artifacts
+.lake/
+lake-packages/
+
 # Editor/OS cruft
 .DS_Store
+._*
 *.swp
 *.swo
 *.log
+*~
+*.bak
+*.tmp
+*.temp
 .idea/
 .vscode/

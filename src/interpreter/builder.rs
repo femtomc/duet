@@ -85,69 +85,50 @@ fn parse_state(items: &[Expr]) -> Result<State> {
     let mut terminal = false;
 
     for form in &items[2..] {
-        match form {
-            Expr::List(list) if matches_symbol(list.first(), "enter") => {
+        if let Expr::List(list) = form {
+            if matches_symbol(list.first(), "enter") {
                 for action in &list[1..] {
-                    entry.push(Instruction::Action(parse_action(action)?));
+                    entry.push(parse_action(action)?);
                 }
+                continue;
             }
-            Expr::List(list) if matches_symbol(list.first(), "action") => {
-                for action in &list[1..] {
-                    body.push(Instruction::Action(parse_action(action)?));
-                }
-            }
-            Expr::List(list) if matches_symbol(list.first(), "await") => {
-                for wait in &list[1..] {
-                    body.push(Instruction::Await(parse_wait(wait)?));
-                }
-            }
-            Expr::List(list) if matches_symbol(list.first(), "branch") => {
-                body.push(parse_branch(&list[1..])?);
-            }
-            Expr::List(list) if matches_symbol(list.first(), "loop") => {
-                let mut loop_body = Vec::new();
-                for item in &list[1..] {
-                    loop_body.push(parse_instruction(item)?);
-                }
-                body.push(Instruction::Branch(vec![], Some(loop_body)));
-            }
-            Expr::List(list) if matches_symbol(list.first(), "terminal") => {
+            if matches_symbol(list.first(), "terminal") {
                 terminal = true;
+                continue;
             }
-            other => body.push(parse_instruction(other)?),
         }
+        append_instruction(&mut body, form)?;
     }
 
-    Ok(State { name, entry: flatten_actions(entry), body, terminal })
-}
-
-fn flatten_actions(instructions: Vec<Instruction>) -> Vec<Action> {
-    instructions
-        .into_iter()
-        .filter_map(|instr| match instr {
-            Instruction::Action(action) => Some(action),
-            _ => None,
-        })
-        .collect()
+    Ok(State { name, entry, body, terminal })
 }
 
 fn parse_instruction(expr: &Expr) -> Result<Instruction> {
-    match expr {
-        Expr::List(list) if matches_symbol(list.first(), "await") => {
+    if let Expr::List(list) = expr {
+        if matches_symbol(list.first(), "await") {
             if list.len() != 2 {
                 return Err(validation("await expects a single condition"));
             }
-            Ok(Instruction::Await(parse_wait(&list[1])?))
+            return Ok(Instruction::Await(parse_wait(&list[1])?));
         }
-        Expr::List(list) if matches_symbol(list.first(), "action") => {
-            let mut body = Vec::new();
-            for action in &list[1..] {
-                body.push(Instruction::Action(parse_action(action)?));
+        if matches_symbol(list.first(), "branch") {
+            return parse_branch(&list[1..]);
+        }
+        if matches_symbol(list.first(), "loop") {
+            let mut loop_body = Vec::new();
+            for item in &list[1..] {
+                append_instruction(&mut loop_body, item)?;
             }
-            Ok(Instruction::Branch(vec![], Some(body)))
+            return Ok(Instruction::Loop(loop_body));
         }
-        _ => Ok(Instruction::Action(parse_action(expr)?)),
+        if matches_symbol(list.first(), "goto") {
+            if list.len() != 2 {
+                return Err(validation("goto expects a state name"));
+            }
+            return Ok(Instruction::Transition(expect_symbol(&list[1])?));
+        }
     }
+    Ok(Instruction::Action(parse_action(expr)?))
 }
 
 fn parse_branch(arms: &[Expr]) -> Result<Instruction> {
@@ -162,13 +143,13 @@ fn parse_branch(arms: &[Expr]) -> Result<Instruction> {
                 let cond = parse_condition(&list[1])?;
                 let mut body = Vec::new();
                 for instr in &list[2..] {
-                    body.push(parse_instruction(instr)?);
+                    append_instruction(&mut body, instr)?;
                 }
                 branches.push(BranchArm { condition: cond, body });
             } else if matches_symbol(list.first(), "otherwise") {
                 let mut body = Vec::new();
                 for instr in &list[1..] {
-                    body.push(parse_instruction(instr)?);
+                    append_instruction(&mut body, instr)?;
                 }
                 otherwise = Some(body);
             } else {
@@ -178,7 +159,7 @@ fn parse_branch(arms: &[Expr]) -> Result<Instruction> {
             return Err(validation("branch arms must be lists"));
         }
     }
-    Ok(Instruction::Branch(branches, otherwise))
+    Ok(Instruction::Branch { arms: branches, otherwise })
 }
 
 fn parse_action(expr: &Expr) -> Result<Action> {
@@ -391,6 +372,19 @@ fn validation(msg: &str) -> WorkflowError {
     WorkflowError::Validation(msg.to_string())
 }
 
+fn append_instruction(target: &mut Vec<Instruction>, expr: &Expr) -> Result<()> {
+    if let Expr::List(list) = expr {
+        if matches_symbol(list.first(), "action") {
+            for action in &list[1..] {
+                target.push(Instruction::Action(parse_action(action)?));
+            }
+            return Ok(());
+        }
+    }
+    target.push(parse_instruction(expr)?);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -408,5 +402,35 @@ mod tests {
         assert_eq!(ir.name, "demo");
         assert_eq!(ir.roles.len(), 1);
         assert_eq!(ir.states.len(), 1);
+        match &ir.states[0].body[0] {
+            Instruction::Action(Action::SendPrompt { agent_role, template, .. }) => {
+                assert_eq!(agent_role, "planner");
+                assert_eq!(template, "hi");
+            }
+            other => panic!("unexpected instruction: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn builds_branch_loop_and_transition() {
+        let src = "
+            (workflow demo)
+            (state plan
+              (loop (await (transcript-response :tag \"req\")))
+              (branch
+                (when (signal review/done) (goto complete))
+                (otherwise (action (emit (log \"waiting\"))))))
+            (state complete (terminal))
+        ";
+        let ir = build(src);
+        assert_eq!(ir.states.len(), 2);
+        assert!(matches!(ir.states[0].body[0], Instruction::Loop(_)));
+        match &ir.states[0].body[1] {
+            Instruction::Branch { arms, otherwise } => {
+                assert_eq!(arms.len(), 1);
+                assert!(otherwise.is_some());
+            }
+            other => panic!("expected branch, got {:?}", other),
+        }
     }
 }

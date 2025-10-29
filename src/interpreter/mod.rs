@@ -21,7 +21,7 @@ pub use ast::{Expr, Program};
 pub use builder::build_ir;
 pub use ir::{Action, BranchArm, Condition, Instruction, ProgramIr, RoleBinding, State, WaitCondition};
 pub use parser::parse_program;
-pub use runtime::WorkflowRuntime;
+pub use runtime::{InterpreterHost, InterpreterRuntime, RuntimeError, RuntimeEvent};
 
 use thiserror::Error;
 
