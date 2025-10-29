@@ -109,6 +109,16 @@ impl<H: InterpreterHost> InterpreterRuntime<H> {
                 if !state.body.is_empty() {
                     self.frames.push(Frame::new(state.body.clone(), FrameKind::Normal));
                 }
+
+                if self.frames.is_empty() {
+                    if state.terminal {
+                        self.completed = true;
+                        return Ok(RuntimeEvent::Completed);
+                    } else {
+                        return self.advance_state();
+                    }
+                }
+
                 return Ok(RuntimeEvent::Progress);
             }
 
