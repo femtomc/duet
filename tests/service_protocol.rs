@@ -299,6 +299,15 @@ fn agent_commands_roundtrip() {
         .as_array()
         .unwrap();
     assert!(!transcript_events.is_empty());
+    let first_event_set = transcript_events[0]["events"].as_array().unwrap();
+    assert!(!first_event_set.is_empty());
+    let first_event = &first_event_set[0];
+    assert!(first_event.get("transcript").is_some());
+    assert!(
+        first_event["transcript"]["response_timestamp"]
+            .as_str()
+            .is_some()
+    );
 
     duet::codebase::agent::claude::set_external_command(None, vec![]);
 }

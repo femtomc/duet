@@ -1510,11 +1510,37 @@ def _print_transcript_tail(result: Any) -> None:
         for event in batch.get("events", []):
             action = (event.get("action") or "").upper()
             handle = event.get("handle", "")
-            value = event.get("value", "")
-            line = f"[bold]{action}[/bold] {handle}"
-            if value:
-                line += f"\n{value}"
-            event_lines.append(line)
+            transcript = event.get("transcript")
+
+            if isinstance(transcript, dict):
+                sections_lines = [f"[bold]{action}[/bold] {handle}"]
+                request_id = transcript.get("request_id")
+                agent_name = transcript.get("agent")
+                response_timestamp = transcript.get("response_timestamp")
+                if request_id:
+                    sections_lines.append(f"[bold]Request[/bold] {request_id}")
+                if agent_name:
+                    sections_lines.append(f"[bold]Agent[/bold] {agent_name}")
+                if response_timestamp:
+                    sections_lines.append(
+                        f"[bold]Response Timestamp[/bold] {response_timestamp}"
+                    )
+
+                prompt_text = transcript.get("prompt") or ""
+                response_text = transcript.get("response") or ""
+                sections_lines.append(
+                    f"[bold]Prompt[/bold]\n{prompt_text or '[dim]—[/dim]'}"
+                )
+                sections_lines.append(
+                    f"[bold]Response[/bold]\n{response_text or '[dim]—[/dim]'}"
+                )
+                event_lines.append("\n\n".join(sections_lines))
+            else:
+                value = event.get("value")
+                line = f"[bold]{action}[/bold] {handle}"
+                if value:
+                    line += f"\n{_summarize_value(value, max_length=200)}"
+                event_lines.append(line)
 
         if event_lines:
             sections.append("[bold]Events[/bold]\n" + "\n\n".join(event_lines))
