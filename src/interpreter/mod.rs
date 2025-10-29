@@ -16,12 +16,15 @@ pub mod parser;
 pub mod ir;
 /// Builders that translate parsed programs into the IR.
 pub mod builder;
+/// Interpreter entity implementation.
+pub mod entity;
 
 pub use ast::{Expr, Program};
 pub use builder::build_ir;
 pub use ir::{Action, BranchArm, Condition, Instruction, ProgramIr, RoleBinding, State, WaitCondition};
 pub use parser::parse_program;
 pub use runtime::{InterpreterHost, InterpreterRuntime, RuntimeError, RuntimeEvent};
+pub use entity::InterpreterEntity;
 
 use thiserror::Error;
 
