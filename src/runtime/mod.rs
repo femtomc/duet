@@ -21,6 +21,7 @@ pub mod registry;
 pub mod scheduler;
 pub mod schema;
 pub mod service;
+pub mod workflow;
 pub mod snapshot;
 pub mod state;
 pub mod storage;
