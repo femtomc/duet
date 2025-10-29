@@ -46,6 +46,9 @@ htmlcov/
 *.bcf
 *.run.xml
 
+# HTML files (typically generated)
+*.html
+
 # Lean build artifacts
 .lake/
 lake-packages/
