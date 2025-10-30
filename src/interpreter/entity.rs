@@ -2,18 +2,21 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use crate::interpreter::protocol::{
-    WaitRecord, runtime_snapshot_from_value, runtime_snapshot_to_value, wait_record_to_value,
+    OBSERVER_RECORD_LABEL, TOOL_REQUEST_RECORD_LABEL, TOOL_RESULT_RECORD_LABEL, WaitRecord,
+    runtime_snapshot_from_value, runtime_snapshot_to_value, wait_record_to_value,
 };
 use crate::interpreter::{
     Action, Condition, DEFINE_MESSAGE_LABEL, DefinitionRecord, InstanceProgress, InstanceRecord,
     InstanceStatus, InterpreterHost, InterpreterRuntime, LOG_RECORD_LABEL, NOTIFY_MESSAGE_LABEL,
-    ProgramIr, ProgramRef, RESUME_MESSAGE_LABEL, RUN_MESSAGE_LABEL, RuntimeError, RuntimeEvent,
-    RuntimeSnapshot, Value, WaitCondition, WaitStatus, build_ir, parse_program,
+    ProgramIr, ProgramRef, RESUME_MESSAGE_LABEL, RUN_MESSAGE_LABEL, RoleBinding, RuntimeError,
+    RuntimeEvent, RuntimeSnapshot, Value, WaitCondition, WaitStatus, build_ir, parse_program,
 };
-use crate::runtime::actor::{Activation, Entity, HydratableEntity};
+use crate::runtime::actor::{
+    Activation, CapabilitySpec, ENTITY_SPAWN_CAPABILITY_KIND, Entity, HydratableEntity,
+};
 use crate::runtime::error::{ActorError, ActorResult};
 use crate::runtime::registry::EntityCatalog;
-use crate::runtime::turn::{ActorId, FacetId, Handle};
+use crate::runtime::turn::{ActorId, CapabilityCompletion, FacetId, Handle};
 use crate::util::io_value::{as_record, record_with_label};
 use preserves::IOValue;
 use std::convert::TryFrom;
@@ -25,6 +28,7 @@ pub struct InterpreterEntity {
     waiting: Mutex<HashMap<String, WaitingInstance>>,
     actor_id: Mutex<Option<ActorId>>,
     observers: Mutex<HashMap<String, ObserverEntry>>,
+    spawn_capability_granted: Mutex<bool>,
 }
 
 #[derive(Clone)]
@@ -55,10 +59,12 @@ struct WaitingInstance {
 
 #[derive(Clone)]
 struct ObserverEntry {
+    id: String,
     condition: WaitCondition,
     program_ref: ProgramRef,
     program: ProgramIr,
     facet: FacetId,
+    handle: Handle,
 }
 
 #[derive(Clone)]
@@ -145,6 +151,113 @@ fn program_ref_from_value(value: &IOValue) -> Option<ProgramRef> {
     None
 }
 
+fn wait_condition_to_value(condition: &WaitCondition) -> IOValue {
+    match condition {
+        WaitCondition::Signal { label } => {
+            IOValue::record(IOValue::symbol("signal"), vec![IOValue::new(label.clone())])
+        }
+        WaitCondition::RecordFieldEq {
+            label,
+            field,
+            value,
+        } => IOValue::record(
+            IOValue::symbol("record"),
+            vec![
+                IOValue::new(label.clone()),
+                IOValue::new(*field as i64),
+                value.to_io_value(),
+            ],
+        ),
+        WaitCondition::ToolResult { tag } => IOValue::record(
+            IOValue::symbol("tool-result"),
+            vec![IOValue::new(tag.clone())],
+        ),
+    }
+}
+
+fn wait_condition_from_value(value: &IOValue) -> Option<WaitCondition> {
+    if let Some(signal) = record_with_label(value, "signal") {
+        let label = signal.field_string(0)?.to_string();
+        Some(WaitCondition::Signal { label })
+    } else if let Some(record_cond) = record_with_label(value, "record") {
+        if record_cond.len() < 3 {
+            return None;
+        }
+        let label = record_cond.field_string(0)?.to_string();
+        let field_value = record_cond.field(1);
+        let field_signed = field_value.as_signed_integer()?;
+        let field_index = i64::try_from(field_signed.as_ref()).ok()?;
+        if field_index < 0 {
+            return None;
+        }
+        let expected = Value::from_io_value(&record_cond.field(2))?;
+        Some(WaitCondition::RecordFieldEq {
+            label,
+            field: field_index as usize,
+            value: expected,
+        })
+    } else if let Some(tool) = record_with_label(value, "tool-result") {
+        let tag = tool.field_string(0)?.to_string();
+        Some(WaitCondition::ToolResult { tag })
+    } else {
+        None
+    }
+}
+
+fn observer_assertion_value(
+    id: &str,
+    condition: &WaitCondition,
+    handler: &ProgramRef,
+    facet: &FacetId,
+) -> IOValue {
+    IOValue::record(
+        IOValue::symbol(OBSERVER_RECORD_LABEL),
+        vec![
+            IOValue::new(id.to_string()),
+            wait_condition_to_value(condition),
+            program_ref_to_value(handler),
+            IOValue::new(facet.0.to_string()),
+        ],
+    )
+}
+
+fn observer_snapshot_value(entry: &ObserverEntry) -> IOValue {
+    let mut fields = vec![
+        IOValue::new(entry.id.clone()),
+        wait_condition_to_value(&entry.condition),
+        program_ref_to_value(&entry.program_ref),
+        IOValue::new(entry.facet.0.to_string()),
+    ];
+    fields.push(IOValue::new(entry.handle.0.to_string()));
+    IOValue::record(IOValue::symbol("observer-entry"), fields)
+}
+
+fn observer_entry_from_value(
+    value: &IOValue,
+) -> Option<(String, WaitCondition, ProgramRef, FacetId, Option<Handle>)> {
+    let record = record_with_label(value, "observer-entry")?;
+    if record.len() < 4 {
+        return None;
+    }
+
+    let observer_id = record.field_string(0)?.to_string();
+    let condition = wait_condition_from_value(&record.field(1))?;
+    let program_ref = program_ref_from_value(&record.field(2))?;
+    let facet_uuid = record.field_string(3)?;
+    let facet = FacetId::from_uuid(Uuid::parse_str(&facet_uuid).ok()?);
+
+    let handle = if record.len() >= 5 {
+        record
+            .field_string(4)
+            .and_then(|value| Uuid::parse_str(&value).ok())
+            .map(Handle)
+    } else {
+        None
+    };
+
+    Some((observer_id, condition, program_ref, facet, handle))
+}
+
 impl Default for InterpreterEntity {
     fn default() -> Self {
         Self {
@@ -152,6 +265,7 @@ impl Default for InterpreterEntity {
             waiting: Mutex::new(HashMap::new()),
             actor_id: Mutex::new(None),
             observers: Mutex::new(HashMap::new()),
+            spawn_capability_granted: Mutex::new(false),
         }
     }
 }
@@ -169,19 +283,41 @@ impl InterpreterEntity {
         }
     }
 
+    fn ensure_spawn_capability(&self, activation: &mut Activation) {
+        let mut granted = self.spawn_capability_granted.lock().unwrap();
+        if *granted {
+            return;
+        }
+
+        let spec = CapabilitySpec {
+            holder: activation.actor_id.clone(),
+            holder_facet: activation.current_facet.clone(),
+            target: None,
+            kind: ENTITY_SPAWN_CAPABILITY_KIND.to_string(),
+            attenuation: Vec::new(),
+        };
+        activation.grant_capability(spec);
+        *granted = true;
+    }
+
     fn register_observer(
         &self,
-        _activation: &mut Activation,
+        activation: &mut Activation,
         spec: ObserverSpec,
     ) -> ActorResult<String> {
         let program = self.program_for_ref(&spec.handler)?;
         let id = Uuid::new_v4().to_string();
+        let record = observer_assertion_value(&id, &spec.condition, &spec.handler, &spec.facet);
+        let handle = Handle::new();
+        activation.assert(handle.clone(), record);
 
         let entry = ObserverEntry {
+            id: id.clone(),
             condition: spec.condition,
             program_ref: spec.handler,
             program,
             facet: spec.facet,
+            handle,
         };
 
         self.observers.lock().unwrap().insert(id.clone(), entry);
@@ -195,7 +331,7 @@ impl InterpreterEntity {
             let observers = self.observers.lock().unwrap();
             for entry in observers.values() {
                 let status = WaitStatus::from_condition(&entry.condition);
-                if wait_matches(&status, value) {
+                if wait_matches(&status, None, value) {
                     triggered.push(entry.clone());
                 }
             }
@@ -224,7 +360,7 @@ impl InterpreterEntity {
         {
             let mut waiting_guard = self.waiting.lock().unwrap();
             for (instance_id, entry) in waiting_guard.iter_mut() {
-                if wait_matches(&entry.wait, value) && !entry.resume_pending {
+                if wait_matches(&entry.wait, Some(instance_id), value) && !entry.resume_pending {
                     entry.resume_pending = true;
                     matches.push((instance_id.clone(), entry.clone()));
                 }
@@ -317,6 +453,9 @@ impl InterpreterEntity {
                     label: label.clone(),
                 });
             }
+            WaitStatus::ToolResult { tag } => {
+                ready_conditions.push(WaitCondition::ToolResult { tag: tag.clone() });
+            }
         }
 
         let program_ref = waiting_entry.program_ref.clone();
@@ -344,6 +483,8 @@ impl InterpreterEntity {
 
         let host = ActivationHost::with_ready(
             activation,
+            instance_id.clone(),
+            &program.roles,
             ready_conditions,
             stored_assertions,
             stored_facets,
@@ -494,7 +635,7 @@ impl InterpreterEntity {
     }
 }
 
-fn wait_matches(wait: &WaitStatus, value: &IOValue) -> bool {
+fn wait_matches(wait: &WaitStatus, instance_id: Option<&str>, value: &IOValue) -> bool {
     match wait {
         WaitStatus::Signal { label } => value
             .label()
@@ -522,11 +663,36 @@ fn wait_matches(wait: &WaitStatus, value: &IOValue) -> bool {
                 false
             }
         }
+        WaitStatus::ToolResult { tag } => {
+            if let Some(record) = record_with_label(value, TOOL_RESULT_RECORD_LABEL) {
+                if record.len() < 2 {
+                    return false;
+                }
+
+                let matches_tag = record
+                    .field_string(1)
+                    .map(|candidate| candidate == *tag)
+                    .unwrap_or(false);
+
+                let matches_instance = match instance_id {
+                    Some(id) => record
+                        .field_string(0)
+                        .map(|candidate| candidate == id)
+                        .unwrap_or(false),
+                    None => true,
+                };
+
+                matches_tag && matches_instance
+            } else {
+                false
+            }
+        }
     }
 }
 
 impl Entity for InterpreterEntity {
     fn on_message(&self, activation: &mut Activation, payload: &IOValue) -> ActorResult<()> {
+        self.ensure_spawn_capability(activation);
         if let Some(record) = record_with_label(payload, NOTIFY_MESSAGE_LABEL) {
             if record.len() > 0 {
                 let assertion = record.field(0);
@@ -602,36 +768,8 @@ impl HydratableEntity for InterpreterEntity {
 
         let observers_guard = self.observers.lock().unwrap();
         let observer_records: Vec<_> = observers_guard
-            .iter()
-            .map(|(id, entry)| {
-                let condition_value = match &entry.condition {
-                    WaitCondition::Signal { label } => IOValue::record(
-                        IOValue::symbol("signal"),
-                        vec![IOValue::new(label.clone())],
-                    ),
-                    WaitCondition::RecordFieldEq {
-                        label,
-                        field,
-                        value,
-                    } => IOValue::record(
-                        IOValue::symbol("record"),
-                        vec![
-                            IOValue::new(label.clone()),
-                            IOValue::new(*field as i64),
-                            value.to_io_value(),
-                        ],
-                    ),
-                };
-                IOValue::record(
-                    IOValue::symbol("observer-entry"),
-                    vec![
-                        IOValue::new(id.clone()),
-                        condition_value,
-                        program_ref_to_value(&entry.program_ref),
-                        IOValue::new(entry.facet.0.to_string()),
-                    ],
-                )
-            })
+            .values()
+            .map(|entry| observer_snapshot_value(entry))
             .collect();
 
         let observers_value = IOValue::record(IOValue::symbol("observers"), observer_records);
@@ -657,7 +795,13 @@ impl HydratableEntity for InterpreterEntity {
 
         let mut reconstructed_waiting: Vec<(String, WaitingInstance)> = Vec::new();
         let mut restored_actor: Option<ActorId> = None;
-        let mut restored_observers: Vec<(String, WaitCondition, ProgramRef, FacetId)> = Vec::new();
+        let mut restored_observers: Vec<(
+            String,
+            WaitCondition,
+            ProgramRef,
+            FacetId,
+            Option<Handle>,
+        )> = Vec::new();
 
         if let Some(record) = as_record(state) {
             if record.has_label("interpreter-state") {
@@ -810,86 +954,15 @@ impl HydratableEntity for InterpreterEntity {
                     } else if let Some(observers) = record_with_label(&entry, "observers") {
                         for observer_index in 0..observers.len() {
                             let observer_entry = observers.field(observer_index);
-                            if let Some(observer_view) =
-                                record_with_label(&observer_entry, "observer-entry")
+                            if let Some((observer_id, condition, program_ref, facet, handle)) =
+                                observer_entry_from_value(&observer_entry)
                             {
-                                if observer_view.len() < 4 {
-                                    continue;
-                                }
-
-                                let observer_id = match observer_view.field_string(0) {
-                                    Some(id) => id,
-                                    None => continue,
-                                };
-
-                                let condition_value = observer_view.field(1);
-                                let condition = if let Some(signal) =
-                                    record_with_label(&condition_value, "signal")
-                                {
-                                    if let Some(label) = signal.field_string(0) {
-                                        WaitCondition::Signal {
-                                            label: label.to_string(),
-                                        }
-                                    } else {
-                                        continue;
-                                    }
-                                } else if let Some(record_cond) =
-                                    record_with_label(&condition_value, "record")
-                                {
-                                    if record_cond.len() < 3 {
-                                        continue;
-                                    }
-                                    let label = match record_cond.field_string(0) {
-                                        Some(label) => label.to_string(),
-                                        None => continue,
-                                    };
-                                    let field_index = match record_cond.field(1).as_signed_integer()
-                                    {
-                                        Some(num) => {
-                                            let value = match i64::try_from(num.as_ref()) {
-                                                Ok(value) => value,
-                                                Err(_) => continue,
-                                            };
-                                            if value < 0 {
-                                                continue;
-                                            }
-                                            value as usize
-                                        }
-                                        None => continue,
-                                    };
-                                    let expected = match Value::from_io_value(&record_cond.field(2))
-                                    {
-                                        Some(value) => value,
-                                        None => continue,
-                                    };
-                                    WaitCondition::RecordFieldEq {
-                                        label,
-                                        field: field_index,
-                                        value: expected,
-                                    }
-                                } else {
-                                    continue;
-                                };
-
-                                let program_ref =
-                                    match program_ref_from_value(&observer_view.field(2)) {
-                                        Some(pr) => pr,
-                                        None => continue,
-                                    };
-
-                                let facet_uuid = match observer_view.field_string(3) {
-                                    Some(value) => match uuid::Uuid::parse_str(&value) {
-                                        Ok(uuid) => uuid,
-                                        Err(_) => continue,
-                                    },
-                                    None => continue,
-                                };
-
                                 restored_observers.push((
                                     observer_id,
                                     condition,
                                     program_ref,
-                                    FacetId::from_uuid(facet_uuid),
+                                    facet,
+                                    handle,
                                 ));
                             }
                         }
@@ -918,15 +991,18 @@ impl HydratableEntity for InterpreterEntity {
 
                 let mut observers_guard = self.observers.lock().unwrap();
                 observers_guard.clear();
-                for (observer_id, condition, program_ref, facet) in restored_observers {
+                for (observer_id, condition, program_ref, facet, handle) in restored_observers {
                     let program = self.program_for_ref(&program_ref)?;
+                    let key = observer_id.clone();
                     observers_guard.insert(
-                        observer_id,
+                        key,
                         ObserverEntry {
+                            id: observer_id,
                             condition,
                             program_ref,
                             program,
                             facet,
+                            handle: handle.unwrap_or_else(Handle::new),
                         },
                     );
                 }
@@ -1106,7 +1182,7 @@ impl InterpreterEntity {
         };
         activation.assert(status_handle.clone(), running_record.to_value());
 
-        let host = ActivationHost::new(activation);
+        let host = ActivationHost::new(activation, instance_id.clone(), &program_clone.roles);
         let mut runtime = InterpreterRuntime::new(host, program);
 
         progress.state = runtime.current_state_name();
@@ -1259,6 +1335,8 @@ struct ActivationHost<'a> {
     assertions: HashMap<IOValue, Vec<Handle>>,
     facets: Vec<FacetId>,
     observers: Vec<ObserverSpec>,
+    instance_id: String,
+    roles: HashMap<String, RoleBinding>,
 }
 
 #[derive(Clone)]
@@ -1268,24 +1346,114 @@ struct ObserverSpec {
     facet: FacetId,
 }
 
+#[derive(Clone)]
+struct ToolInvocation {
+    role: String,
+    capability_alias: String,
+    capability_id: Uuid,
+    payload: IOValue,
+    tag: String,
+    role_properties: Option<IOValue>,
+}
+
+impl ToolInvocation {
+    fn new(
+        role: String,
+        capability_alias: String,
+        capability_id: Uuid,
+        payload: IOValue,
+        tag: String,
+        role_properties: Option<IOValue>,
+    ) -> Self {
+        Self {
+            role,
+            capability_alias,
+            capability_id,
+            payload,
+            tag,
+            role_properties,
+        }
+    }
+
+    fn request_record(&self, instance_id: &str) -> IOValue {
+        let mut fields = vec![
+            IOValue::new(instance_id.to_string()),
+            IOValue::new(self.tag.clone()),
+            IOValue::new(self.role.clone()),
+            IOValue::new(self.capability_alias.clone()),
+            IOValue::new(self.capability_id.to_string()),
+            self.payload.clone(),
+        ];
+
+        if let Some(props) = &self.role_properties {
+            fields.push(props.clone());
+        }
+
+        IOValue::record(IOValue::symbol(TOOL_REQUEST_RECORD_LABEL), fields)
+    }
+
+    fn log_record(&self) -> IOValue {
+        IOValue::record(
+            IOValue::symbol(LOG_RECORD_LABEL),
+            vec![IOValue::new(format!(
+                "invoke-tool role={} capability={} tag={}",
+                self.role, self.capability_alias, self.tag
+            ))],
+        )
+    }
+
+    fn completion(
+        &self,
+        actor: &ActorId,
+        facet: &FacetId,
+        instance_id: &str,
+    ) -> CapabilityCompletion {
+        CapabilityCompletion {
+            origin_actor: actor.clone(),
+            origin_facet: facet.clone(),
+            instance_id: instance_id.to_string(),
+            role: self.role.clone(),
+            capability_alias: self.capability_alias.clone(),
+            tag: self.tag.clone(),
+            role_properties: self.role_properties.clone(),
+        }
+    }
+
+    fn payload(&self) -> IOValue {
+        self.payload.clone()
+    }
+
+    fn capability_id(&self) -> Uuid {
+        self.capability_id
+    }
+}
+
 impl<'a> ActivationHost<'a> {
-    fn new(activation: &'a mut Activation) -> Self {
+    fn new(activation: &'a mut Activation, instance_id: String, roles: &[RoleBinding]) -> Self {
+        let mut role_map = HashMap::new();
+        for binding in roles {
+            role_map.insert(binding.name.clone(), binding.clone());
+        }
         Self {
             activation,
             satisfied: Vec::new(),
             assertions: HashMap::new(),
             facets: Vec::new(),
             observers: Vec::new(),
+            instance_id,
+            roles: role_map,
         }
     }
 
     fn with_ready(
         activation: &'a mut Activation,
+        instance_id: String,
+        roles: &[RoleBinding],
         satisfied: Vec<WaitCondition>,
         assertions: Vec<RecordedAssertion>,
         facets: Vec<FacetId>,
     ) -> Self {
-        let mut host = Self::new(activation);
+        let mut host = Self::new(activation, instance_id, roles);
         host.satisfied = satisfied;
         host.restore_assertions(&assertions);
         host.restore_facets(&facets);
@@ -1307,6 +1475,7 @@ impl<'a> ActivationHost<'a> {
                 },
             ) => a_label == b_label && a_field == b_field && a_value == b_value,
             (WaitCondition::Signal { label: a }, WaitCondition::Signal { label: b }) => a == b,
+            (WaitCondition::ToolResult { tag: a }, WaitCondition::ToolResult { tag: b }) => a == b,
             _ => false,
         }
     }
@@ -1342,6 +1511,108 @@ impl<'a> ActivationHost<'a> {
 
     fn drain_observers(&mut self) -> Vec<ObserverSpec> {
         std::mem::take(&mut self.observers)
+    }
+
+    fn handle_invoke_tool(
+        &mut self,
+        role: &str,
+        capability: &str,
+        payload: Option<&Value>,
+        tag: Option<&String>,
+    ) -> Result<(), ActorError> {
+        let binding = self.role_binding(role)?;
+        let capability_id = self.resolve_capability_id(binding, capability)?;
+        let payload_value = payload
+            .map(|value| value.to_io_value())
+            .unwrap_or_else(|| IOValue::symbol("none"));
+        let request_tag = tag
+            .cloned()
+            .unwrap_or_else(|| format!("tool-{}", Uuid::new_v4()));
+        let role_properties = Self::encode_role_properties(binding);
+
+        let invocation = ToolInvocation::new(
+            role.to_string(),
+            capability.to_string(),
+            capability_id,
+            payload_value,
+            request_tag,
+            role_properties,
+        );
+        self.dispatch_tool_invocation(invocation);
+        Ok(())
+    }
+
+    fn dispatch_tool_invocation(&mut self, invocation: ToolInvocation) {
+        let request_record = invocation.request_record(&self.instance_id);
+        let handle = Handle::new();
+        self.activation
+            .assert(handle.clone(), request_record.clone());
+        self.assertions
+            .entry(request_record)
+            .or_default()
+            .push(handle);
+
+        self.activation
+            .assert(Handle::new(), invocation.log_record());
+
+        let completion = invocation.completion(
+            &self.activation.actor_id,
+            &self.activation.current_facet,
+            &self.instance_id,
+        );
+
+        self.activation.request_capability_invocation(
+            invocation.capability_id(),
+            invocation.payload(),
+            completion,
+        );
+    }
+
+    fn role_binding(&self, name: &str) -> Result<&RoleBinding, ActorError> {
+        self.roles.get(name).ok_or_else(|| {
+            ActorError::InvalidActivation(format!("invoke-tool references unknown role '{name}'"))
+        })
+    }
+
+    fn resolve_capability_id(
+        &self,
+        binding: &RoleBinding,
+        capability: &str,
+    ) -> Result<Uuid, ActorError> {
+        let candidate = binding
+            .properties
+            .get(capability)
+            .cloned()
+            .or_else(|| {
+                binding
+                    .properties
+                    .get(&format!("{capability}-capability"))
+                    .cloned()
+            })
+            .or_else(|| binding.properties.get("capability").cloned())
+            .unwrap_or_else(|| capability.to_string());
+
+        Uuid::parse_str(&candidate).map_err(|_| {
+            ActorError::InvalidActivation(format!(
+                "invoke-tool requires capability UUID; got '{candidate}'"
+            ))
+        })
+    }
+
+    fn encode_role_properties(binding: &RoleBinding) -> Option<IOValue> {
+        if binding.properties.is_empty() {
+            return None;
+        }
+
+        let mut entries = Vec::with_capacity(binding.properties.len());
+        for (key, value) in &binding.properties {
+            entries.push(IOValue::record(
+                IOValue::symbol("role-property"),
+                vec![IOValue::symbol(key.clone()), IOValue::new(value.clone())],
+            ));
+        }
+
+        Some(IOValue::record(IOValue::symbol("role-properties"), entries))
     }
 }
 
@@ -1430,7 +1701,7 @@ impl<'a> InterpreterHost for ActivationHost<'a> {
                 let parent_facet = if let Some(parent_str) = parent {
                     let uuid = Uuid::parse_str(parent_str).map_err(|_| {
                         ActorError::InvalidActivation(format!(
-                            "spawn-facet requires :parent to be a UUID, got {parent_str}"
+                            "spawn requires :parent to be a UUID, got {parent_str}"
                         ))
                     })?;
                     Some(FacetId::from_uuid(uuid))
@@ -1453,7 +1724,7 @@ impl<'a> InterpreterHost for ActivationHost<'a> {
             Action::Stop { facet } => {
                 let uuid = Uuid::parse_str(facet).map_err(|_| {
                     ActorError::InvalidActivation(format!(
-                        "stop-facet requires :facet to be a UUID, got {facet}"
+                        "stop requires :facet to be a UUID, got {facet}"
                     ))
                 })?;
                 let facet_id = FacetId::from_uuid(uuid);
@@ -1474,9 +1745,12 @@ impl<'a> InterpreterHost for ActivationHost<'a> {
                 }
                 Ok(())
             }
-            Action::InvokeTool { .. } => Err(ActorError::InvalidActivation(
-                "action not supported yet".into(),
-            )),
+            Action::InvokeTool {
+                role,
+                capability,
+                payload,
+                tag,
+            } => self.handle_invoke_tool(role, capability, payload.as_ref(), tag.as_ref()),
         }
     }
 
@@ -1522,7 +1796,7 @@ mod tests {
         let mut activation = Activation::new(actor.id.clone(), actor.root_facet.clone(), None);
 
         let program = "(workflow demo)
-               (state start (action (emit (assert (record agent-request \"planner\" \"hello\"))) (emit (log \"hello\"))) (terminal))";
+               (state start (action (assert (record agent-request \"planner\" \"hello\")) (log \"hello\")) (terminal))";
         let payload = IOValue::record(
             IOValue::symbol(RUN_MESSAGE_LABEL),
             vec![IOValue::new(program)],
@@ -1606,7 +1880,7 @@ mod tests {
 
         let handler_source = r#"(workflow observer-handler)
 (state start
-  (action (emit (assert (record observed))))
+  (action (assert (record observed)))
   (terminal))"#;
 
         let program = format!(
@@ -1620,6 +1894,32 @@ mod tests {
         );
 
         entity.on_message(&mut activation, &payload).unwrap();
+
+        let observer_record = activation
+            .assertions_added
+            .iter()
+            .find_map(|(_, value)| {
+                value
+                    .label()
+                    .as_symbol()
+                    .filter(|sym| sym.as_ref() == OBSERVER_RECORD_LABEL)
+                    .map(|_| value.clone())
+            })
+            .expect("observer registration should be asserted");
+
+        let observer_view =
+            record_with_label(&observer_record, OBSERVER_RECORD_LABEL).expect("observer record");
+        let condition_label = observer_view
+            .field(1)
+            .label()
+            .as_symbol()
+            .map(|sym| sym.as_ref().to_string());
+        assert_eq!(
+            condition_label.as_deref(),
+            Some("signal"),
+            "observer condition should encode signal wait"
+        );
+
         activation.outputs.clear();
         activation.assertions_added.clear();
 
@@ -1640,12 +1940,70 @@ mod tests {
     }
 
     #[test]
+    fn interpreter_observer_survives_snapshot_restore() {
+        let entity = InterpreterEntity::default();
+        let actor = Actor::new(ActorId::new());
+        let mut activation = Activation::new(actor.id.clone(), actor.root_facet.clone(), None);
+
+        let handler_source = r#"(workflow observer-handler)
+(state start
+  (action (assert (record observed)))
+  (terminal))"#;
+
+        let program = format!(
+            "(workflow observe-demo)\n(state start (action (observe (signal ready) \"{}\")) (terminal))",
+            handler_source.replace("\"", "\\\"")
+        );
+
+        let payload = IOValue::record(
+            IOValue::symbol(RUN_MESSAGE_LABEL),
+            vec![IOValue::new(program)],
+        );
+
+        entity.on_message(&mut activation, &payload).unwrap();
+        assert!(
+            !entity.observers.lock().unwrap().is_empty(),
+            "observer should be registered"
+        );
+
+        let snapshot = entity.snapshot_state();
+
+        let mut restored = InterpreterEntity::default();
+        restored.restore_state(&snapshot).unwrap();
+
+        assert!(
+            !restored.observers.lock().unwrap().is_empty(),
+            "observer should be restored from snapshot"
+        );
+
+        let mut resume_activation =
+            Activation::new(actor.id.clone(), actor.root_facet.clone(), None);
+        let ready_signal = IOValue::record(IOValue::symbol("ready"), vec![]);
+        restored
+            .process_assertion(&mut resume_activation, &ready_signal)
+            .unwrap();
+
+        let observed = resume_activation.assertions_added.iter().any(|(_, value)| {
+            value
+                .label()
+                .as_symbol()
+                .map(|sym| sym.as_ref() == "observed")
+                .unwrap_or(false)
+        });
+
+        assert!(
+            observed,
+            "restored observer handler should assert observed record"
+        );
+    }
+
+    #[test]
     fn interpreter_spawn_facet_action() {
         let entity = InterpreterEntity::default();
         let actor = Actor::new(ActorId::new());
         let mut activation = Activation::new(actor.id.clone(), actor.root_facet.clone(), None);
 
-        let program = "(workflow spawn-demo)\n(state start (action (spawn-facet)) (terminal))";
+        let program = "(workflow spawn-demo)\n(state start (action (spawn)) (terminal))";
 
         let payload = IOValue::record(
             IOValue::symbol(RUN_MESSAGE_LABEL),
@@ -1689,7 +2047,7 @@ mod tests {
 
         let target_facet = FacetId::new();
         let program = format!(
-            "(workflow stop-demo)\n(state start (action (stop-facet :facet \"{}\")) (terminal))",
+            "(workflow stop-demo)\n(state start (action (stop :facet \"{}\")) (terminal))",
             target_facet.0
         );
 
@@ -1706,7 +2064,7 @@ mod tests {
                 TurnOutput::FacetTerminated { facet } if facet == &target_facet
             )
         });
-        assert!(terminated, "stop-facet should emit FacetTerminated output");
+        assert!(terminated, "stop should emit FacetTerminated output");
     }
 
     #[test]
@@ -1836,7 +2194,7 @@ mod tests {
 
         let program = r#"(workflow wait-demo)
 (state start
-  (enter (emit (log "start")))
+  (enter (log "start"))
   (await (signal ready))
   (goto done))
 (state done (terminal))"#;
@@ -1892,6 +2250,176 @@ mod tests {
                 .as_ref()
                 .and_then(|progress| progress.waiting.as_ref())
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn interpreter_invoke_tool_action() {
+        let entity = InterpreterEntity::default();
+        let actor = Actor::new(ActorId::new());
+        let mut activation = Activation::new(actor.id.clone(), actor.root_facet.clone(), None);
+
+        let capability_id = Uuid::new_v4();
+        let program = format!(
+            "(workflow tool-demo)
+               (roles (workspace :capability \"{}\" :agent-kind \"tester\"))
+               (state start
+                 (action (invoke-tool :role workspace :capability \"capability\" :payload (record request \"payload\") :tag tool-req))
+                 (terminal))",
+            capability_id
+        );
+
+        let payload = IOValue::record(
+            IOValue::symbol(RUN_MESSAGE_LABEL),
+            vec![IOValue::new(program)],
+        );
+
+        entity.on_message(&mut activation, &payload).unwrap();
+
+        let tool_request = activation
+            .assertions_added
+            .iter()
+            .find_map(|(_, value)| {
+                value
+                    .label()
+                    .as_symbol()
+                    .filter(|sym| sym.as_ref() == TOOL_REQUEST_RECORD_LABEL)
+                    .map(|_| value.clone())
+            })
+            .expect("tool request record should be asserted");
+
+        let view =
+            record_with_label(&tool_request, TOOL_REQUEST_RECORD_LABEL).expect("record view");
+        assert!(view.len() >= 6, "tool request must contain expected fields");
+
+        let instance_id = view
+            .field_string(0)
+            .expect("instance id should be a string");
+        assert!(!instance_id.is_empty(), "instance id should not be empty");
+
+        assert_eq!(
+            view.field_string(1).as_deref(),
+            Some("tool-req"),
+            "tag preserved"
+        );
+        assert_eq!(
+            view.field_string(2).as_deref(),
+            Some("workspace"),
+            "role field should match"
+        );
+        assert_eq!(
+            view.field_string(3).as_deref(),
+            Some("capability"),
+            "capability alias retained"
+        );
+        assert_eq!(
+            view.field_string(4).as_deref(),
+            Some(capability_id.to_string().as_str()),
+            "capability id stored"
+        );
+
+        let payload_value = view.field(5);
+        let payload_view =
+            record_with_label(&payload_value, "request").expect("payload record missing");
+        assert_eq!(
+            payload_view.field_string(0).as_deref(),
+            Some("payload"),
+            "payload contents preserved"
+        );
+
+        if view.len() > 6 {
+            let props_value = view.field(6);
+            let props_view =
+                record_with_label(&props_value, "role-properties").expect("properties record");
+            assert!(
+                props_view.len() >= 1,
+                "role properties should contain at least one entry"
+            );
+        }
+    }
+
+    #[test]
+    fn interpreter_invoke_tool_unknown_role_errors() {
+        let entity = InterpreterEntity::default();
+        let actor = Actor::new(ActorId::new());
+        let mut activation = Activation::new(actor.id.clone(), actor.root_facet.clone(), None);
+
+        let program = "(workflow bad-role)
+               (state start
+                 (action (invoke-tool :role missing :capability \"capability\"))
+                 (terminal))";
+
+        let payload = IOValue::record(
+            IOValue::symbol(RUN_MESSAGE_LABEL),
+            vec![IOValue::new(program)],
+        );
+
+        let err = entity
+            .on_message(&mut activation, &payload)
+            .expect_err("invoke-tool should fail when role is unknown");
+
+        match err {
+            ActorError::InvalidActivation(message) => {
+                assert!(
+                    message.contains("unknown role"),
+                    "unexpected error message: {message}"
+                );
+            }
+            other => panic!("expected InvalidActivation error, got {other:?}"),
+        }
+
+        let record = activation
+            .assertions_added
+            .iter()
+            .filter_map(|(_, value)| InstanceRecord::parse(value))
+            .find(|entry| matches!(entry.status, InstanceStatus::Failed(_)))
+            .expect("failed instance record should be asserted");
+        assert!(
+            matches!(record.status, InstanceStatus::Failed(_)),
+            "status must be failed when role is unknown"
+        );
+    }
+
+    #[test]
+    fn interpreter_invoke_tool_invalid_capability_id_errors() {
+        let entity = InterpreterEntity::default();
+        let actor = Actor::new(ActorId::new());
+        let mut activation = Activation::new(actor.id.clone(), actor.root_facet.clone(), None);
+
+        let program = "(workflow bad-capability)
+               (roles (workspace :capability \"not-a-uuid\"))
+               (state start
+                 (action (invoke-tool :role workspace :capability \"capability\"))
+                 (terminal))";
+
+        let payload = IOValue::record(
+            IOValue::symbol(RUN_MESSAGE_LABEL),
+            vec![IOValue::new(program)],
+        );
+
+        let err = entity
+            .on_message(&mut activation, &payload)
+            .expect_err("invoke-tool should fail when capability id is invalid");
+
+        match err {
+            ActorError::InvalidActivation(message) => {
+                assert!(
+                    message.contains("capability UUID"),
+                    "unexpected error message: {message}"
+                );
+            }
+            other => panic!("expected InvalidActivation error, got {other:?}"),
+        }
+
+        let record = activation
+            .assertions_added
+            .iter()
+            .filter_map(|(_, value)| InstanceRecord::parse(value))
+            .find(|entry| matches!(entry.status, InstanceStatus::Failed(_)))
+            .expect("failed instance record should be asserted");
+        assert!(
+            matches!(record.status, InstanceStatus::Failed(_)),
+            "status must be failed when capability ID is invalid"
         );
     }
 }

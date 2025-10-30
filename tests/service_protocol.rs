@@ -270,6 +270,16 @@ fn agent_commands_roundtrip() {
 
     let first_events = lines[3]["result"]["events"].as_array().unwrap();
     assert!(!first_events.is_empty());
+    let first_event_group = &first_events[0]["events"];
+    if let Some(events) = first_event_group.as_array() {
+        if let Some(event) = events.first() {
+            assert!(event.get("summary").is_some());
+            if let Some(structured) = event.get("value_structured") {
+                assert!(structured.get("type").is_some());
+                assert!(structured.get("summary").is_some());
+            }
+        }
+    }
 
     if let Some(_turn) = queued_turn {
         if let Some(next_cursor) = lines[3]["result"]["next_cursor"].as_str() {

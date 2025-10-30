@@ -299,6 +299,7 @@ fn parse_action_literal(expr: &Expr) -> Result<Action> {
         "invoke-tool" => {
             let mut role = None;
             let mut capability = None;
+            let mut payload = None;
             let mut tag = None;
             let mut idx = 1;
             while idx < list.len() {
@@ -313,6 +314,10 @@ fn parse_action_literal(expr: &Expr) -> Result<Action> {
                         capability = Some(expect_string(&list[idx])?);
                         idx += 1;
                     }
+                    "payload" => {
+                        payload = Some(parse_value_literal(&list[idx])?);
+                        idx += 1;
+                    }
                     "tag" => {
                         tag = Some(expect_string(&list[idx])?);
                         idx += 1;
@@ -324,6 +329,7 @@ fn parse_action_literal(expr: &Expr) -> Result<Action> {
                 role: role.ok_or_else(|| validation("invoke-tool requires :role"))?,
                 capability: capability
                     .ok_or_else(|| validation("invoke-tool requires :capability"))?,
+                payload,
                 tag,
             })
         }
@@ -586,6 +592,7 @@ fn parse_action_template(expr: &Expr, params: &HashSet<String>) -> Result<Action
         "invoke-tool" => {
             let mut role = None;
             let mut capability = None;
+            let mut payload = None;
             let mut tag = None;
             let mut idx = 1;
             while idx < list.len() {
@@ -600,6 +607,10 @@ fn parse_action_template(expr: &Expr, params: &HashSet<String>) -> Result<Action
                         capability = Some(expect_string(&list[idx])?);
                         idx += 1;
                     }
+                    "payload" => {
+                        payload = Some(parse_value_expr(&list[idx], params)?);
+                        idx += 1;
+                    }
                     "tag" => {
                         tag = Some(expect_string(&list[idx])?);
                         idx += 1;
@@ -611,6 +622,7 @@ fn parse_action_template(expr: &Expr, params: &HashSet<String>) -> Result<Action
                 role: role.ok_or_else(|| validation("invoke-tool requires :role"))?,
                 capability: capability
                     .ok_or_else(|| validation("invoke-tool requires :capability"))?,
+                payload,
                 tag,
             })
         }
@@ -762,6 +774,30 @@ fn parse_wait(expr: &Expr) -> Result<WaitCondition> {
                 label: expect_symbol(&list[1])?,
             })
         }
+        "tool-result" => {
+            if list.len() == 2 && !matches!(list[1], Expr::Keyword(_)) {
+                return Ok(WaitCondition::ToolResult {
+                    tag: expect_string(&list[1])?,
+                });
+            }
+
+            let mut tag = None;
+            let mut idx = 1;
+            while idx < list.len() {
+                let key = expect_keyword(&list[idx])?;
+                idx += 1;
+                match key.as_str() {
+                    "tag" => {
+                        tag = Some(expect_string(&list[idx])?);
+                        idx += 1;
+                    }
+                    _ => return Err(validation("unknown tool-result wait argument")),
+                }
+            }
+
+            let tag = tag.ok_or_else(|| validation("tool-result wait requires :tag"))?;
+            Ok(WaitCondition::ToolResult { tag })
+        }
         _ => Err(validation("unknown wait condition")),
     }
 }
@@ -816,6 +852,30 @@ fn parse_wait_template(expr: &Expr, params: &HashSet<String>) -> Result<WaitCond
             Ok(WaitConditionTemplate::Signal {
                 label: expect_symbol(&list[1])?,
             })
+        }
+        "tool-result" => {
+            if list.len() == 2 && !matches!(list[1], Expr::Keyword(_)) {
+                return Ok(WaitConditionTemplate::ToolResult {
+                    tag: parse_value_expr(&list[1], params)?,
+                });
+            }
+
+            let mut tag = None;
+            let mut idx = 1;
+            while idx < list.len() {
+                let key = expect_keyword(&list[idx])?;
+                idx += 1;
+                match key.as_str() {
+                    "tag" => {
+                        tag = Some(parse_value_expr(&list[idx], params)?);
+                        idx += 1;
+                    }
+                    _ => return Err(validation("unknown tool-result wait argument")),
+                }
+            }
+
+            let tag = tag.ok_or_else(|| validation("tool-result wait requires :tag"))?;
+            Ok(WaitConditionTemplate::ToolResult { tag })
         }
         _ => Err(validation("unknown wait condition")),
     }
@@ -898,7 +958,13 @@ struct FunctionPrototype {
 mod tests {
     use super::*;
 
-    use crate::interpreter::parser::parse_program;
+    use crate::interpreter::protocol::{RUN_MESSAGE_LABEL, TOOL_REQUEST_RECORD_LABEL};
+    use crate::interpreter::{Value, entity::InterpreterEntity, parser::parse_program};
+    use crate::runtime::actor::{Activation, Actor, Entity};
+    use crate::runtime::turn::{ActorId, TurnOutput};
+    use crate::util::io_value::record_with_label;
+    use preserves::IOValue;
+    use uuid::Uuid;
 
     fn build(src: &str) -> ProgramIr {
         let program = parse_program(src).expect("parse");
@@ -908,14 +974,16 @@ mod tests {
     #[test]
     fn builds_roles_states_and_actions() {
         let ir = build(
-            "(workflow demo) (roles (planner :agent-kind \"claude\")) (state plan (action (emit (log \"hi\"))))",
+            "(workflow demo)
+             (roles (planner :agent-kind \"claude\"))
+             (state plan (action (log \"hi\")))",
         );
         assert_eq!(ir.name, "demo");
         assert_eq!(ir.roles.len(), 1);
         assert_eq!(ir.states.len(), 1);
         assert!(ir.functions.is_empty());
         match &ir.states[0].body[0] {
-            Instruction::Action(Action::EmitLog(message)) => assert_eq!(message, "hi"),
+            Instruction::Action(Action::Log(message)) => assert_eq!(message, "hi"),
             other => panic!("unexpected instruction: {:?}", other),
         }
     }
@@ -928,7 +996,8 @@ mod tests {
               (loop (await (record agent-response :field 0 :equals \"req\")))
               (branch
                 (when (signal review/done) (goto complete))
-                (otherwise (action (emit (log \"waiting\"))))))
+                (otherwise
+                  (action (log \"waiting\")))))
             (state complete (terminal))
         ";
         let ir = build(src);
@@ -944,11 +1013,119 @@ mod tests {
     }
 
     #[test]
+    fn builds_invoke_tool_action() {
+        let capability_id = Uuid::new_v4();
+        let src = format!(
+            "(workflow demo)
+               (roles (workspace :capability \"{capability}\"))
+               (state start
+                 (action (invoke-tool :role workspace :capability \"capability\" :payload (record request \"payload\") :tag tool-req))
+                 (terminal))",
+            capability = capability_id
+        );
+
+        let ir = build(&src);
+        assert_eq!(ir.states.len(), 1);
+        match &ir.states[0].body[0] {
+            Instruction::Action(Action::InvokeTool {
+                role,
+                capability,
+                payload,
+                tag,
+            }) => {
+                assert_eq!(role, "workspace");
+                assert_eq!(capability, "capability");
+                assert_eq!(tag.as_deref(), Some("tool-req"));
+                let payload = payload.as_ref().expect("payload should be present");
+                match payload {
+                    Value::Record { label, fields } => {
+                        assert_eq!(label, "request");
+                        assert_eq!(fields.len(), 1);
+                        assert_eq!(fields[0], Value::String("payload".into()));
+                    }
+                    other => panic!("unexpected payload value: {:?}", other),
+                }
+            }
+            other => panic!("expected invoke-tool action, got {:?}", other),
+        }
+
+        let entity = InterpreterEntity::default();
+        let actor = Actor::new(ActorId::new());
+        let mut activation = Activation::new(actor.id.clone(), actor.root_facet.clone(), None);
+
+        let run_payload =
+            IOValue::record(IOValue::symbol(RUN_MESSAGE_LABEL), vec![IOValue::new(src)]);
+
+        entity.on_message(&mut activation, &run_payload).unwrap();
+
+        let tool_request = activation
+            .assertions_added
+            .iter()
+            .find_map(|(_, value)| {
+                value
+                    .label()
+                    .as_symbol()
+                    .filter(|sym| sym.as_ref() == TOOL_REQUEST_RECORD_LABEL)
+                    .map(|_| value.clone())
+            })
+            .expect("tool request record should be asserted");
+
+        let request_view = record_with_label(&tool_request, TOOL_REQUEST_RECORD_LABEL).unwrap();
+        let instance_id = request_view.field_string(0).expect("instance id");
+        let tag_value = request_view.field_string(1).expect("tag");
+
+        let invoke = activation
+            .outputs
+            .iter()
+            .find_map(|output| {
+                if let TurnOutput::CapabilityInvoke {
+                    capability,
+                    payload,
+                    completion,
+                } = output
+                {
+                    Some((capability, payload, completion))
+                } else {
+                    None
+                }
+            })
+            .expect("capability invocation output");
+
+        assert_eq!(*invoke.0, capability_id);
+        let payload_view = record_with_label(&invoke.1, "request").expect("payload record");
+        assert_eq!(payload_view.field_string(0).as_deref(), Some("payload"));
+
+        assert_eq!(invoke.2.instance_id, instance_id);
+        assert_eq!(invoke.2.tag, tag_value);
+        assert_eq!(invoke.2.role, "workspace");
+        assert_eq!(invoke.2.capability_alias, "capability");
+        assert_eq!(invoke.2.origin_actor, activation.actor_id);
+    }
+
+    #[test]
+    fn parses_tool_result_wait() {
+        let src = "
+            (workflow demo)
+            (state wait
+              (await (tool-result :tag \"tool-123\"))
+              (terminal))
+        ";
+        let ir = build(src);
+        assert_eq!(ir.states.len(), 1);
+        match &ir.states[0].body[0] {
+            Instruction::Await(WaitCondition::ToolResult { tag }) => {
+                assert_eq!(tag, "tool-123");
+            }
+            other => panic!("expected tool-result wait, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn produces_call_instruction_for_functions() {
         let src = "
             (workflow demo)
             (defn greet (person)
-              (emit (assert (record greeting person))))
+              (action (assert (record greeting person))))
             (state start
               (call greet \"Alice\")
               (call greet \"Bob\")

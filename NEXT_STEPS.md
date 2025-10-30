@@ -22,7 +22,7 @@ and expressive enough to orchestrate fleets of agents.
 
 ### Sprint A – Structured Values & DSL Preparation
 - Introduce a `Value` representation (symbols, strings, numbers, lists,
-  records) and update `Action::Assert/EmitLog/SendPrompt` to consume it.
+  records) and update `Action::Assert/Log/Send` to consume it.
 - Extend the parser/builder to accept literal values instead of raw strings.
 - Add minimal helper forms for building preserves records (e.g. `(record :label …)`).
 - Tests: IR parsing round-trips, runtime asserts structured values, snapshot
@@ -68,6 +68,17 @@ and expressive enough to orchestrate fleets of agents.
   resumption, and multi-agent chat scenarios.
 - **Migration** – refactor existing workflows/tests to use the new DSL helpers
   as they land, retiring Rust-side plumbing (`send-prompt`, etc.).
+- **Interpreter polish**
+  - Tool invocation path now flows through a dedicated helper in `interpreter/entity.rs`; follow-up: peel observer plumbing into its own helper module once event wiring is complete.
+  - Observer registrations now assert `interpreter-observer` records and hydrate cleanly; follow-up: move notification routing into a helper module and surface observer listings via the service/CLI.
+  - Spawn capability minted automatically for the interpreter; runtime now enforces `entity/spawn` capability checks (see `entity_spawn_requires_capability`).
+  - Document the `tool-error` payload schema and add tests that verify a `tool-result` wake-up end-to-end.
+  - Decide whether `interpreter-tool-request` should persist after completion or be retracted automatically.
+  - Silence or satisfy remaining `missing_docs` warnings in interpreter IR/types so the lint budget stays clean.
+- **Runtime polish**
+  - Document the `interpreter-tool-result` assertion format and ensure journal consumers know how to interpret it.
+  - Improve capability error reporting (status flag vs raw record) so workflows can branch on success vs failure.
+  - Guard against posting tool results to dead facets (log and drop rather than enqueueing useless asserts).
 
 ---
 
@@ -83,9 +94,9 @@ and expressive enough to orchestrate fleets of agents.
 | `Instruction::Call`                              | Function invocation                                   | Runtime supports stack frames; aligns with Scheme-style functions. |
 | `Action::Assert` (`Value`)                       | Dataspace assertion                                   | Direct match for `turn-assert!`. |
 | `Action::Retract`                                | Dataspace retraction                                  | Implemented by tracking assertion handles; mirrors `turn-retract!`. |
-| `Action::EmitLog`                                | Dataspace log assertion                               | OK; library helper can expose `log`. |
-| `Action::InvokeTool { role, capability, tag }`   | Capability invocation placeholder                     | Still unimplemented; needs runtime hook akin to capability invoker. |
-| `Action::SendMessage { actor, facet, payload }`  | Enqueue a `TurnOutput::Message`                        | New primitive; mirrors `turn-message!` and underpins future `send!` helper. |
+| `Action::Log`                                    | Dataspace log assertion                               | OK; library helper can expose `log`. |
+| `Action::InvokeTool { role, capability, tag }`   | Posts `interpreter-tool-request`; awaits `tool-result` | External broker must consume request and call `Control::invoke_capability`. |
+| `Action::Send { actor, facet, payload }`         | Enqueue a `TurnOutput::Message`                        | New primitive; mirrors `turn-message!` and underpins future `send!` helper. |
 | Wait conditions (`Signal`, `RecordFieldEq`)      | Minimal observe semantics                             | Need richer pattern DSL inspired by Syndicate’s captures. |
 
 **Missing runtime hooks compared to the Syndicate core**

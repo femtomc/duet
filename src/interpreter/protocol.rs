@@ -24,6 +24,12 @@ pub const RESUME_MESSAGE_LABEL: &str = "interpreter-resume";
 pub const NOTIFY_MESSAGE_LABEL: &str = "interpreter-notify";
 /// Dataspace label used for wait records.
 const WAIT_RECORD_LABEL: &str = "interpreter-wait";
+/// Dataspace label used for tool invocation requests.
+pub const TOOL_REQUEST_RECORD_LABEL: &str = "interpreter-tool-request";
+/// Dataspace label used for tool invocation results.
+pub const TOOL_RESULT_RECORD_LABEL: &str = "interpreter-tool-result";
+/// Dataspace label used for observer registrations.
+pub const OBSERVER_RECORD_LABEL: &str = "interpreter-observer";
 
 /// Dataspace label for persisted interpreter definitions.
 pub const DEFINITION_RECORD_LABEL: &str = "interpreter-definition";
@@ -155,6 +161,11 @@ pub enum WaitStatus {
         /// Signal label that must appear in the dataspace.
         label: String,
     },
+    /// Waiting for a tool invocation result tagged accordingly.
+    ToolResult {
+        /// Correlation tag associated with the tool invocation.
+        tag: String,
+    },
 }
 
 impl WaitStatus {
@@ -176,6 +187,10 @@ impl WaitStatus {
                 IOValue::symbol("signal"),
                 vec![IOValue::symbol(label.clone())],
             ),
+            WaitStatus::ToolResult { tag } => IOValue::record(
+                IOValue::symbol("tool-result"),
+                vec![IOValue::new(tag.clone())],
+            ),
         }
     }
 
@@ -186,6 +201,14 @@ impl WaitStatus {
             }
             let label = record.field_symbol(0)?;
             return Some(WaitStatus::Signal { label });
+        }
+
+        if record.has_label("tool-result") {
+            if record.len() == 0 {
+                return None;
+            }
+            let tag = record.field_string(0)?;
+            return Some(WaitStatus::ToolResult { tag });
         }
 
         if record.has_label("record-field-eq") {
@@ -226,6 +249,9 @@ impl WaitStatus {
             crate::interpreter::ir::WaitCondition::Signal { label } => WaitStatus::Signal {
                 label: label.clone(),
             },
+            crate::interpreter::ir::WaitCondition::ToolResult { tag } => {
+                WaitStatus::ToolResult { tag: tag.clone() }
+            }
         }
     }
 
@@ -242,6 +268,9 @@ impl WaitStatus {
                 value,
             },
             WaitStatus::Signal { label } => crate::interpreter::ir::WaitCondition::Signal { label },
+            WaitStatus::ToolResult { tag } => {
+                crate::interpreter::ir::WaitCondition::ToolResult { tag }
+            }
         }
     }
 }

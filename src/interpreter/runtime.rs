@@ -475,32 +475,38 @@ impl<H: InterpreterHost> InterpreterRuntime<H> {
             ActionTemplate::InvokeTool {
                 role,
                 capability,
+                payload,
                 tag,
             } => Ok(Action::InvokeTool {
                 role: role.clone(),
                 capability: capability.clone(),
+                payload: if let Some(expr) = payload {
+                    Some(expr.resolve(bindings).map_err(|err| err.to_string())?)
+                } else {
+                    None
+                },
                 tag: tag.clone(),
             }),
-            ActionTemplate::SendMessage {
+            ActionTemplate::Send {
                 actor,
                 facet,
                 payload,
-            } => Ok(Action::SendMessage {
+            } => Ok(Action::Send {
                 actor: actor.clone(),
                 facet: facet.clone(),
                 payload: payload.resolve(bindings).map_err(|err| err.to_string())?,
             }),
-            ActionTemplate::ObserveSignal { label, handler } => Ok(Action::ObserveSignal {
+            ActionTemplate::Observe { label, handler } => Ok(Action::Observe {
                 label: label.clone(),
                 handler: handler.clone(),
             }),
-            ActionTemplate::SpawnFacet { parent } => Ok(Action::SpawnFacet {
+            ActionTemplate::Spawn { parent } => Ok(Action::Spawn {
                 parent: parent.clone(),
             }),
-            ActionTemplate::TerminateFacet { facet } => Ok(Action::TerminateFacet {
+            ActionTemplate::Stop { facet } => Ok(Action::Stop {
                 facet: facet.clone(),
             }),
-            ActionTemplate::EmitLog(message) => Ok(Action::EmitLog(message.clone())),
+            ActionTemplate::Log(message) => Ok(Action::Log(message.clone())),
             ActionTemplate::Assert(value_expr) => Ok(Action::Assert(
                 value_expr
                     .resolve(bindings)
@@ -532,6 +538,15 @@ impl<H: InterpreterHost> InterpreterRuntime<H> {
             WaitConditionTemplate::Signal { label } => Ok(WaitCondition::Signal {
                 label: label.clone(),
             }),
+            WaitConditionTemplate::ToolResult { tag } => {
+                let resolved = tag.resolve(bindings).map_err(|err| err.to_string())?;
+                let tag_str = resolved
+                    .as_str()
+                    .ok_or_else(|| "tool-result wait :tag must resolve to a string".to_string())?;
+                Ok(WaitCondition::ToolResult {
+                    tag: tag_str.to_string(),
+                })
+            }
         }
     }
 }
@@ -775,7 +790,7 @@ mod tests {
                         field: 0,
                         value: ValueExpr::Parameter("tag".into()),
                     }),
-                    InstructionTemplate::Action(ActionTemplate::EmitLog("done".into())),
+                    InstructionTemplate::Action(ActionTemplate::Log("done".into())),
                 ],
             }],
         };
@@ -811,7 +826,7 @@ mod tests {
         assert_eq!(resumed.tick().unwrap(), RuntimeEvent::Progress);
         assert_eq!(resumed.host.actions.len(), 1);
         match &resumed.host.actions[0] {
-            Action::EmitLog(message) => assert_eq!(message, "done"),
+            Action::Log(message) => assert_eq!(message, "done"),
             other => panic!("expected log action, got {:?}", other),
         }
 

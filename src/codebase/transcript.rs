@@ -11,7 +11,7 @@ use crate::runtime::control::{
 };
 use crate::runtime::error::Result as RuntimeResult;
 use crate::runtime::turn::{ActorId, BranchId, Handle, TurnId};
-use crate::util::io_value::record_with_label;
+use crate::util::io_value::{io_value_summary, io_value_to_json, record_with_label};
 use chrono::{DateTime, Utc};
 use codebase::AgentResponse;
 use preserves::IOValue;
@@ -240,6 +240,11 @@ pub fn event_batches_payload(chunk: &AssertionEventChunk) -> Vec<Value> {
                     if let Some(value) = event.value.as_ref() {
                         event_obj
                             .insert("value".to_string(), Value::String(format!("{:?}", value)));
+                        event_obj.insert("value_structured".to_string(), io_value_to_json(value));
+                        event_obj.insert(
+                            "summary".to_string(),
+                            Value::String(io_value_summary(value, 80)),
+                        );
 
                         if let Some(agent_response) = parse_agent_response(value) {
                             let AgentResponse {
@@ -271,6 +276,8 @@ pub fn event_batches_payload(chunk: &AssertionEventChunk) -> Vec<Value> {
 
                             event_obj.insert("transcript".to_string(), Value::Object(transcript));
                         }
+                    } else {
+                        event_obj.insert("summary".to_string(), Value::String("null".to_string()));
                     }
 
                     Value::Object(event_obj)

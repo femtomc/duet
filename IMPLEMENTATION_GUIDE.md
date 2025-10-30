@@ -75,7 +75,7 @@ duet/
 ## 3. Interpreter Language Roadmap
 
 The interpreter currently offers a minimal DSL: `(workflow …)`, `(roles …)`,
-`(state …)`, primitive actions (`send-prompt`, `emit`, `assert`, `invoke-tool`
+`(state …)`, primitive actions (`log`, `assert`, `retract`, `send`, `invoke-tool`
 stub), waits (`record`, `signal`), branches, loops, and goto. To
 reach the Emacs-style goal we will expand the language over the next sprints.
 
@@ -107,8 +107,27 @@ documented.
 ### 4.2 Interpreter Entity
 - Definitions persisted in dataspace (✅).
 - Wait suspension/resume with hydrations (✅).
-- Tool invocation (`Action::InvokeTool`) – 🚧 unimplemented; required when we
-  integrate codebase edits.
+- Tool invocation (`Action::InvokeTool`) – posts an `interpreter-tool-request`
+  record (instance id, role, capability alias/UUID, payload, tag). External
+  tool runners should consume the request, call the corresponding capability
+  via the runtime `Control::invoke_capability`, and publish an
+  `interpreter-tool-result` record so workflows waiting on `(tool-result …)` can
+  resume. Unknown roles or malformed capability identifiers now short-circuit
+  the run, yielding a failed `interpreter-instance` record so the CLI/tests can
+  surface actionable errors.
+- Observer registration (`Action::Observe`) – asserts an
+  `interpreter-observer` record for each handler the program installs. The
+  record captures the generated observer id, the wait condition (currently
+  `signal`, `record`, or `tool-result`), the handler program reference, and the
+  facet to execute on. Observers persist through hydration and hydrate with
+  their assertion handle, so they continue to fire across time-travel and
+  restarts.
+- Entity spawning – the interpreter mints an `entity/spawn` capability for its
+  root facet on first activation. The runtime enforces capability checks before
+  honouring `spawn` outputs and records each spawn as a
+  `TurnOutput::EntitySpawned` so hydration and journal replay rebuild the same
+  actor tree. Entities are expected to clean up any external resources they
+  touch in `stop` / `exit_hook` so time-travel remains well behaved.
 - Prompt semantics – currently emits `interpreter-prompt`; forthcoming language
   work will move agent plumbing into DSL helper functions.
 

@@ -170,6 +170,19 @@ impl Control {
         // Generate entity ID
         let entity_id = Uuid::new_v4();
 
+        // Ensure the actor exists and capture its root facet without holding a
+        // mutable borrow across metadata updates.
+        let actor_root = {
+            let actor_entry = self
+                .runtime
+                .actors
+                .entry(actor.clone())
+                .or_insert_with(|| Actor::new(actor.clone()));
+            actor_entry.root_facet.clone()
+        };
+
+        let is_root_facet = facet == actor_root;
+
         // Create metadata (patterns will be added later via register_pattern_for_entity)
         let metadata = EntityMetadata {
             id: entity_id,
@@ -177,19 +190,19 @@ impl Control {
             facet: facet.clone(),
             entity_type: entity_type.clone(),
             config,
+            is_root_facet,
             patterns: vec![],
         };
 
         // Register metadata
         self.runtime.entity_manager_mut().register(metadata);
 
-        // Attach entity to actor
+        // Attach entity to actor (obtain a fresh mutable borrow)
         let actor_obj = self
             .runtime
             .actors
             .entry(actor.clone())
             .or_insert_with(|| Actor::new(actor.clone()));
-
         actor_obj.attach_entity(entity_id, entity_type, facet.clone(), entity);
 
         {

@@ -87,6 +87,8 @@ pub enum Action {
         role: String,
         /// Capability identifier.
         capability: String,
+        /// Structured payload supplied to the tool.
+        payload: Option<Value>,
         /// Optional correlation tag.
         tag: Option<String>,
     },
@@ -116,7 +118,7 @@ pub enum Action {
         /// Facet identifier (UUID string) to terminate.
         facet: String,
     },
-    /// Emit a diagnostic log string.
+    /// Write a diagnostic log string into the dataspace.
     Log(String),
     /// Assert a structured value into the dataspace.
     Assert(Value),
@@ -173,6 +175,7 @@ pub enum ActionTemplate {
     InvokeTool {
         role: String,
         capability: String,
+        payload: Option<ValueExpr>,
         tag: Option<String>,
     },
     Send {
@@ -212,6 +215,11 @@ pub enum WaitConditionTemplate {
         /// Signal label to match.
         label: String,
     },
+    /// Wait for a tool invocation result bearing the supplied tag.
+    ToolResult {
+        /// Tag expression evaluated at instantiation time.
+        tag: ValueExpr,
+    },
 }
 
 /// Conditions that may be awaited.
@@ -230,6 +238,11 @@ pub enum WaitCondition {
     Signal {
         /// Label to match in the dataspace.
         label: String,
+    },
+    /// Wait for a tool invocation result bearing the supplied tag.
+    ToolResult {
+        /// Tag that identifies the awaited result.
+        tag: String,
     },
 }
 

@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import json
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -13,15 +14,19 @@ import time
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, NoReturn
+from datetime import datetime
+from typing import Any, Dict, Iterable, List, Optional, Tuple, NoReturn
 
 import rich_click as click  # Must be imported before typer to patch Click
 import typer
+from rich import box
 from rich.console import Console, Group
 from rich.json import JSON
 from rich.panel import Panel
+from rich.markdown import Markdown
 from rich.table import Table
 from rich.tree import Tree
+from rich.text import Text
 
 from .protocol.client import ControlClient, ProtocolError
 
@@ -36,53 +41,76 @@ click.rich_click.MAX_WIDTH = 100
 
 console = Console()
 
+STOPWORDS = {
+    "the", "and", "that", "this", "with", "from", "your", "you", "have", "into", "about",
+    "than", "then", "there", "their", "what", "when", "where", "which", "would",
+    "could", "should", "shall", "will", "cant", "can't", "dont", "don't", "does",
+    "doesn't", "did", "didn't", "over", "under", "once", "again", "ever", "never",
+    "just", "more", "most", "less", "least", "also", "very", "much", "many", "some",
+    "such", "into", "onto", "between", "while", "because", "since", "across", "after",
+    "before", "around", "through", "ensure", "please", "help", "next",
+    "hello", "thanks", "thank", "hi", "hey", "okay", "ok",
+    "user", "assistant", "doing", "today",
+    "i", "we", "me", "my", "mine", "our", "ours", "ourselves",
+}
+
+USER_PROMPT_RE = re.compile(r"(?is)user:\s*(.*?)(?=(?:\n\s*(?:assistant|system):|\Z))")
+ASSISTANT_RESPONSE_RE = re.compile(r"(?is)assistant:\s*(.*?)(?=(?:\n\s*(?:user|system):|\Z))")
+
 app = typer.Typer(
     add_completion=True,
-    help="Interact with the Duet runtime over the NDJSON control protocol.",
+    help="Interact with the Duet runtime through its NDJSON control protocol.",
     rich_markup_mode="rich",
 )
 workspace_app = typer.Typer(
-    help="Workspace operations",
+    help="Inspect and update workspace files and metadata.",
     add_completion=True,
     rich_markup_mode="rich",
 )
 agent_app = typer.Typer(
-    help="Agent operations",
+    help="Queue prompts and inspect responses from Claude Code.",
     add_completion=True,
     rich_markup_mode="rich",
 )
 reaction_app = typer.Typer(
-    help="Reactive automations",
+    help="Manage reactive automations attached to the runtime.",
     add_completion=True,
     rich_markup_mode="rich",
 )
 workflow_app = typer.Typer(
-    help="Programmable workflows",
+    help="Launch and monitor programmable workflows.",
     add_completion=True,
     rich_markup_mode="rich",
 )
 transcript_app = typer.Typer(
-    help="Agent transcripts",
+    help="Browse stored agent transcripts.",
     add_completion=True,
     rich_markup_mode="rich",
 )
 dataspace_app = typer.Typer(
-    help="Dataspace inspection",
+    help="Inspect dataspace assertions and event streams.",
     add_completion=True,
     rich_markup_mode="rich",
 )
 daemon_app = typer.Typer(
-    help="Manage the codebased daemon",
+    help="Start and observe the local codebased daemon.",
     add_completion=True,
     rich_markup_mode="rich",
 )
+debug_app = typer.Typer(
+    help="Advanced runtime and protocol tooling.",
+    add_completion=True,
+    rich_markup_mode="rich",
+    hidden=True,
+)
 app.add_typer(workspace_app, name="workspace", rich_help_panel="Workspace")
 app.add_typer(agent_app, name="agent", rich_help_panel="Agents")
-app.add_typer(reaction_app, name="reaction", rich_help_panel="Runtime")
-app.add_typer(workflow_app, name="workflow", rich_help_panel="Automation")
 app.add_typer(transcript_app, name="transcript", rich_help_panel="Agents")
 app.add_typer(dataspace_app, name="dataspace", rich_help_panel="Dataspace")
-app.add_typer(daemon_app, name="daemon", rich_help_panel="Runtime")
+app.add_typer(daemon_app, name="daemon", rich_help_panel="Daemon")
+app.add_typer(workflow_app, name="workflow", rich_help_panel="Workflows")
+app.add_typer(debug_app, name="debug")
+debug_app.add_typer(reaction_app, name="reaction")
 
 
 
@@ -232,27 +260,27 @@ def main(
     ctx: typer.Context,
     root: Optional[Path] = typer.Option(  # noqa: B008
         None,
-        help="Runtime root directory passed to codebased.",
-        rich_help_panel="Runtime",
+        help="Runtime root directory (defaults to the nearest .duet folder).",
+        rich_help_panel="Global Options",
     ),
     codebased_bin: Optional[Path] = typer.Option(  # noqa: B008
         None,
-        help="Path to the codebased daemon binary (overrides auto-discovery).",
-        rich_help_panel="Runtime",
+        help="Path to the codebased daemon executable (overrides auto-discovery).",
+        rich_help_panel="Global Options",
     ),
     daemon_host: Optional[str] = typer.Option(  # noqa: B008
         None,
         "--daemon-host",
-        help="Connect to an already-running daemon at this host (requires --daemon-port).",
-        rich_help_panel="Runtime",
+        help="Connect to an existing daemon at this host (requires --daemon-port).",
+        rich_help_panel="Global Options",
     ),
     daemon_port: Optional[int] = typer.Option(  # noqa: B008
         None,
         "--daemon-port",
-        help="Connect to an already-running daemon on this port.",
+        help="Connect to an existing daemon listening on this port.",
         min=1,
         max=65535,
-        rich_help_panel="Runtime",
+        rich_help_panel="Global Options",
     ),
 ) -> None:
     """Top-level callback storing shared CLI state."""
@@ -286,10 +314,10 @@ def status(
     _run(_run_status(ctx.obj, branch))
 
 
-@app.command(rich_help_panel="Runtime")
+@debug_app.command("history")
 def history(
     ctx: typer.Context,
-    branch: str = typer.Option("main", help="Branch to inspect."),
+    branch: str = typer.Option("main", help="Branch name to inspect."),
     start: int = typer.Option(0, help="Starting index of the history slice."),
     limit: int = typer.Option(20, help="Number of turns to display."),
 ) -> None:
@@ -299,25 +327,25 @@ def history(
     _run(_run_call(ctx.obj, "history", params, "history"))
 
 
-@app.command(rich_help_panel="Runtime")
+@debug_app.command("send")
 def send(
     ctx: typer.Context,
-    actor: str = typer.Argument(..., help="Target actor UUID."),
-    facet: str = typer.Argument(..., help="Target facet UUID."),
-    payload: str = typer.Argument(..., help="Preserves text payload."),
+    actor: str = typer.Argument(..., help="Target actor identifier (UUID)."),
+    facet: str = typer.Argument(..., help="Target facet identifier (UUID)."),
+    payload: str = typer.Argument(..., help="Message payload encoded as Preserves text."),
 ) -> None:
     """Send a message to an actor/facet."""
 
     _run(_run_send_message(ctx.obj, actor, facet, payload))
 
 
-@app.command(rich_help_panel="Runtime")
+@debug_app.command("register-entity")
 def register_entity(
     ctx: typer.Context,
-    actor: str = typer.Argument(..., help="Actor UUID."),
-    facet: str = typer.Argument(..., help="Facet UUID."),
+    actor: str = typer.Argument(..., help="Actor identifier owning the entity (UUID)."),
+    facet: str = typer.Argument(..., help="Facet identifier used for the entity (UUID)."),
     entity_type: str = typer.Argument(..., help="Entity type identifier."),
-    config: str = typer.Option("nil", help="Preserves config value."),
+    config: str = typer.Option("nil", help="Entity configuration encoded as Preserves text."),
 ) -> None:
     """Register a new entity instance."""
 
@@ -330,18 +358,18 @@ def register_entity(
     _run(_run_call(ctx.obj, "register_entity", params, "register-entity"))
 
 
-@app.command(name="list-entities", rich_help_panel="Runtime")
-def list_entities(ctx: typer.Context, actor: Optional[str] = typer.Option(None, help="Filter by actor UUID.")) -> None:  # noqa: B008,E501
+@debug_app.command("list-entities")
+def list_entities(ctx: typer.Context, actor: Optional[str] = typer.Option(None, help="Filter by actor identifier (UUID).")) -> None:  # noqa: B008,E501
     """List registered entities."""
 
     params = {"actor": actor} if actor else {}
     _run(_run_call(ctx.obj, "list_entities", params, "list-entities"))
 
 
-@app.command(name="list-capabilities", rich_help_panel="Runtime")
+@debug_app.command("list-capabilities")
 def list_capabilities(
     ctx: typer.Context,
-    actor: Optional[str] = typer.Option(None, help="Filter by actor UUID."),
+    actor: Optional[str] = typer.Option(None, help="Filter by actor identifier (UUID)."),
 ) -> None:
     """List known capabilities."""
 
@@ -349,11 +377,11 @@ def list_capabilities(
     _run(_run_call(ctx.obj, "list_capabilities", params, "list-capabilities"))
 
 
-@app.command(rich_help_panel="Runtime")
+@debug_app.command("goto")
 def goto(
     ctx: typer.Context,
-    turn_id: str = typer.Argument(..., help="Turn identifier to jump to."),
-    branch: Optional[str] = typer.Option(None, help="Branch to adjust first."),
+    turn_id: str = typer.Argument(..., help="Turn identifier to activate."),
+    branch: Optional[str] = typer.Option(None, help="Switch to this branch before executing the command."),
 ) -> None:
     """Jump to a specific turn."""
 
@@ -363,11 +391,11 @@ def goto(
     _run(_run_call(ctx.obj, "goto", params, "goto"))
 
 
-@app.command(rich_help_panel="Runtime")
+@debug_app.command("back")
 def back(
     ctx: typer.Context,
     count: int = typer.Option(1, help="Number of turns to rewind."),
-    branch: Optional[str] = typer.Option(None, help="Branch to adjust first."),
+    branch: Optional[str] = typer.Option(None, help="Switch to this branch before executing the command."),
 ) -> None:
     """Rewind the runtime by N turns."""
 
@@ -377,12 +405,12 @@ def back(
     _run(_run_call(ctx.obj, "back", params, "back"))
 
 
-@app.command(rich_help_panel="Runtime")
+@debug_app.command("fork")
 def fork(
     ctx: typer.Context,
-    source: str = typer.Option("main", help="Source branch."),
-    new_branch: str = typer.Option(..., help="Name of the new branch."),
-    from_turn: Optional[str] = typer.Option(None, help="Optional base turn."),
+    source: str = typer.Option("main", help="Source branch name."),
+    new_branch: str = typer.Option(..., help="Name for the new branch."),
+    from_turn: Optional[str] = typer.Option(None, help="Optional turn identifier to fork from."),
 ) -> None:
     """Fork a new branch."""
 
@@ -392,11 +420,11 @@ def fork(
     _run(_run_call(ctx.obj, "fork", params, "fork"))
 
 
-@app.command(rich_help_panel="Runtime")
+@debug_app.command("merge")
 def merge(
     ctx: typer.Context,
-    source: str = typer.Option(..., help="Source branch."),
-    target: str = typer.Option(..., help="Target branch."),
+    source: str = typer.Option(..., help="Name of the branch to merge from."),
+    target: str = typer.Option(..., help="Name of the branch to merge into."),
 ) -> None:
     """Merge a source branch into a target branch."""
 
@@ -404,22 +432,22 @@ def merge(
     _run(_run_call(ctx.obj, "merge", params, "merge"))
 
 
-@app.command(name="invoke-capability", rich_help_panel="Runtime")
+@debug_app.command("invoke-capability")
 def invoke_capability(
     ctx: typer.Context,
-    capability: str = typer.Argument(..., help="Capability UUID."),
-    payload: str = typer.Argument(..., help="Preserves payload."),
+    capability: str = typer.Argument(..., help="Capability identifier (UUID)."),
+    payload: str = typer.Argument(..., help="Capability payload encoded as Preserves text."),
 ) -> None:
     """Invoke a capability by id."""
 
     _run(_run_invoke_capability(ctx.obj, capability, payload))
 
 
-@app.command(rich_help_panel="Runtime")
+@debug_app.command("raw")
 def raw(
     ctx: typer.Context,
-    rpc_command: str = typer.Argument(..., help="Command name to invoke."),
-    params: str = typer.Argument("{}", help="JSON object of parameters."),
+    rpc_command: str = typer.Argument(..., help="Runtime RPC command to invoke."),
+    params: str = typer.Argument("{}", help="JSON object describing command parameters."),
 ) -> None:
     """Send a raw command with JSON parameters."""
 
@@ -429,17 +457,17 @@ def raw(
     _run(_run_call(ctx.obj, rpc_command, payload, "raw"))
 
 
-@workspace_app.callback(invoke_without_command=True)
-def workspace_group(ctx: typer.Context) -> None:
-    if ctx.invoked_subcommand is None:
-        _show_group_help(ctx)
-
-
-@workspace_app.command("entries")
+@debug_app.command("workspace-entries")
 def workspace_entries(ctx: typer.Context) -> None:
     """List workspace dataspace entries."""
 
     _run(_run_call(ctx.obj, "workspace_entries", {}, "workspace:entries"))
+
+
+@workspace_app.callback(invoke_without_command=True)
+def workspace_group(ctx: typer.Context) -> None:
+    if ctx.invoked_subcommand is None:
+        _show_group_help(ctx)
 
 
 @workspace_app.command("scan")
@@ -452,7 +480,7 @@ def workspace_scan(ctx: typer.Context) -> None:
 @workspace_app.command("read")
 def workspace_read(
     ctx: typer.Context,
-    path: str = typer.Argument(..., help="Workspace-relative path to read."),
+    path: str = typer.Argument(..., help="Workspace-relative file path to read."),
 ) -> None:
     """Read a file from the workspace."""
 
@@ -462,8 +490,8 @@ def workspace_read(
 @workspace_app.command("write")
 def workspace_write(
     ctx: typer.Context,
-    path: str = typer.Argument(..., help="Workspace-relative path to write."),
-    content: str = typer.Option(..., "--content", "-c", help="Content to write."),
+    path: str = typer.Argument(..., help="Workspace-relative file path to write."),
+    content: str = typer.Option(..., "--content", "-c", help="File contents to write."),
 ) -> None:
     """Write content to a workspace file."""
 
@@ -477,7 +505,7 @@ def agent_group(ctx: typer.Context) -> None:
         _show_group_help(ctx)
 
 
-@agent_app.command("invoke")
+@debug_app.command("agent-invoke")
 def agent_invoke(
     ctx: typer.Context,
     prompt: str = typer.Argument(..., help="Prompt text for Claude Code."),
@@ -491,17 +519,31 @@ def agent_invoke(
 @agent_app.command("responses")
 def agent_responses(
     ctx: typer.Context,
-    request_id: Optional[str] = typer.Option(None, help="Filter responses by request id."),
-    wait: float = typer.Option(0.0, help="Time (seconds) to wait for new responses.", min=0.0),
+    request_id: Optional[str] = typer.Option(None, help="Only include responses for this request identifier."),
+    wait: float = typer.Option(0.0, help="Seconds to wait for new responses before returning.", min=0.0),
     limit: Optional[int] = typer.Option(None, help="Maximum number of responses to return.", min=1),
+    select: bool = typer.Option(
+        False,
+        "--select",
+        help="Interactively choose a request identifier to filter responses.",
+    ),
 ) -> None:
     """List cached agent responses."""
+
+    if select and request_id:
+        raise typer.BadParameter("--select cannot be combined with --request-id")
+    if select:
+        request_id = _choose_request_id(
+            ctx.obj,
+            title="Agent Requests",
+        )
+        if not request_id:
+            console.print("[yellow]No request selected; showing all responses.[/yellow]")
 
     params: Dict[str, Any] = {}
     if request_id:
         params["request_id"] = request_id
-    if wait > 0:
-        params["wait_ms"] = int(wait * 1000)
+    params["wait_ms"] = int(wait * 1000)
     if limit is not None:
         params["limit"] = limit
     _run(_run_call(ctx.obj, "agent_responses", params, "agent:responses"))
@@ -510,7 +552,7 @@ def agent_responses(
 @agent_app.command("chat")
 def agent_chat(
     ctx: typer.Context,
-    prompt: Optional[str] = typer.Argument(None, help="Prompt to send to the agent."),
+    prompt: Optional[str] = typer.Argument(None, help="Prompt text to send to the agent."),
     wait_for_response: bool = typer.Option(
         False,
         "--wait-for-response",
@@ -518,18 +560,28 @@ def agent_chat(
     ),
     wait: float = typer.Option(
         0.0,
-        help="Extra time (seconds) to wait after the first response is observed (requires --wait-for-response).",
+        help="Extra seconds to wait after the first response arrives (requires --wait-for-response).",
         min=0.0,
     ),
     resume_request_id: Optional[str] = typer.Option(
         None,
         "--resume",
-        help="Request ID whose transcript should be prepended as conversation context.",
+        help="Request identifier whose transcript should seed the conversation context.",
+    ),
+    resume_select: bool = typer.Option(
+        False,
+        "--resume-select",
+        help="Interactively choose a request identifier to seed conversation context.",
+    ),
+    continue_last: bool = typer.Option(
+        False,
+        "--continue",
+        help="Resume the most recent agent conversation.",
     ),
     history_limit: int = typer.Option(
         10,
         "--history-limit",
-        help="Maximum transcript entries to include when using --resume.",
+        help="Transcript entries to include when using --resume.",
         min=1,
         show_default=True,
     ),
@@ -537,13 +589,38 @@ def agent_chat(
     """Send a prompt to the agent. Combine with --wait-for-response to block for results."""
 
     message = prompt or typer.prompt("Prompt")
+
+    resume_id = resume_request_id
+    if continue_last:
+        if resume_request_id or resume_select:
+            raise typer.BadParameter("--continue cannot be combined with --resume or --resume-select")
+        resume_id = _latest_request_id(ctx.obj)
+        if resume_id:
+            preview = _preview_text(_recent_prompt_for_request(ctx.obj, resume_id))
+            label = f"[bold]{_short_id(resume_id)}[/bold]"
+            if preview:
+                label += f" · {preview}"
+            console.print(f"[dim]Continuing conversation {label}[/dim]")
+            console.print(f"[dim]Full request id: {resume_id}[/dim]")
+        else:
+            console.print("[yellow]No prior conversations found; starting a new one.[/yellow]")
+    if resume_select:
+        if resume_request_id:
+            raise typer.BadParameter("--resume-select cannot be combined with --resume")
+        resume_id = _choose_request_id(
+            ctx.obj,
+            title="Select request to resume",
+        )
+        if not resume_id:
+            console.print("[yellow]No request selected; starting a fresh conversation.[/yellow]")
+
     _run(
         _run_agent_chat(
             ctx.obj,
             message,
             wait_for_response,
             wait,
-            resume_request_id,
+            resume_id,
             history_limit,
         )
     )
@@ -558,29 +635,29 @@ def reaction_group(ctx: typer.Context) -> None:
 @reaction_app.command("register")
 def reaction_register(
     ctx: typer.Context,
-    actor: str = typer.Option(..., help="Actor UUID that owns the reaction."),
-    facet: str = typer.Option(..., help="Facet UUID used for the pattern scope."),
-    pattern: str = typer.Option(..., help="Preserves pattern expression."),
+    actor: str = typer.Option(..., help="Actor identifier (UUID) that owns the reaction."),
+    facet: str = typer.Option(..., help="Facet identifier (UUID) that scopes the pattern."),
+    pattern: str = typer.Option(..., help="Pattern expression encoded as Preserves text."),
     effect: str = typer.Option(
         "assert",
-        help="Reaction effect type.",
+        help="Reaction effect type (assert or send-message).",
         case_sensitive=False,
         show_default=True,
     ),
-    value: Optional[str] = typer.Option(None, help="Preserves value to assert (for assert effect)."),
+    value: Optional[str] = typer.Option(None, help="Literal Preserves value to assert (for assert effect)."),
     value_from_match: bool = typer.Option(
         False,
         help="Use the entire matched value as the asserted value (assert effect).",
     ),
     value_match_index: Optional[int] = typer.Option(
         None,
-        help="Use the Nth element from the matched record/sequence as the asserted value.",
+        help="Use the Nth element from the matched record or sequence as the asserted value.",
         min=0,
     ),
-    target_facet: Optional[str] = typer.Option(None, help="Override facet for asserted value."),
-    target_actor: Optional[str] = typer.Option(None, help="Target actor for send-message effect."),
-    target_facet_msg: Optional[str] = typer.Option(None, help="Target facet for send-message effect."),
-    payload: Optional[str] = typer.Option(None, help="Preserves payload for send-message effect."),
+    target_facet: Optional[str] = typer.Option(None, help="Facet identifier to attach the asserted value to."),
+    target_actor: Optional[str] = typer.Option(None, help="Destination actor identifier for send-message."),
+    target_facet_msg: Optional[str] = typer.Option(None, help="Destination facet identifier for send-message."),
+    payload: Optional[str] = typer.Option(None, help="Literal Preserves payload for send-message effect."),
     payload_from_match: bool = typer.Option(
         False,
         help="Use the entire matched value as the message payload (send-message effect).",
@@ -678,7 +755,7 @@ def reaction_register(
 @reaction_app.command("unregister")
 def reaction_unregister(
     ctx: typer.Context,
-    reaction_id: str = typer.Argument(..., help="Reaction identifier to remove."),
+    reaction_id: str = typer.Argument(..., help="Reaction identifier to remove (UUID)."),
 ) -> None:
     """Unregister a reaction."""
 
@@ -699,15 +776,15 @@ def dataspace_group(ctx: typer.Context) -> None:
         _show_group_help(ctx)
 
 
-@dataspace_app.command("assertions")
+@debug_app.command("dataspace-assertions")
 def dataspace_assertions(
     ctx: typer.Context,
-    actor: Optional[str] = typer.Option(None, help="Filter by actor UUID."),
-    label: Optional[str] = typer.Option(None, help="Filter by record label/symbol."),
+    actor: Optional[str] = typer.Option(None, help="Filter by actor identifier (UUID)."),
+    label: Optional[str] = typer.Option(None, help="Filter by record label or symbol."),
     request_id: Optional[str] = typer.Option(
-        None, help="Filter record assertions whose first field matches the id."
+        None, help="Only include assertions whose first field matches this request identifier."
     ),
-    limit: Optional[int] = typer.Option(None, help="Maximum assertions to return."),
+    limit: Optional[int] = typer.Option(None, help="Maximum number of assertions to return."),
 ) -> None:
     """Inspect assertions currently in the dataspace."""
 
@@ -735,8 +812,8 @@ def daemon_group(ctx: typer.Context) -> None:
 @daemon_app.command("start")
 def daemon_start(
     ctx: typer.Context,
-    host: str = typer.Option(DEFAULT_DAEMON_HOST, help="Host interface for the daemon."),
-    port: Optional[int] = typer.Option(None, help="Port for the daemon (auto if omitted)."),
+    host: str = typer.Option(DEFAULT_DAEMON_HOST, help="Host interface for the daemon to bind."),
+    port: Optional[int] = typer.Option(None, help="Port to listen on (auto-select if omitted)."),
 ) -> None:
     root = _ensure_root_dir(ctx.obj.root)
     existing = _load_daemon_state(root)
@@ -828,17 +905,29 @@ def daemon_status(ctx: typer.Context) -> None:
 @dataspace_app.command("tail")
 def dataspace_tail(
     ctx: typer.Context,
-    branch: str = typer.Option("main", help="Branch to inspect."),
-    since: Optional[str] = typer.Option(None, help="Start streaming after this turn id."),
-    limit: int = typer.Option(10, help="Number of turns to return per request.", min=1),
-    actor: Optional[str] = typer.Option(None, help="Filter by actor UUID."),
-    label: Optional[str] = typer.Option(None, help="Filter by record label/symbol."),
-    request_id: Optional[str] = typer.Option(None, help="Filter record assertions whose first field matches the id."),
-    event_type: List[str] = typer.Option([], "--event-type", "-e", help="Restrict to specific event types (assert, retract)."),
+    branch: str = typer.Option("main", help="Branch name to inspect."),
+    since: Optional[str] = typer.Option(None, help="Start streaming after this turn identifier."),
+    limit: int = typer.Option(10, help="Number of events to return per request.", min=1),
+    actor: Optional[str] = typer.Option(None, help="Filter by actor identifier (UUID)."),
+    label: Optional[str] = typer.Option(None, help="Filter by record label or symbol."),
+    request_id: Optional[str] = typer.Option(None, help="Only include events whose first field matches this request identifier."),
+    request_select: bool = typer.Option(
+        False,
+        "--request-select",
+        help="Interactively choose a request identifier to filter events.",
+    ),
+    event_type: List[str] = typer.Option([], "--event-type", "-e", help="Restrict to specific event types (assert or retract)."),
     follow: bool = typer.Option(False, help="Continue polling for new events."),
-    interval: float = typer.Option(1.0, help="Polling interval (seconds) when following.", min=0.1),
+    interval: float = typer.Option(1.0, help="Polling interval in seconds when following.", min=0.1),
 ) -> None:
     """Tail assertion events from the dataspace."""
+
+    if request_select and request_id:
+        raise typer.BadParameter("--request-select cannot be combined with --request-id")
+    if request_select:
+        request_id = _choose_request_id(ctx.obj, title="Select request to filter")
+        if not request_id:
+            console.print("[yellow]No request selected; streaming without request filter.[/yellow]")
 
     params: Dict[str, Any] = {
         "branch": branch,
@@ -855,7 +944,6 @@ def dataspace_tail(
     if since:
         params["since"] = since
     if follow:
-        
         wait_ms = max(int(interval * 1000), 0)
         params["wait_ms"] = wait_ms
 
@@ -919,6 +1007,8 @@ async def _run_agent_chat(
             )
 
         invoke_result = await client.call("agent_invoke", {"prompt": final_prompt})
+        if isinstance(invoke_result, dict) and prompt is not None:
+            invoke_result.setdefault("prompt_preview", prompt)
         _print_result(invoke_result, "agent:invoke")
 
         request_id = None
@@ -938,7 +1028,7 @@ async def _run_agent_chat(
             )
             return
 
-        params: Dict[str, Any] = {"request_id": request_id}
+        params: Dict[str, Any] = {"request_id": request_id, "wait_ms": 0}
 
         while True:
             responses = await client.call("agent_responses", params)
@@ -1051,6 +1141,351 @@ async def _connect_client(state: CLIState) -> ControlClient:
         client = ControlClient(tuple(cmd))
     await client.connect()
     return client
+
+
+async def _fetch_recent_requests(state: CLIState, limit: int) -> List[Dict[str, Any]]:
+    client = await _connect_client(state)
+    try:
+        result = await client.call("agent_responses", {"limit": limit, "wait_ms": 0})
+    finally:
+        await client.close()
+
+    if isinstance(result, dict):
+        responses = result.get("responses")
+        if isinstance(responses, list):
+            return responses
+    return []
+
+
+def _choose_request_id(state: CLIState, *, title: str, limit: int = 20) -> Optional[str]:
+    try:
+        responses = asyncio.run(_fetch_recent_requests(state, limit))
+    except ProtocolError as exc:  # pragma: no cover - interactive path
+        _print_protocol_error(exc)
+        return None
+    except FileNotFoundError as exc:  # pragma: no cover - interactive path
+        _print_launch_error(exc)
+        return None
+    except KeyboardInterrupt:  # pragma: no cover - interactive path
+        raise typer.Exit(130)
+    except Exception as exc:  # pragma: no cover - safety net
+        _print_unexpected_error(exc)
+        return None
+
+    unique: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for entry in responses:
+        request_id = str(entry.get("request_id", "")).strip()
+        if not request_id or request_id in seen:
+            continue
+        seen.add(request_id)
+        unique.append(entry)
+
+    if not unique:
+        console.print("[yellow]No agent requests found.[/yellow]")
+        return None
+
+    max_width = console.width if console.width else 80
+    idx_col_width = max(len(str(len(unique))), 2)
+    truncated = [str(entry.get("request_id", "")) for entry in unique]
+
+    for idx, (entry, full_rid) in enumerate(zip(unique, truncated), start=1):
+        agent = entry.get("agent", "agent")
+        timestamp_raw = entry.get("timestamp", "")
+        timestamp = _format_timestamp(timestamp_raw) or "-"
+        short_rid = _short_id(full_rid)
+        tags = _extract_keywords([_clean_user_message(entry.get("prompt"))])
+        tag_text = _format_tags(tags) or "(no tags)"
+        console.print(Panel.fit(
+            Group(
+                Text.assemble(("Request: ", "dim"), (short_rid or "-", "yellow")),
+                Text.assemble(("Agent: ", "dim"), (agent, "magenta")),
+                Text.assemble(("Started: ", "dim"), (timestamp, "white")),
+                Text.assemble(("Tags: ", "dim"), (tag_text, "white")),
+                Text.assemble(("Full ID: ", "dim"), (full_rid, "dim")),
+            ),
+            title=f"Option {idx}",
+            border_style="blue",
+            box=box.ROUNDED,
+        ))
+
+    while True:
+        choice = typer.prompt("Select request (blank to cancel)", default="").strip()
+        if choice == "":
+            return None
+        if choice.isdigit():
+            index = int(choice)
+            if 1 <= index <= len(unique):
+                return str(unique[index - 1].get("request_id"))
+        console.print(f"[yellow]Enter a number between 1 and {len(unique)}, or press Enter to cancel.[/yellow]")
+
+
+def _metadata_block(pairs: Iterable[Tuple[str, Optional[str]]]) -> Optional[Group]:
+    lines: List[Text] = []
+    for label, value in pairs:
+        if not value:
+            continue
+        value_style = "dim" if label.lower() in {"full id", "full request"} else "white"
+        lines.append(Text.assemble((f"{label}: ", "dim"), (str(value), value_style)))
+    if not lines:
+        return None
+    return Group(*lines)
+
+
+def _latest_request_id(state: CLIState) -> Optional[str]:
+    try:
+        responses = asyncio.run(_fetch_recent_requests(state, 1))
+    except Exception:
+        return None
+    if responses:
+        return str(responses[0].get("request_id"))
+    return None
+
+
+def _recent_prompt_for_request(state: CLIState, request_id: str) -> Optional[str]:
+    try:
+        responses = asyncio.run(_fetch_recent_requests(state, 20))
+    except Exception:
+        return None
+    for entry in responses:
+        if str(entry.get("request_id")) == request_id:
+            prompt = entry.get("prompt")
+            if isinstance(prompt, str):
+                return prompt
+    return None
+
+
+@debug_app.command("agent-requests")
+def debug_agent_requests(
+    ctx: typer.Context,
+    limit: int = typer.Option(20, help="Maximum number of recent requests to display.", min=1),
+) -> None:
+    """List recent agent request identifiers with full metadata."""
+
+    try:
+        responses = asyncio.run(_fetch_recent_requests(ctx.obj, limit))
+    except ProtocolError as exc:
+        _print_protocol_error(exc)
+        raise typer.Exit(1)
+    except FileNotFoundError as exc:
+        _print_launch_error(exc)
+        raise typer.Exit(1)
+    except KeyboardInterrupt:
+        raise typer.Exit(130)
+    except Exception as exc:
+        _print_unexpected_error(exc)
+        raise typer.Exit(1)
+
+    if not responses:
+        console.print("[yellow]No agent requests recorded yet.[/yellow]")
+        return
+
+    for idx, entry in enumerate(responses, start=1):
+        request_id = str(entry.get("request_id", ""))
+        agent = entry.get("agent", "agent")
+        timestamp_raw = entry.get("timestamp", "")
+        timestamp = _format_timestamp(timestamp_raw) or "-"
+        prompt = entry.get("prompt")
+        clean_prompt = _clean_user_message(prompt)
+        tags = _extract_keywords([clean_prompt])
+
+        metadata = _metadata_block([
+            ("Request", _short_id(request_id)),
+            ("Full ID", request_id),
+            ("Agent", agent),
+            ("Timestamp", timestamp),
+        ])
+
+        body_parts: List[Any] = [metadata] if metadata else []
+        tag_line = _format_tags(tags)
+        if tag_line:
+            body_parts.append(Text("Tags: " + tag_line, style="dim"))
+        else:
+            body_parts.append(Text("Tags: (none)", style="dim"))
+        body = Group(*body_parts) if len(body_parts) > 1 else body_parts[0]
+
+        console.print(Panel(body, border_style="blue", box=box.ROUNDED, title=f"Request {idx}"))
+
+
+def _message_panel(label: str, content: Optional[str], *, border_style: str, subtitle: Optional[str] = None) -> Panel:
+    if content and content.strip():
+        body = Markdown(content, code_theme="monokai")
+    else:
+        body = Text("No content", style="dim")
+    return Panel(
+        body,
+        title=f"[bold]{label}[/bold]",
+        subtitle=subtitle,
+        border_style=border_style,
+        box=box.ROUNDED,
+        padding=(0, 1),
+    )
+
+
+def _render_chat_exchange(
+    prompt: Optional[str],
+    response: Optional[str],
+    *,
+    user_label: str = "You",
+    assistant_label: str = "Assistant",
+    metadata: Optional[List[Tuple[str, Optional[str]]]] = None,
+    tags: Optional[List[str]] = None,
+    title: Optional[str] = None,
+    subtitle: Optional[str] = None,
+    assistant_role: Optional[str] = None,
+    tool: Optional[str] = None,
+    border_style: str = "blue",
+) -> Panel:
+    renderables: List[Any] = []
+
+    meta_renderable = _metadata_block(metadata or [])
+    if meta_renderable is not None:
+        renderables.append(meta_renderable)
+
+    if tags:
+        tag_line = Text("Tags: " + ", ".join(tags), style="dim")
+        renderables.append(tag_line)
+
+    cleaned_prompt = _clean_user_message(prompt)
+    if cleaned_prompt:
+        renderables.append(_message_panel(user_label, cleaned_prompt, border_style="cyan"))
+
+    cleaned_response = _clean_assistant_message(response)
+    if cleaned_response is not None:
+        label = assistant_label or "Assistant"
+        if assistant_role and assistant_role.lower() not in {"assistant", "agent"}:
+            label = f"{label} ({assistant_role})"
+        if tool:
+            label = f"{label} · {tool}"
+
+        assistant_border = "magenta" if assistant_role and assistant_role.lower() == "tool" else "green"
+        renderables.append(_message_panel(label, cleaned_response, border_style=assistant_border))
+
+    if not renderables:
+        renderables.append(Text("No conversation content", style="dim"))
+
+    body = Group(*renderables) if len(renderables) > 1 else renderables[0]
+    formatted_subtitle = _format_timestamp(subtitle)
+    return Panel(body, border_style=border_style, box=box.ROUNDED, title=title, subtitle=formatted_subtitle, padding=(0, 1))
+
+
+def _preview_text(text: Optional[str], length: int = 60) -> Optional[str]:
+    if not text:
+        return None
+    collapsed = " ".join(text.strip().split())
+    if len(collapsed) <= length:
+        return collapsed
+    return collapsed[: length - 1] + "…"
+
+
+def _short_id(value: Optional[str], length: int = 8) -> Optional[str]:
+    if not value:
+        return None
+    value = str(value)
+    if len(value) <= length:
+        return value
+    return value[:length] + "…"
+
+
+def _format_timestamp(timestamp: Optional[str]) -> Optional[str]:
+    if not timestamp or not isinstance(timestamp, str):
+        return None
+    ts = timestamp.strip()
+    if not ts:
+        return None
+    candidates = []
+    if ts.endswith("Z"):
+        candidates.append((ts[:-1] + "+0000", "%Y-%m-%dT%H:%M:%S.%f%z"))
+        candidates.append((ts[:-1] + "+0000", "%Y-%m-%dT%H:%M:%S%z"))
+        candidates.append((ts[:-1] + "+00:00", "%Y-%m-%dT%H:%M:%S.%f%z"))
+        candidates.append((ts[:-1] + "+00:00", "%Y-%m-%dT%H:%M:%S%z"))
+        candidates.append((ts, "%Y-%m-%dT%H:%M:%S.%fZ"))
+        candidates.append((ts, "%Y-%m-%dT%H:%M:%S%Z"))
+    candidates.append((ts, "%Y-%m-%dT%H:%M:%S.%f%z"))
+    candidates.append((ts, "%Y-%m-%dT%H:%M:%S%z"))
+    candidates.append((ts, "%Y-%m-%d %H:%M:%S"))
+
+    for candidate, fmt in candidates:
+        try:
+            dt = datetime.strptime(candidate, fmt)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=datetime.now().astimezone().tzinfo)
+            local_dt = dt.astimezone()
+            return local_dt.strftime("%Y-%m-%d %H:%M:%S %Z")
+        except ValueError:
+            continue
+    if "T" in ts:
+        simplified = ts.rstrip("Z").split("T")
+        if len(simplified) == 2:
+            date_part, time_part = simplified
+            time_part = time_part.split(".")[0]
+            return f"{date_part} {time_part} UTC"
+    return timestamp
+
+
+def _extract_keywords(texts: Iterable[Optional[str]], limit: int = 3) -> List[str]:
+    scores: Dict[str, float] = {}
+    for text in texts:
+        if not text:
+            continue
+        snippet = text
+        user_matches = list(re.finditer(r"\buser\s*:\s*", text, flags=re.IGNORECASE))
+        if user_matches:
+            snippet = text[user_matches[-1].end():]
+        assistant_boundary = re.search(r"\bassistant\s*:\s*", snippet, flags=re.IGNORECASE)
+        if assistant_boundary:
+            snippet = snippet[:assistant_boundary.start()]
+        cleaned = re.sub(r"\b(?:user|assistant)\s*:\s*", " ", snippet, flags=re.IGNORECASE)
+        words = re.findall(r"[A-Za-z][A-Za-z0-9'-]+", cleaned.lower())
+        for word in words:
+            if len(word) < 3 or word in STOPWORDS:
+                continue
+            base = len(word)
+            scores[word] = scores.get(word, 0.0) + base + 1.0
+
+    ranked = sorted(scores.items(), key=lambda item: (-item[1], -len(item[0]), item[0]))
+    return [word for word, _ in ranked[:limit]]
+
+
+def _clean_user_message(text: Optional[str]) -> Optional[str]:
+    if not text:
+        return None
+    match = USER_PROMPT_RE.findall(text)
+    if match:
+        cleaned = match[-1]
+    else:
+        cleaned = text
+    cleaned = cleaned.strip()
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned or None
+
+
+def _clean_assistant_message(text: Optional[str]) -> Optional[str]:
+    if not text:
+        return None
+    match = ASSISTANT_RESPONSE_RE.findall(text)
+    if match:
+        cleaned = match[-1]
+    else:
+        cleaned = text
+    cleaned = cleaned.strip()
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned or None
+
+
+def _format_tags(tags: List[str]) -> Optional[str]:
+    if not tags:
+        return None
+    return " ".join(f"#{tag}" for tag in tags)
+
+
+def _conversation_title(short_id: Optional[str], tags: List[str], fallback: str) -> str:
+    formatted = _format_tags(tags)
+    if formatted:
+        return formatted
+    if short_id:
+        return short_id
+    return fallback
 
 
 async def _run_dataspace_tail(state: CLIState, params: Dict[str, Any], follow: bool, interval: float) -> None:
@@ -1357,30 +1792,43 @@ def _print_agent_invoke(result: Any) -> None:
         console.print(JSON.from_data(result))
         return
 
-    request_id = result.get("request_id", "")
-    prompt = result.get("prompt", "")
-    agent = result.get("agent", "agent")
+    request_id = result.get("request_id")
+    prompt = result.get("prompt_preview") or result.get("prompt")
+    agent = result.get("agent", "Agent")
+    branch = result.get("branch")
+    actor = result.get("actor")
     queued_turn_value = result.get("queued_turn")
     queued_turn = queued_turn_value if queued_turn_value else "pending"
-    branch = result.get("branch", "main")
-    actor = result.get("actor", "")
 
-    body_lines = [
-        f"[bold]Prompt[/bold]\n{prompt}",
-        "",
-        f"[bold]Branch[/bold] {branch}",
-        f"[bold]Actor[/bold] {actor}",
-        f"[bold]Queued Turn[/bold] {queued_turn}",
-        "[dim]Run `duet agent responses` to inspect replies.[/dim]",
+    metadata = [
+        ("Branch", branch),
+        ("Actor", _short_id(actor)),
+        (
+            "Queued Turn",
+            _short_id(queued_turn if isinstance(queued_turn, str) else str(queued_turn)),
+        ),
+        ("Full Request", request_id),
     ]
+    clean_prompt = _clean_user_message(prompt)
+    tags = _extract_keywords([clean_prompt])
 
-    console.print(
-        Panel(
-            "\n".join(body_lines),
-            title=f"[bold blue]{agent}[/bold blue] [dim]{request_id}[/dim]",
-            border_style="blue",
-        )
+    panel = _render_chat_exchange(
+        prompt=prompt,
+        response=None,
+        user_label="You",
+        assistant_label=agent,
+        metadata=metadata,
+        title=_short_id(request_id) or "Agent Invocation",
+        tags=tags,
+        border_style="blue",
     )
+
+    console.print(panel)
+
+    if request_id:
+        console.print(
+            f"[dim]Track responses with `duet agent responses --request-id {request_id}` or `duet transcript show {request_id}`.[/dim]"
+        )
 
 
 def _print_agent_responses(result: Any) -> None:
@@ -1395,28 +1843,37 @@ def _print_agent_responses(result: Any) -> None:
 
     panels = []
     for entry in responses:
-        request_id = entry.get("request_id", "")
-        agent = entry.get("agent", "agent")
-        prompt = entry.get("prompt", "")
-        response = entry.get("response", "")
-        timestamp = entry.get("timestamp")
+        request_id = entry.get("request_id")
+        agent = entry.get("agent", "Agent")
+        prompt = entry.get("prompt")
+        response = entry.get("response")
+        timestamp_raw = entry.get("timestamp")
+        formatted_timestamp = _format_timestamp(timestamp_raw)
+        role = entry.get("role")
+        tool = entry.get("tool")
+        clean_prompt = _clean_user_message(prompt)
+        tags = _extract_keywords([clean_prompt])
+        conversation_title = _conversation_title(_short_id(request_id), tags, agent)
 
-        sections = [
-            f"[bold]Agent[/bold] {agent}",
-            f"[bold]Request[/bold] {request_id}",
-        ]
-        if timestamp:
-            sections.append(f"[bold]Timestamp[/bold] {timestamp}")
-        sections.append(f"[bold]Prompt[/bold]\n{prompt or '[dim]—[/dim]'}")
-        sections.append(f"[bold]Response[/bold]\n{response or '[dim]—[/dim]'}")
-
-        panels.append(
-            Panel(
-                "\n\n".join(sections),
-                title="Agent Response",
-                border_style="blue",
-            )
+        panel = _render_chat_exchange(
+            prompt=prompt,
+            response=response,
+            user_label="You",
+            assistant_label=agent,
+            metadata=[
+                ("Request", _short_id(request_id)),
+                ("Full ID", request_id),
+                ("Timestamp", formatted_timestamp),
+            ],
+            title=conversation_title,
+            subtitle=formatted_timestamp,
+            assistant_role=role,
+            tool=tool,
+            tags=tags,
+            border_style="blue",
         )
+
+        panels.append(panel)
 
     console.print(Group(*panels) if len(panels) > 1 else panels[0])
 
@@ -1433,24 +1890,24 @@ def _print_dataspace_assertions(result: Any) -> None:
 
     panels = []
     for entry in assertions:
-        actor = entry.get("actor", "")
-        handle = entry.get("handle", "")
+        actor = entry.get("actor")
+        handle = entry.get("handle")
         value = entry.get("value")
 
-        sections = [
-            f"[bold]Actor[/bold] {actor}",
-            f"[bold]Handle[/bold] {handle}",
-        ]
-        sections.append(
-            "[bold]Value[/bold]\n" + _summarize_value(value, max_length=200)
-        )
+        metadata = _metadata_block([
+            ("Actor", _short_id(actor)),
+            ("Handle", _short_id(handle)),
+        ])
+        value_text = Text(_summarize_value(value, max_length=200))
 
-        panels.append(
-            Panel(
-                "\n\n".join(sections),
-                border_style="cyan",
-            )
-        )
+        body_parts: List[Any] = []
+        if metadata is not None:
+            body_parts.append(metadata)
+        body_parts.append(value_text)
+
+        body = Group(*body_parts) if len(body_parts) > 1 else body_parts[0]
+
+        panels.append(Panel(body, border_style="cyan", box=box.ROUNDED))
 
     console.print(Group(*panels) if len(panels) > 1 else panels[0])
 
@@ -1465,43 +1922,100 @@ def _print_dataspace_events(result: Any) -> None:
         console.print("[dim]No new events[/dim]")
         return
 
-    panels = []
+    panels: List[Any] = []
     for batch in batches:
-        turn_id = batch.get("turn_id", "")
-        actor = batch.get("actor", "")
+        turn_id = batch.get("turn_id") or batch.get("turn")
+        actor = batch.get("actor")
         clock = batch.get("clock")
         timestamp = batch.get("timestamp")
+        formatted_batch_timestamp = _format_timestamp(timestamp)
 
-        sections = [
-            f"[bold]Turn[/bold] {turn_id}",
-            f"[bold]Actor[/bold] {actor}",
-        ]
-        if clock is not None:
-            sections.append(f"[bold]Clock[/bold] {clock}")
-        if timestamp:
-            sections.append(f"[bold]Timestamp[/bold] {timestamp}")
+        metadata = _metadata_block([
+            ("Turn", _short_id(turn_id)),
+            ("Actor", _short_id(actor)),
+            ("Clock", str(clock) if clock is not None else None),
+            ("Timestamp", formatted_batch_timestamp),
+        ])
 
-        event_lines: List[str] = []
+        entry_renderables: List[Any] = [metadata] if metadata is not None else []
+
         for event in batch.get("events", []):
             action = (event.get("action") or "").upper()
-            handle = event.get("handle", "")
-            value = event.get("value")
-            rendered = f"[bold]{action}[/bold] {handle}"
-            if value:
-                rendered += f"\n{_summarize_value(value, max_length=200)}"
-            event_lines.append(rendered)
+            handle = event.get("handle")
+            transcript = event.get("transcript")
 
-        if event_lines:
-            sections.append("[bold]Events[/bold]\n" + "\n\n".join(event_lines))
+            if isinstance(transcript, dict):
+                request_id = transcript.get("request_id")
+                agent_name = transcript.get("agent", "Agent")
+                response_timestamp_raw = transcript.get("response_timestamp")
+                role = transcript.get("role")
+                tool = transcript.get("tool")
+                prompt_text = transcript.get("prompt")
+                response_text = transcript.get("response")
+                formatted_response_timestamp = _format_timestamp(response_timestamp_raw)
+                clean_prompt = _clean_user_message(prompt_text)
+                tags = _extract_keywords([clean_prompt])
+                conversation_title = _conversation_title(_short_id(request_id), tags, agent_name)
 
-        panels.append(
-            Panel(
-                "\n\n".join(sections),
-                border_style="cyan",
-            )
-        )
+                role_meta = role if role and role.lower() not in {"assistant", "agent"} else None
+                event_metadata = [
+                    ("Action", action),
+                    ("Handle", _short_id(handle)),
+                    ("Request", _short_id(request_id)),
+                    ("Full Request", request_id),
+                    ("Role", role_meta),
+                    ("Tool", tool),
+                    ("Timestamp", formatted_response_timestamp),
+                ]
+                entry_renderables.append(
+                    _render_chat_exchange(
+                        prompt=prompt_text,
+                        response=response_text,
+                        user_label="User",
+                        assistant_label=agent_name,
+                        metadata=event_metadata,
+                        title=conversation_title,
+                        subtitle=formatted_response_timestamp or _short_id(request_id) or action,
+                        assistant_role=role,
+                        tool=tool,
+                        tags=tags,
+                        border_style="cyan",
+                    )
+                )
+            else:
+                value_structured = event.get("value_structured")
+                summary_text = event.get("summary")
+                value_raw = event.get("value")
+                metadata_pairs = [
+                    ("Action", action),
+                    ("Handle", _short_id(handle)),
+                ]
+                structured_meta = _structured_value_metadata(value_structured)
+                if structured_meta:
+                    metadata_pairs.extend(structured_meta)
+                elif summary_text and summary_text != value_raw:
+                    metadata_pairs.append(("Summary", summary_text))
+                metadata = _metadata_block(metadata_pairs)
+                value_renderable = _structured_value_renderable(value_structured)
+                if value_renderable is None and value_raw is not None:
+                    value_renderable = Text(_summarize_value(value_raw, max_length=200))
+                body_parts: List[Any] = []
+                if metadata is not None:
+                    body_parts.append(metadata)
+                if value_renderable is not None:
+                    body_parts.append(value_renderable)
+                if not body_parts and value_raw:
+                    body_parts.append(Text(_summarize_value(value_raw, max_length=200)))
+                if body_parts:
+                    body = Group(*body_parts) if len(body_parts) > 1 else body_parts[0]
+                    entry_renderables.append(Panel(body, border_style="cyan", box=box.ROUNDED))
 
-    console.print(Group(*panels) if len(panels) > 1 else panels[0])
+        if entry_renderables:
+            body = Group(*entry_renderables) if len(entry_renderables) > 1 else entry_renderables[0]
+            panels.append(Panel(body, border_style="cyan", box=box.ROUNDED))
+
+    if panels:
+        console.print(Group(*panels) if len(panels) > 1 else panels[0])
 
 
 def _print_transcript_show(result: Any) -> None:
@@ -1514,54 +2028,67 @@ def _print_transcript_show(result: Any) -> None:
         console.print("[yellow]No transcript data[/yellow]")
         return
 
+    timestamp_values = [
+        entry.get("timestamp")
+        for entry in entries
+        if isinstance(entry, dict) and entry.get("timestamp")
+    ]
+    started_timestamp = _format_timestamp(timestamp_values[0]) if timestamp_values else None
+    updated_timestamp = _format_timestamp(timestamp_values[-1]) if timestamp_values else None
+
     request_id = result.get("request_id")
     branch = result.get("branch")
-    header_lines = []
-    if request_id:
-        header_lines.append(f"[bold]Request[/bold] {request_id}")
-    if branch:
-        header_lines.append(f"[bold]Branch[/bold] {branch}")
-    if header_lines:
-        console.print(
-            Panel(
-                "\n".join(header_lines),
-                title="Transcript",
-                border_style="blue",
-            )
-        )
+    header_meta = _metadata_block([
+        ("Request", _short_id(request_id)),
+        ("Full ID", request_id),
+        ("Branch", branch),
+        ("Started", started_timestamp),
+        ("Updated", updated_timestamp),
+        ("Entries", str(len(entries))),
+    ])
+    if header_meta is not None:
+        console.print(Panel(header_meta, title="Transcript", border_style="blue", box=box.ROUNDED))
 
-    panels = []
-    for entry in entries:
-        agent = entry.get("agent", "agent")
-        actor = entry.get("actor", "")
-        handle = entry.get("handle", "")
-        timestamp = entry.get("timestamp")
+    panels: List[Any] = []
+    for idx, entry in enumerate(entries, start=1):
+        agent = entry.get("agent", "Agent")
+        actor = entry.get("actor")
+        handle = entry.get("handle")
+        timestamp_raw = entry.get("timestamp")
+        formatted_timestamp = _format_timestamp(timestamp_raw)
         role = entry.get("role")
         tool = entry.get("tool")
-        prompt = entry.get("prompt", "")
-        response = entry.get("response", "")
+        prompt = entry.get("prompt")
+        response = entry.get("response")
+        request_for_entry = entry.get("request_id") or request_id
 
-        sections = [
-            f"[bold]Agent[/bold] {agent}",
-            f"[bold]Actor[/bold] {actor}",
+        role_meta = role if role and role.lower() not in {"assistant", "agent"} else None
+        metadata = [
+            ("Actor", _short_id(actor)),
+            ("Handle", _short_id(handle)),
+            ("Role", role_meta),
+            ("Tool", tool),
+            ("Timestamp", formatted_timestamp),
         ]
-        if handle:
-            sections.append(f"[bold]Handle[/bold] {handle}")
-        if timestamp:
-            sections.append(f"[bold]Timestamp[/bold] {timestamp}")
-        if role:
-            sections.append(f"[bold]Role[/bold] {role}")
-        if tool:
-            sections.append(f"[bold]Tool[/bold] {tool}")
-        sections.append(f"[bold]Prompt[/bold]\n{prompt or '[dim]—[/dim]'}")
-        sections.append(f"[bold]Response[/bold]\n{response or '[dim]—[/dim]'}")
 
-        panels.append(
-            Panel(
-                "\n\n".join(sections),
-                border_style="blue",
-            )
+        clean_prompt = _clean_user_message(prompt)
+        tags = _extract_keywords([clean_prompt])
+        conversation_title = _conversation_title(_short_id(request_for_entry), tags, agent)
+        panel = _render_chat_exchange(
+            prompt=prompt,
+            response=response,
+            user_label="User",
+            assistant_label=agent,
+            metadata=metadata,
+            title=conversation_title,
+            subtitle=formatted_timestamp or (request_for_entry if isinstance(request_for_entry, str) else None),
+            assistant_role=role,
+            tool=tool,
+            tags=tags,
+            border_style="blue",
         )
+
+        panels.append(panel)
 
     console.print(Group(*panels) if len(panels) > 1 else panels[0])
 
@@ -1575,86 +2102,92 @@ def _print_transcript_tail(result: Any) -> None:
     if not events:
         console.print("[yellow]No new events[/yellow]")
         return
-    panels = []
+    panels: List[Any] = []
     for batch in events:
-        turn_id = batch.get("turn", "")
-        actor = batch.get("actor", "")
+        turn_id = batch.get("turn") or batch.get("turn_id")
+        actor = batch.get("actor")
         clock = batch.get("clock")
-        timestamp = batch.get("timestamp")
+        timestamp_raw = batch.get("timestamp")
+        formatted_batch_timestamp = _format_timestamp(timestamp_raw)
+        timestamp_display = formatted_batch_timestamp or timestamp_raw or "-"
 
-        sections = [
-            f"[bold]Turn[/bold] {turn_id}",
-            f"[bold]Actor[/bold] {actor}",
+        header_lines: List[Text] = [
+            Text.assemble(("Turn: ", "dim"), (_short_id(turn_id) or "-", "white")),
+            Text.assemble(("Actor: ", "dim"), (_short_id(actor) or "-", "white")),
+            Text.assemble(("Clock: ", "dim"), (str(clock) if clock is not None else "-", "white")),
+            Text.assemble(("Timestamp: ", "dim"), (timestamp_display, "white")),
         ]
-        if clock is not None:
-            sections.append(f"[bold]Clock[/bold] {clock}")
-        if timestamp:
-            sections.append(f"[bold]Timestamp[/bold] {timestamp}")
 
-        event_lines: List[str] = []
+        batch_renderables: List[Any] = [Group(*header_lines)]
+
         for event in batch.get("events", []):
             action = (event.get("action") or "").upper()
-            handle = event.get("handle", "")
+            handle = event.get("handle")
             transcript = event.get("transcript")
 
             if isinstance(transcript, dict):
-                sections_lines = [f"[bold]{action}[/bold] {handle}"]
                 request_id = transcript.get("request_id")
-                agent_name = transcript.get("agent")
-                response_timestamp = transcript.get("response_timestamp")
+                agent_name = transcript.get("agent", "Agent")
                 role = transcript.get("role")
                 tool = transcript.get("tool")
-                if request_id:
-                    sections_lines.append(f"[bold]Request[/bold] {request_id}")
-                if agent_name:
-                    sections_lines.append(f"[bold]Agent[/bold] {agent_name}")
-                if response_timestamp:
-                    sections_lines.append(
-                        f"[bold]Response Timestamp[/bold] {response_timestamp}"
-                    )
-                if role:
-                    sections_lines.append(f"[bold]Role[/bold] {role}")
-                if tool:
-                    sections_lines.append(f"[bold]Tool[/bold] {tool}")
+                prompt_text = transcript.get("prompt")
+                response_text = transcript.get("response")
+                response_timestamp_raw = transcript.get("response_timestamp")
+                formatted_response_timestamp = _format_timestamp(response_timestamp_raw)
 
-                prompt_text = transcript.get("prompt") or ""
-                response_text = transcript.get("response") or ""
-                sections_lines.append(
-                    f"[bold]Prompt[/bold]\n{prompt_text or '[dim]—[/dim]'}"
+                role_meta = role if role and role.lower() not in {"assistant", "agent"} else None
+                metadata = [
+                    ("Action", action),
+                    ("Handle", _short_id(handle)),
+                    ("Request", _short_id(request_id)),
+                    ("Full Request", request_id),
+                    ("Role", role_meta),
+                    ("Tool", tool),
+                    ("Timestamp", formatted_response_timestamp),
+                ]
+
+                clean_prompt = _clean_user_message(prompt_text)
+                tags = _extract_keywords([clean_prompt])
+                conversation_title = _conversation_title(_short_id(request_id), tags, agent_name)
+                exchange = _render_chat_exchange(
+                    prompt=prompt_text,
+                    response=response_text,
+                    user_label="User",
+                    assistant_label=agent_name,
+                    metadata=metadata,
+                    title=conversation_title,
+                    subtitle=formatted_response_timestamp or _short_id(request_id) or action,
+                    assistant_role=role,
+                    tool=tool,
+                    tags=tags,
+                    border_style="blue",
                 )
-                sections_lines.append(
-                    f"[bold]Response[/bold]\n{response_text or '[dim]—[/dim]'}"
-                )
-                event_lines.append("\n\n".join(sections_lines))
+                batch_renderables.append(exchange)
             else:
                 value = event.get("value")
-                line = f"[bold]{action}[/bold] {handle}"
+                summary = f"[bold]{action}[/bold] {_short_id(handle) or ''}"
                 if value:
-                    line += f"\n{_summarize_value(value, max_length=200)}"
-                event_lines.append(line)
+                    summary += f"\n{_summarize_value(value, max_length=200)}"
+                batch_renderables.append(
+                    Panel(summary, border_style="cyan", box=box.ROUNDED, title="Event")
+                )
 
-        if event_lines:
-            sections.append("[bold]Events[/bold]\n" + "\n\n".join(event_lines))
+        if batch_renderables:
+            body = Group(*batch_renderables) if len(batch_renderables) > 1 else batch_renderables[0]
+            panels.append(Panel(body, border_style="blue", box=box.ROUNDED))
 
-        panels.append(
-            Panel(
-                "\n\n".join(sections),
-                border_style="blue",
-            )
-        )
-
-    console.print(Group(*panels) if len(panels) > 1 else panels[0])
+    if panels:
+        console.print(Group(*panels) if len(panels) > 1 else panels[0])
 
     next_cursor = result.get("next_cursor")
     has_more = result.get("has_more")
     if next_cursor or has_more:
-        footer = "[dim]"
+        footer_parts = []
         if next_cursor:
-            footer += f"next cursor: {next_cursor}"
+            footer_parts.append(f"next cursor: {next_cursor}")
         if has_more:
-            footer += " | more events available"
-        footer += "[/dim]"
-        console.print(footer)
+            footer_parts.append("more events available")
+        console.print(f"[dim]{' | '.join(footer_parts)}[/dim]")
 
 
 def _print_workflow_list(result: Any) -> None:
@@ -1947,6 +2480,47 @@ def _summarize_value(value: Any, max_length: int = 80) -> str:
     return text
 
 
+def _structured_value_metadata(structured: Any) -> List[Tuple[str, Optional[str]]]:
+    if not isinstance(structured, dict):
+        return []
+
+    meta: List[Tuple[str, Optional[str]]] = []
+    value_type = structured.get("type")
+    if isinstance(value_type, str):
+        meta.append(("Type", value_type))
+
+    summary = structured.get("summary")
+    if isinstance(summary, str):
+        meta.append(("Summary", summary))
+
+    if value_type == "record":
+        label = structured.get("label")
+        if isinstance(label, str):
+            meta.append(("Label", label))
+        field_count = structured.get("field_count")
+        if field_count is not None:
+            meta.append(("Fields", str(field_count)))
+    elif value_type in {"sequence", "set"}:
+        length = structured.get("length")
+        if length is not None:
+            meta.append(("Items", str(length)))
+    elif value_type == "dictionary":
+        length = structured.get("length")
+        if length is not None:
+            meta.append(("Entries", str(length)))
+
+    return meta
+
+
+def _structured_value_renderable(structured: Any) -> Optional[Any]:
+    if structured is None:
+        return None
+    try:
+        return JSON.from_data(structured)
+    except Exception:
+        return Text(_summarize_value(structured, max_length=200))
+
+
 def _short_source(source: Any, limit: int = 60) -> str:
     if not isinstance(source, str):
         return _summarize_value(source, max_length=limit)
@@ -2160,11 +2734,17 @@ def transcript_group(ctx: typer.Context) -> None:
 @transcript_app.command("show")
 def transcript_show(
     ctx: typer.Context,
-    request_id: str = typer.Argument(..., help="Request identifier to inspect."),
-    branch: Optional[str] = typer.Option(None, help="Branch to query."),
-    limit: int = typer.Option(20, help="Maximum assertions to display."),
+    request_id: Optional[str] = typer.Argument(None, help="Request identifier to inspect."),
+    branch: Optional[str] = typer.Option(None, help="Branch name to query."),
+    limit: int = typer.Option(20, help="Maximum transcript entries to display."),
 ) -> None:
     """Show stored agent transcript data."""
+
+    if request_id is None:
+        request_id = _choose_request_id(ctx.obj, title="Select transcript request")
+        if request_id is None:
+            console.print("[yellow]No request selected; aborting transcript display.[/yellow]")
+            return
 
     params: Dict[str, Any] = {
         "request_id": request_id,
@@ -2179,13 +2759,19 @@ def transcript_show(
 @transcript_app.command("tail")
 def transcript_tail(
     ctx: typer.Context,
-    request_id: str = typer.Argument(..., help="Request identifier to follow."),
-    branch: str = typer.Option("main", help="Branch to follow."),
+    request_id: Optional[str] = typer.Argument(None, help="Request identifier to follow."),
+    branch: str = typer.Option("main", help="Branch name to follow."),
     follow: bool = typer.Option(True, help="Continue polling for new events."),
-    interval: float = typer.Option(1.0, help="Polling interval when following.", min=0.1),
-    limit: int = typer.Option(10, help="Maximum turns to return per poll."),
+    interval: float = typer.Option(1.0, help="Polling interval in seconds when following.", min=0.1),
+    limit: int = typer.Option(10, help="Maximum transcript entries to return per poll."),
 ) -> None:
     """Tail agent transcript events for a request."""
+
+    if request_id is None:
+        request_id = _choose_request_id(ctx.obj, title="Select transcript request")
+        if request_id is None:
+            console.print("[yellow]No request selected; aborting tail operation.[/yellow]")
+            return
 
     params: Dict[str, Any] = {
         "branch": branch,
@@ -2195,11 +2781,11 @@ def transcript_tail(
     _run(_run_transcript_tail(ctx.obj, params, follow, interval))
 
 
-@transcript_app.command("export")
+@debug_app.command("transcript-export")
 def transcript_export(
     ctx: typer.Context,
-    request_id: str = typer.Argument(..., help="Request identifier to export."),
-    branch: Optional[str] = typer.Option(None, help="Branch to query."),
+    request_id: Optional[str] = typer.Argument(None, help="Request identifier to export."),
+    branch: Optional[str] = typer.Option(None, help="Branch name to query."),
     limit: int = typer.Option(50, help="Maximum transcript entries to include.", min=1),
     output: Optional[Path] = typer.Option(
         None,
@@ -2209,6 +2795,12 @@ def transcript_export(
     ),
 ) -> None:
     """Export transcript history as plain text."""
+
+    if request_id is None:
+        request_id = _choose_request_id(ctx.obj, title="Select transcript request")
+        if request_id is None:
+            console.print("[yellow]No request selected; aborting export.[/yellow]")
+            return
 
     _run(
         _run_transcript_export(

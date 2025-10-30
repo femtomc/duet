@@ -1384,6 +1384,10 @@ fn serialize_wait_status(wait: &WaitStatus) -> Value {
             "type": "signal",
             "label": label,
         }),
+        WaitStatus::ToolResult { tag } => json!({
+            "type": "tool-result",
+            "tag": tag,
+        }),
     }
 }
 

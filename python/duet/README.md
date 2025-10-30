@@ -12,17 +12,33 @@ cargo build --bin codebased                 # build the runtime daemon
 uv run --project python/duet python -m duet status
 ```
 
-The CLI organises commands into logical groups; run `duet --help` for a
+The CLI organises commands into logical groups; run `duet` (or `duet --help`) for a
 complete overview. Frequently used entry points include:
 
-- `duet status`, `duet history`, `duet raw` (runtime inspection)
+- `duet status` (runtime heartbeat)
 - `duet workspace read|write|scan` (workspace data)
-- `duet agent invoke|responses|chat` (Claude agent workflows)
-- `duet dataspace assertions|tail` and `duet transcript show|tail`
-- `duet daemon start|status|stop` (lifecycle management)
+- `duet agent chat|responses` (Claude agent workflows)
+  - `duet agent chat --wait-for-response "prompt"`
+  - `duet agent chat --continue --wait-for-response "follow-up"`
+  - `duet agent responses --select`
+- `duet transcript show|tail`
+- `duet dataspace tail`
+- `duet workflow start|list`
+- `duet daemon start|status|stop` (local daemon lifecycle)
+
+When you need the full identifiers behind the truncated request ids, run
+`duet debug agent-requests` to list them with timestamps and prompt previews.
 
 Install shell completions with `duet --install-completion` to make command
 discovery easier.
+
+Advanced runtime and automation commands (history inspection, raw RPCs,
+reaction management, etc.) live under the `duet debug ...` namespace so the
+main help stays focused on everyday workflows.
+
+Interactive selectors are available for request-centric commands: omit the
+request id (for `duet transcript …`) or pass `--select`/`--resume-select` to
+pick from recent agent conversations without copying UUIDs.
 
 ## Connecting to an existing daemon
 

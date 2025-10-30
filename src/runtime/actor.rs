@@ -11,7 +11,7 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
-use uuid::Uuid;
+use uuid::{Uuid, uuid};
 
 use super::AsyncMessage;
 use super::error::{ActorError, ActorResult};
@@ -22,7 +22,7 @@ use super::state::{
     CapabilityMetadata, CapabilityStatus, CapabilityTarget, FacetDelta, FacetMap, FacetMetadata,
     FacetStatus, PNCounter, StateDelta,
 };
-use super::turn::{ActorId, FacetId, Handle, TurnInput, TurnOutput};
+use super::turn::{ActorId, CapabilityCompletion, FacetId, Handle, TurnInput, TurnOutput};
 /// An actor: isolated unit of computation with its own state
 pub struct Actor {
     /// Unique actor ID
@@ -74,7 +74,11 @@ impl Actor {
     /// Create a new actor
     pub fn new(id: ActorId) -> Self {
         let root_facet = FacetId::new();
+        Self::with_root(id, root_facet)
+    }
 
+    /// Create a new actor with an explicit root facet identifier.
+    pub fn with_root(id: ActorId, root_facet: FacetId) -> Self {
         let mut facets = FacetMap::new();
         facets.facets.insert(
             root_facet.clone(),
@@ -627,7 +631,27 @@ pub struct Activation {
 
     /// Async dispatcher handle (if available)
     async_sender: Option<Sender<AsyncMessage>>,
+
+    /// Deterministic sequence counter for spawned entities
+    spawn_counter: u64,
 }
+
+/// Stable namespace for deriving spawn identifiers (UUID v5).
+const SPAWN_NAMESPACE: Uuid = uuid!("8f9d73b8-7f4e-48af-95e4-ff8de76c1d0f");
+
+/// Handle returned when spawning a new entity-backed actor.
+#[derive(Debug, Clone)]
+pub struct SpawnedEntityRef {
+    /// Actor assigned to the spawned entity.
+    pub actor: ActorId,
+    /// Root facet identifier for the spawned actor.
+    pub root_facet: FacetId,
+    /// Unique entity instance identifier.
+    pub entity_id: Uuid,
+}
+
+/// Capability kind required to spawn new entities.
+pub const ENTITY_SPAWN_CAPABILITY_KIND: &str = "entity/spawn";
 
 /// Specification for granting a capability during a turn
 pub struct CapabilitySpec {
@@ -666,6 +690,7 @@ impl Activation {
             capabilities_revoked: Vec::new(),
             current_entity: None,
             async_sender,
+            spawn_counter: 0,
         }
     }
 
@@ -816,6 +841,79 @@ impl Activation {
         capability_id
     }
 
+    /// Request invocation of a capability and arrange for its result to be delivered.
+    pub fn request_capability_invocation(
+        &mut self,
+        capability: CapId,
+        payload: preserves::IOValue,
+        completion: CapabilityCompletion,
+    ) {
+        self.outputs.push(TurnOutput::CapabilityInvoke {
+            capability,
+            payload,
+            completion,
+        });
+    }
+
+    /// Spawn a new actor hosting the specified entity.
+    ///
+    /// Returns identifying information for the spawned entity so callers can
+    /// begin interacting with it immediately.
+    pub fn spawn_entity(
+        &mut self,
+        entity_type: impl Into<String>,
+        config: preserves::IOValue,
+    ) -> SpawnedEntityRef {
+        let entity_type = entity_type.into();
+        let (child_actor, child_root, entity_id) = self.next_spawn_ids();
+
+        self.outputs.push(TurnOutput::EntitySpawned {
+            parent_actor: self.actor_id.clone(),
+            parent_facet: self.current_facet.clone(),
+            child_actor: child_actor.clone(),
+            child_root_facet: child_root.clone(),
+            entity_id,
+            entity_type,
+            config,
+            link: false,
+            issuer_entity: self.current_entity,
+        });
+
+        SpawnedEntityRef {
+            actor: child_actor,
+            root_facet: child_root,
+            entity_id,
+        }
+    }
+
+    fn next_spawn_ids(&mut self) -> (ActorId, FacetId, Uuid) {
+        let sequence = self.spawn_counter;
+        self.spawn_counter += 1;
+        let sequence_bytes = sequence.to_le_bytes();
+        let parent_actor_bytes = self.actor_id.0.as_bytes();
+        let parent_facet_bytes = self.current_facet.0.as_bytes();
+
+        let child_actor_uuid = spawn_uuid(&[
+            parent_actor_bytes,
+            parent_facet_bytes,
+            &sequence_bytes,
+            b":actor",
+        ]);
+        let child_actor = ActorId::from_uuid(child_actor_uuid);
+
+        let child_root_uuid = spawn_uuid(&[child_actor_uuid.as_bytes(), &sequence_bytes, b":root"]);
+        let child_root = FacetId::from_uuid(child_root_uuid);
+
+        let entity_uuid = spawn_uuid(&[
+            child_actor_uuid.as_bytes(),
+            child_root_uuid.as_bytes(),
+            &sequence_bytes,
+            b":entity",
+        ]);
+
+        (child_actor, child_root, entity_uuid)
+    }
+
     /// Revoke a capability by identifier
     pub fn revoke_capability(&mut self, capability_id: CapId) {
         let was_new = if self
@@ -888,6 +986,15 @@ impl Activation {
             accounts,
         }
     }
+}
+
+fn spawn_uuid(parts: &[&[u8]]) -> Uuid {
+    let total_len: usize = parts.iter().map(|part| part.len()).sum();
+    let mut data = Vec::with_capacity(total_len);
+    for part in parts {
+        data.extend_from_slice(part);
+    }
+    Uuid::new_v5(&SPAWN_NAMESPACE, &data)
 }
 
 /// Entity: behavior handler attached to a facet
@@ -1247,6 +1354,41 @@ mod tests {
                 .iter()
                 .any(|o| matches!(o, TurnOutput::PatternMatched { .. })),
             "local assertions should trigger pattern matches"
+        );
+    }
+
+    #[test]
+    fn spawn_entity_outputs_are_deterministic() {
+        let actor = Actor::new(ActorId::new());
+        let mut activation_a = Activation::new(actor.id.clone(), actor.root_facet.clone(), None);
+        let mut activation_b = Activation::new(actor.id.clone(), actor.root_facet.clone(), None);
+
+        let first_a = activation_a.spawn_entity("demo/entity", preserves::IOValue::symbol("cfg-a"));
+        let first_b = activation_a.spawn_entity("demo/entity", preserves::IOValue::symbol("cfg-b"));
+
+        let second_a =
+            activation_b.spawn_entity("demo/entity", preserves::IOValue::symbol("cfg-a"));
+        let second_b =
+            activation_b.spawn_entity("demo/entity", preserves::IOValue::symbol("cfg-b"));
+
+        assert_eq!(first_a.actor, second_a.actor);
+        assert_eq!(first_a.root_facet, second_a.root_facet);
+        assert_eq!(first_a.entity_id, second_a.entity_id);
+
+        assert_eq!(first_b.actor, second_b.actor);
+        assert_eq!(first_b.root_facet, second_b.root_facet);
+        assert_eq!(first_b.entity_id, second_b.entity_id);
+
+        assert_ne!(first_a.actor, first_b.actor);
+        assert_ne!(first_a.entity_id, first_b.entity_id);
+
+        assert!(
+            activation_a
+                .outputs
+                .iter()
+                .filter(|output| matches!(output, TurnOutput::EntitySpawned { .. }))
+                .count()
+                >= 2
         );
     }
 

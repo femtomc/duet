@@ -29,6 +29,8 @@ pub mod turn;
 // Future module (phase 8)
 // pub mod link;
 
+use registry::{EntityConfig, EntityMetadata};
+
 /// Configuration for the Duet runtime
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeConfig {
@@ -43,6 +45,93 @@ pub struct RuntimeConfig {
 
     /// Enable debug tracing
     pub debug: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::actor::Actor;
+    use super::*;
+    use preserves::IOValue;
+    use tempfile::tempdir;
+
+    struct TestEntity;
+
+    impl actor::Entity for TestEntity {
+        fn on_message(
+            &self,
+            _activation: &mut actor::Activation,
+            _payload: &IOValue,
+        ) -> crate::runtime::error::ActorResult<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn entity_spawn_requires_capability() {
+        let catalog = registry::EntityCatalog::global();
+        catalog.register("test/entity".into(), |_config| Ok(Box::new(TestEntity)));
+
+        let temp = tempdir().unwrap();
+        let config = RuntimeConfig {
+            root: temp.path().to_path_buf(),
+            snapshot_interval: 5,
+            flow_control_limit: 1000,
+            debug: false,
+        };
+
+        let mut runtime = Runtime::new(config).expect("runtime init");
+
+        let parent_actor_id = ActorId::new();
+        let parent_actor = Actor::new(parent_actor_id.clone());
+        let parent_root = parent_actor.root_facet.clone();
+        runtime.actors.insert(parent_actor_id.clone(), parent_actor);
+
+        let child_actor = ActorId::new();
+        let child_root = FacetId::new();
+        let entity_id = Uuid::new_v4();
+
+        let spawn_output = TurnOutput::EntitySpawned {
+            parent_actor: parent_actor_id.clone(),
+            parent_facet: parent_root.clone(),
+            child_actor: child_actor.clone(),
+            child_root_facet: child_root.clone(),
+            entity_id,
+            entity_type: "test/entity".to_string(),
+            config: IOValue::symbol("config"),
+            link: false,
+            issuer_entity: Some(Uuid::new_v4()),
+        };
+
+        runtime.dispatch_turn_outputs(&[spawn_output.clone()]);
+        assert!(runtime.entity_manager().get(&entity_id).is_none());
+        assert!(runtime.actors.get(&child_actor).is_none());
+
+        let capability_id = Uuid::new_v4();
+        {
+            let parent_actor_ref = runtime.actors.get(&parent_actor_id).unwrap();
+            let mut capabilities = parent_actor_ref.capabilities.write();
+            capabilities.capabilities.insert(
+                capability_id,
+                CapabilityMetadata {
+                    id: capability_id,
+                    issuer: parent_actor_id.clone(),
+                    issuer_facet: parent_root.clone(),
+                    issuer_entity: None,
+                    holder: parent_actor_id.clone(),
+                    holder_facet: parent_root.clone(),
+                    target: None,
+                    kind: actor::ENTITY_SPAWN_CAPABILITY_KIND.to_string(),
+                    attenuation: Vec::new(),
+                    status: CapabilityStatus::Active,
+                },
+            );
+        }
+
+        runtime.dispatch_turn_outputs(&[spawn_output]);
+
+        assert!(runtime.entity_manager().get(&entity_id).is_some());
+        assert!(runtime.actors.get(&child_actor).is_some());
+    }
 }
 
 impl Default for RuntimeConfig {
@@ -62,15 +151,18 @@ use scheduler::{ScheduleCause, Scheduler};
 use schema::SchemaRegistry;
 use snapshot::SnapshotManager;
 use storage::Storage;
-use turn::{BranchId, TurnInput, TurnOutput};
+use tracing::warn;
+use turn::{BranchId, CapabilityCompletion, Handle, TurnInput, TurnOutput};
 
-use crate::interpreter::protocol::{NOTIFY_MESSAGE_LABEL, wait_record_from_value};
+use crate::interpreter::protocol::{
+    NOTIFY_MESSAGE_LABEL, TOOL_RESULT_RECORD_LABEL, wait_record_from_value,
+};
 use crate::runtime::turn::{ActorId, FacetId};
 use actor::Actor;
 use error::{ActorError, StorageError};
 use reaction::{ReactionDefinition, ReactionId, ReactionInfo, ReactionStore, StoredReaction};
 use registry::EntityManager;
-use state::{CapId, CapabilityMetadata, CapabilityStatus};
+use state::{CapId, CapabilityMetadata, CapabilityStatus, FacetMetadata, FacetStatus};
 use std::collections::{HashMap, HashSet};
 
 /// Message enqueued from asynchronous tasks back into the deterministic scheduler.
@@ -264,6 +356,15 @@ impl Runtime {
         // Clone metadata to avoid borrow conflicts
         let entities: Vec<_> = self.entity_manager.list().into_iter().cloned().collect();
 
+        let mut actor_roots: HashMap<ActorId, FacetId> = HashMap::new();
+        for metadata in &entities {
+            if metadata.is_root_facet {
+                actor_roots
+                    .entry(metadata.actor.clone())
+                    .or_insert(metadata.facet.clone());
+            }
+        }
+
         for metadata in entities {
             // Create entity instance using registry
             let mut entity = registry
@@ -282,10 +383,15 @@ impl Runtime {
             }
 
             // Get or create actor
-            let actor = self
-                .actors
-                .entry(metadata.actor.clone())
-                .or_insert_with(|| Actor::new(metadata.actor.clone()));
+            let actor_id = metadata.actor.clone();
+            let root_choice = actor_roots.get(&actor_id).cloned();
+            let actor = self.actors.entry(actor_id.clone()).or_insert_with(move || {
+                if let Some(root) = root_choice.clone() {
+                    Actor::with_root(actor_id.clone(), root)
+                } else {
+                    Actor::new(actor_id.clone())
+                }
+            });
 
             // Attach entity to facet
             actor.attach_entity(
@@ -404,22 +510,206 @@ impl Runtime {
 
     fn dispatch_turn_outputs(&mut self, outputs: &[TurnOutput]) {
         for output in outputs {
-            if let TurnOutput::Message {
-                target_actor,
-                target_facet,
-                payload,
-            } = output
-            {
-                let input = TurnInput::ExternalMessage {
-                    actor: target_actor.clone(),
-                    facet: target_facet.clone(),
-                    payload: payload.clone(),
-                };
+            match output {
+                TurnOutput::Message {
+                    target_actor,
+                    target_facet,
+                    payload,
+                } => {
+                    let input = TurnInput::ExternalMessage {
+                        actor: target_actor.clone(),
+                        facet: target_facet.clone(),
+                        payload: payload.clone(),
+                    };
 
-                self.scheduler
-                    .enqueue(target_actor.clone(), input, ScheduleCause::Message);
+                    self.scheduler
+                        .enqueue(target_actor.clone(), input, ScheduleCause::Message);
+                }
+                TurnOutput::CapabilityInvoke {
+                    capability,
+                    payload,
+                    completion,
+                } => {
+                    self.handle_capability_invoke(*capability, payload.clone(), completion.clone());
+                }
+                TurnOutput::EntitySpawned {
+                    parent_actor,
+                    parent_facet,
+                    child_actor,
+                    child_root_facet,
+                    entity_id,
+                    entity_type,
+                    config,
+                    link,
+                    issuer_entity,
+                } => {
+                    self.handle_entity_spawn(
+                        parent_actor,
+                        parent_facet,
+                        child_actor,
+                        child_root_facet,
+                        entity_id,
+                        entity_type,
+                        config,
+                        *link,
+                        *issuer_entity,
+                    );
+                }
+                _ => {}
             }
         }
+    }
+
+    fn handle_entity_spawn(
+        &mut self,
+        parent_actor: &ActorId,
+        parent_facet: &FacetId,
+        child_actor: &ActorId,
+        child_root_facet: &FacetId,
+        entity_id: &Uuid,
+        entity_type: &String,
+        config: &EntityConfig,
+        link: bool,
+        issuer_entity: Option<Uuid>,
+    ) {
+        let parent_actor_entry = match self.actors.get(parent_actor) {
+            Some(actor) => actor,
+            None => {
+                warn!(
+                    "entity spawn requested by unknown actor {:?}; ignoring",
+                    parent_actor
+                );
+                return;
+            }
+        };
+
+        if issuer_entity.is_some() {
+            let capabilities = parent_actor_entry.capabilities.read();
+            let permitted = capabilities.capabilities.values().any(|metadata| {
+                metadata.status == CapabilityStatus::Active
+                    && metadata.holder == *parent_actor
+                    && metadata.holder_facet == *parent_facet
+                    && metadata.kind == actor::ENTITY_SPAWN_CAPABILITY_KIND
+            });
+
+            if !permitted {
+                warn!(
+                    "actor {:?} facet {:?} attempted to spawn entity type '{}' without capability",
+                    parent_actor, parent_facet, entity_type
+                );
+                return;
+            }
+        }
+
+        let entity = match self.entity_registry().create(entity_type, config) {
+            Ok(entity) => entity,
+            Err(err) => {
+                warn!(
+                    "failed to instantiate entity type '{}' during spawn: {}",
+                    entity_type, err
+                );
+                return;
+            }
+        };
+
+        let actor_entry = self
+            .actors
+            .entry(child_actor.clone())
+            .or_insert_with(|| Actor::with_root(child_actor.clone(), child_root_facet.clone()));
+
+        {
+            let mut facets = actor_entry.facets.write();
+            facets
+                .facets
+                .entry(child_root_facet.clone())
+                .or_insert_with(|| FacetMetadata {
+                    id: child_root_facet.clone(),
+                    parent: None,
+                    status: FacetStatus::Alive,
+                    actor: child_actor.clone(),
+                });
+        }
+
+        actor_entry.attach_entity(
+            *entity_id,
+            entity_type.to_string(),
+            child_root_facet.clone(),
+            entity,
+        );
+
+        let metadata = EntityMetadata {
+            id: *entity_id,
+            actor: child_actor.clone(),
+            facet: child_root_facet.clone(),
+            entity_type: entity_type.to_string(),
+            config: config.clone(),
+            is_root_facet: true,
+            patterns: vec![],
+        };
+        self.entity_manager_mut().register(metadata);
+
+        if let Err(err) = self.persist_entities() {
+            warn!("failed to persist entity metadata after spawn: {}", err);
+        }
+
+        if link {
+            warn!(
+                "spawn-link requested for actor {:?} facet {:?} -> actor {:?}; link semantics not yet implemented",
+                parent_actor, parent_facet, child_actor
+            );
+        }
+    }
+
+    fn handle_capability_invoke(
+        &mut self,
+        capability: CapId,
+        payload: preserves::IOValue,
+        completion: CapabilityCompletion,
+    ) {
+        let invocation_result = CapabilityInvoker::invoke(self, capability, payload);
+
+        let result_value = match invocation_result {
+            Ok(value) => value,
+            Err(err) => {
+                let message = err.to_string();
+                warn!(
+                    "capability invocation {:?} failed for actor {:?}: {}",
+                    capability, completion.origin_actor, message
+                );
+                preserves::IOValue::record(
+                    preserves::IOValue::symbol("tool-error"),
+                    vec![preserves::IOValue::new(message)],
+                )
+            }
+        };
+
+        let mut fields = vec![
+            preserves::IOValue::new(completion.instance_id.clone()),
+            preserves::IOValue::new(completion.tag.clone()),
+            preserves::IOValue::new(completion.role.clone()),
+            preserves::IOValue::new(completion.capability_alias.clone()),
+            preserves::IOValue::new(capability.to_string()),
+            result_value,
+        ];
+
+        if let Some(props) = completion.role_properties.clone() {
+            fields.push(props);
+        }
+
+        let record = preserves::IOValue::record(
+            preserves::IOValue::symbol(TOOL_RESULT_RECORD_LABEL),
+            fields,
+        );
+
+        let handle = Handle::new();
+        let input = TurnInput::Assert {
+            actor: completion.origin_actor.clone(),
+            handle,
+            value: record,
+        };
+
+        self.scheduler
+            .enqueue(completion.origin_actor, input, ScheduleCause::Capability);
     }
 
     fn notify_interpreters(&mut self, delta: &state::StateDelta) {

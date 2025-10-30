@@ -205,6 +205,10 @@ pub struct EntityMetadata {
     #[serde(with = "preserves_text_serde")]
     pub config: EntityConfig,
 
+    /// Whether this entry corresponds to the actor's root facet.
+    #[serde(default)]
+    pub is_root_facet: bool,
+
     /// Pattern subscriptions registered by this entity
     pub patterns: Vec<Pattern>,
 }

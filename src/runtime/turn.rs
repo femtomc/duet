@@ -347,6 +347,38 @@ pub enum TurnOutput {
         capability: CapId,
     },
 
+    /// Capability invocation requested during this turn
+    CapabilityInvoke {
+        /// Capability identifier to invoke
+        capability: CapId,
+        /// Payload supplied with the invocation
+        payload: preserves::IOValue,
+        /// Completion metadata describing how to publish the result
+        completion: CapabilityCompletion,
+    },
+
+    /// Entity-backed actor spawned during this turn
+    EntitySpawned {
+        /// Actor/facet requesting the spawn
+        parent_actor: ActorId,
+        /// Facet that issued the spawn
+        parent_facet: FacetId,
+        /// Newly created actor identifier
+        child_actor: ActorId,
+        /// Root facet assigned to the new actor
+        child_root_facet: FacetId,
+        /// Entity instance identifier
+        entity_id: Uuid,
+        /// Entity type name
+        entity_type: String,
+        /// Entity configuration payload
+        config: preserves::IOValue,
+        /// Whether the spawn established a lifecycle link
+        link: bool,
+        /// Entity instance that invoked the spawn (if any)
+        issuer_entity: Option<Uuid>,
+    },
+
     /// Result emitted after invoking a capability
     CapabilityResult {
         /// Capability identifier
@@ -385,6 +417,25 @@ pub struct TurnRecord {
 
     /// Debug timestamp (not used for determinism)
     pub timestamp: DateTime<Utc>,
+}
+
+/// Describes how the runtime should publish the result of a capability invocation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapabilityCompletion {
+    /// Actor awaiting the result.
+    pub origin_actor: ActorId,
+    /// Facet on the actor that should receive the assertion.
+    pub origin_facet: FacetId,
+    /// Workflow instance identifier (for interpreter tool integration).
+    pub instance_id: String,
+    /// Role associated with the invocation.
+    pub role: String,
+    /// Alias used in the program for the capability.
+    pub capability_alias: String,
+    /// Correlation tag that workflows wait on.
+    pub tag: String,
+    /// Optional role metadata to include with completion records.
+    pub role_properties: Option<preserves::IOValue>,
 }
 
 impl TurnRecord {

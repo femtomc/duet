@@ -50,7 +50,7 @@ Example (pseudocode; concrete grammar below):
 
   (state plan
     (enter
-      (emit (log "Planner drafting plan")))
+      (log "Planner drafting plan")))
     (wait (signal plan/ready :scope @workflow-id)))
 
   (state handoff
@@ -85,7 +85,7 @@ Example (pseudocode; concrete grammar below):
           (await (record agent-response :field 0 :equals implementer-fix))))))
 
   (state complete
-    (enter (emit (log "Workflow finished")))
+    (enter (log "Workflow finished"))
     (terminal)))
 ```
 
@@ -128,15 +128,34 @@ Conditions (non-exhaustive):
 
 * `(signal <label> :scope … :fields …)` – waits for an assertion with the given label and optional filters.
 * `(record <label> :field <index> :equals <value>)` – waits for a dataspace record whose field matches the supplied value (e.g. agent responses tagged by request id).
-* `(tool-result :tag <id>)` – future extension for capability completions.
+* `(tool-result :tag <id>)` – waits for an `interpreter-tool-result` assertion with the supplied tag.
 
 Actions (non-exhaustive):
 
 * `(send-prompt :agent <role> :template <fmt> :args (<expr> …) :tag <id>)`
-* `(invoke-tool :role <role> :capability <symbol> :payload <expr> :tag <id>)`
-* `(emit (log <text>))`
-* `(emit (assert <value>))`
-* `(emit (retract <value>))`
+* `(invoke-tool :role <role> :capability <alias-or-uuid> [:payload <expr>] [:tag <id>])`
+* `(observe (signal <label> [:scope …]) <handler-program>)` – register a persistent
+  observer that runs `handler-program` whenever the dataspace emits the matching
+  signal. The interpreter stores observers as
+  `(interpreter-observer <id> <condition> <handler-ref> <facet-id>)` records so
+  they survive hydration and time-travel.
+* `(log <text>)`
+* `(assert <value>)`
+* `(retract <value>)`
+
+`(invoke-tool …)` emits an `interpreter-tool-request` record containing the workflow
+instance id, correlation tag, role metadata, capability alias, capability UUID,
+payload (when provided), and optional role properties. The runtime then
+executes the capability and asserts an `interpreter-tool-result` record with the
+same tag:
+
+```
+(interpreter-tool-result <instance-id> <tag> <role> <capability-alias> <capability-uuid> <result> [role-properties …])
+```
+
+On success `<result>` is whatever the capability returned; on failure the
+runtime publishes `(tool-error <message>)`. Pair the action with `await
+(tool-result :tag …)` to suspend until the invocation completes.
 
 Expressions available in templates / args may include:
 
