@@ -5,7 +5,7 @@
 //! `codebased` command-line daemon and is intentionally conservative: commands are
 //! processed sequentially, and unsupported operations return structured errors.
 
-use super::control::{AssertionEventFilter, Control};
+use super::control::{AssertionEventAction, AssertionEventFilter, Control};
 use super::error::{CapabilityError, RuntimeError};
 use super::turn::{ActorId, BranchId, FacetId, TurnId};
 use crate::PROTOCOL_VERSION;
@@ -16,7 +16,7 @@ use crate::interpreter::protocol::{
 };
 use crate::runtime::pattern::Pattern;
 use crate::runtime::reaction::{ReactionDefinition, ReactionEffect, ReactionValue};
-use crate::util::io_value::as_record;
+use crate::util::io_value::{as_record, io_value_summary, io_value_to_json};
 use preserves::IOValue;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -74,6 +74,33 @@ impl<'a, W: Write> Session<'a, W> {
             handshake_completed: false,
             interpreter: None,
         }
+    }
+
+    fn describe_actor(
+        &mut self,
+        actor: &ActorId,
+        cache: &mut HashMap<ActorId, Value>,
+    ) -> Option<Value> {
+        if let Some(existing) = cache.get(actor) {
+            return Some(existing.clone());
+        }
+
+        let entities = self.control.list_entities_for_actor(actor);
+        let mut entity_types: Vec<String> =
+            entities.iter().map(|e| e.entity_type.clone()).collect();
+        entity_types.sort();
+        entity_types.dedup();
+
+        let actor_str = actor.to_string();
+        let summary = json!({
+            "id": actor_str,
+            "short_id": short_id(&actor_str),
+            "entity_types": entity_types,
+            "entity_count": entities.len(),
+        });
+
+        cache.insert(actor.clone(), summary.clone());
+        Some(summary)
     }
 
     fn run<R: BufRead>(&mut self, reader: R) -> io::Result<()> {
@@ -1139,7 +1166,39 @@ impl<'a, W: Write> Session<'a, W> {
             assertions.truncate(limit);
         }
 
-        Ok(json!({ "assertions": assertions }))
+        let mut actor_cache: HashMap<ActorId, Value> = HashMap::new();
+        let mut assertions_payload = Vec::new();
+        for assertion in assertions {
+            let actor = assertion.actor.clone();
+            let actor_info = self
+                .describe_actor(&actor, &mut actor_cache)
+                .unwrap_or_else(|| json!({ "id": actor.to_string() }));
+
+            let mut entry = serde_json::Map::new();
+            let actor_str = actor.to_string();
+            entry.insert("actor".to_string(), Value::String(actor_str));
+            entry.insert("actor_info".to_string(), actor_info);
+            entry.insert(
+                "handle".to_string(),
+                Value::String(assertion.handle.to_string()),
+            );
+            entry.insert(
+                "summary".to_string(),
+                Value::String(io_value_summary(&assertion.value, 80)),
+            );
+            entry.insert(
+                "value".to_string(),
+                Value::String(format!("{:?}", assertion.value)),
+            );
+            entry.insert(
+                "value_structured".to_string(),
+                io_value_to_json(&assertion.value),
+            );
+
+            assertions_payload.push(Value::Object(entry));
+        }
+
+        Ok(json!({ "assertions": assertions_payload }))
     }
 
     fn cmd_dataspace_events(&mut self, params: &Value) -> Result<Value, ServiceError> {
@@ -1203,8 +1262,97 @@ impl<'a, W: Write> Session<'a, W> {
             .assertion_events_since(&branch, since_turn.as_ref(), limit, filter, wait_duration)
             .map_err(ServiceError::from)?;
 
-        let result = serde_json::to_value(chunk).unwrap_or(Value::Null);
-        Ok(result)
+        let mut actor_cache: HashMap<ActorId, Value> = HashMap::new();
+        let mut events_payload = Vec::new();
+        for batch in &chunk.events {
+            let actor_info = self
+                .describe_actor(&batch.actor, &mut actor_cache)
+                .unwrap_or_else(|| json!({ "id": batch.actor.to_string() }));
+
+            let mut batch_obj = serde_json::Map::new();
+            batch_obj.insert("turn".to_string(), Value::String(batch.turn_id.to_string()));
+            batch_obj.insert("actor".to_string(), Value::String(batch.actor.to_string()));
+            batch_obj.insert("actor_info".to_string(), actor_info);
+            batch_obj.insert("clock".to_string(), Value::Number(batch.clock.into()));
+            batch_obj.insert(
+                "timestamp".to_string(),
+                Value::String(batch.timestamp.to_rfc3339()),
+            );
+
+            let mut event_values = Vec::new();
+            for event in &batch.events {
+                let mut event_obj = serde_json::Map::new();
+                let action = match event.action {
+                    AssertionEventAction::Assert => "assert",
+                    AssertionEventAction::Retract => "retract",
+                };
+                event_obj.insert("action".to_string(), Value::String(action.to_string()));
+                event_obj.insert(
+                    "handle".to_string(),
+                    Value::String(event.handle.to_string()),
+                );
+
+                if let Some(value) = event.value.as_ref() {
+                    event_obj.insert("value".to_string(), Value::String(format!("{:?}", value)));
+                    event_obj.insert("value_structured".to_string(), io_value_to_json(value));
+                    event_obj.insert(
+                        "summary".to_string(),
+                        Value::String(io_value_summary(value, 80)),
+                    );
+
+                    if let Some(agent_response) = codebase::parse_agent_response(value) {
+                        let codebase::AgentResponse {
+                            request_id,
+                            prompt,
+                            response,
+                            agent,
+                            role,
+                            tool,
+                            timestamp,
+                        } = agent_response;
+
+                        let mut transcript = serde_json::Map::new();
+                        transcript.insert("request_id".to_string(), Value::String(request_id));
+                        transcript.insert("prompt".to_string(), Value::String(prompt));
+                        transcript.insert("response".to_string(), Value::String(response));
+                        transcript.insert("agent".to_string(), Value::String(agent));
+                        if let Some(ts) = timestamp {
+                            transcript.insert(
+                                "response_timestamp".to_string(),
+                                Value::String(ts.to_rfc3339()),
+                            );
+                        }
+                        if let Some(role) = role {
+                            transcript.insert("role".to_string(), Value::String(role));
+                        }
+                        if let Some(tool) = tool {
+                            transcript.insert("tool".to_string(), Value::String(tool));
+                        }
+
+                        event_obj.insert("transcript".to_string(), Value::Object(transcript));
+                    }
+                } else {
+                    event_obj.insert("summary".to_string(), Value::String("null".to_string()));
+                }
+
+                event_values.push(Value::Object(event_obj));
+            }
+
+            batch_obj.insert("events".to_string(), Value::Array(event_values));
+            events_payload.push(Value::Object(batch_obj));
+        }
+
+        let mut result_obj = serde_json::Map::new();
+        result_obj.insert("events".to_string(), Value::Array(events_payload));
+        if let Some(cursor) = &chunk.next_cursor {
+            result_obj.insert("next_cursor".to_string(), Value::String(cursor.to_string()));
+        }
+        if let Some(head) = &chunk.head {
+            result_obj.insert("head".to_string(), Value::String(head.to_string()));
+        }
+        result_obj.insert("has_more".to_string(), Value::Bool(chunk.has_more));
+
+        Ok(Value::Object(result_obj))
     }
 
     fn switch_branch(&mut self, branch: &str) -> Result<(), ServiceError> {
@@ -1223,6 +1371,14 @@ impl<'a, W: Write> Session<'a, W> {
             Ok(handle) => Ok(handle),
             Err(err) => Err(ServiceError::from(err)),
         }
+    }
+}
+
+fn short_id(text: &str) -> String {
+    if text.len() <= 8 {
+        text.to_string()
+    } else {
+        format!("{}...", &text[..8])
     }
 }
 

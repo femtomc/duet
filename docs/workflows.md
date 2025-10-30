@@ -134,6 +134,10 @@ Actions (non-exhaustive):
 
 * `(send-prompt :agent <role> :template <fmt> :args (<expr> …) :tag <id>)`
 * `(invoke-tool :role <role> :capability <alias-or-uuid> [:payload <expr>] [:tag <id>])`
+* `(spawn-entity :role <role> :entity-type <id> [:config <expr>])` – mint an `entity/spawn`
+  capability-backed request. The role’s properties are updated with the spawned actor and
+  facet identifiers (`actor`, `facet`, `entity`, `entity-type`). The interpreter also asserts
+  `(interpreter-entity …)` records for observability.
 * `(observe (signal <label> [:scope …]) <handler-program>)` – register a persistent
   observer that runs `handler-program` whenever the dataspace emits the matching
   signal. The interpreter stores observers as

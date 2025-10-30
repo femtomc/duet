@@ -446,6 +446,7 @@ mod tests {
 
         let actor = Actor::new(ActorId::new());
         let mut activation = Activation::new(actor.id.clone(), actor.root_facet.clone(), None);
+        activation.set_current_entity(Some(uuid::Uuid::new_v4()));
 
         catalog.rescan(&mut activation).unwrap();
 

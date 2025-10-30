@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+use crate::codebase::agent;
 use crate::interpreter::protocol::{
     OBSERVER_RECORD_LABEL, TOOL_REQUEST_RECORD_LABEL, TOOL_RESULT_RECORD_LABEL, WaitRecord,
     runtime_snapshot_from_value, runtime_snapshot_to_value, wait_record_to_value,
@@ -1148,7 +1149,7 @@ impl InterpreterEntity {
         program_ref: ProgramRef,
         program: ProgramIr,
     ) -> ActorResult<()> {
-        let program_clone = program.clone();
+        let mut program_clone = program.clone();
         let program_ref_clone = program_ref.clone();
 
         let instance_uuid = Uuid::new_v4();
@@ -1269,6 +1270,10 @@ impl InterpreterEntity {
                 }
             }
         }
+
+        let updated_roles = runtime.host().roles_snapshot();
+        runtime.program_mut().roles = updated_roles.clone();
+        program_clone.roles = updated_roles.clone();
 
         let observer_specs = runtime.host_mut().drain_observers();
         for spec in observer_specs {
@@ -1513,6 +1518,18 @@ impl<'a> ActivationHost<'a> {
         std::mem::take(&mut self.observers)
     }
 
+    fn role_binding_mut(&mut self, name: &str) -> Result<&mut RoleBinding, ActorError> {
+        self.roles.get_mut(name).ok_or_else(|| {
+            ActorError::InvalidActivation(format!(
+                "spawn-entity references unknown role '{name}'"
+            ))
+        })
+    }
+
+    fn roles_snapshot(&self) -> Vec<RoleBinding> {
+        self.roles.values().cloned().collect()
+    }
+
     fn handle_invoke_tool(
         &mut self,
         role: &str,
@@ -1613,6 +1630,39 @@ impl<'a> ActivationHost<'a> {
         }
 
         Some(IOValue::record(IOValue::symbol("role-properties"), entries))
+    }
+
+    fn resolve_spawn_target(
+        &self,
+        role: &str,
+        explicit_entity_type: Option<&String>,
+        explicit_agent_kind: Option<&String>,
+    ) -> Result<(String, Option<String>), ActorError> {
+        let binding = self.role_binding(role)?;
+        let entity_type = explicit_entity_type
+            .cloned()
+            .or_else(|| binding.properties.get("entity-type").cloned());
+        let agent_kind = explicit_agent_kind
+            .cloned()
+            .or_else(|| binding.properties.get("agent-kind").cloned());
+
+        if let Some(entity_type) = entity_type {
+            return Ok((entity_type, agent_kind));
+        }
+
+        let Some(kind) = agent_kind else {
+            return Err(ActorError::InvalidActivation(format!(
+                "spawn-entity for role '{role}' requires :entity-type or :agent-kind"
+            )));
+        };
+
+        let entity_type = agent::entity_type_for_kind(&kind).ok_or_else(|| {
+            ActorError::InvalidActivation(format!(
+                "spawn-entity could not resolve agent-kind '{kind}' to an entity type"
+            ))
+        })?;
+
+        Ok((entity_type.to_string(), Some(kind)))
     }
 }
 
@@ -1745,6 +1795,66 @@ impl<'a> InterpreterHost for ActivationHost<'a> {
                 }
                 Ok(())
             }
+            Action::SpawnEntity {
+                role,
+                entity_type,
+                agent_kind,
+                config,
+            } => {
+                let (resolved_entity_type, resolved_kind) = self.resolve_spawn_target(
+                    role,
+                    entity_type.as_ref(),
+                    agent_kind.as_ref(),
+                )?;
+
+                let config_value = config
+                    .as_ref()
+                    .map(|value| value.to_io_value())
+                    .unwrap_or_else(|| IOValue::symbol("nil"));
+
+                let spawned = self
+                    .activation
+                    .spawn_entity(resolved_entity_type.clone(), config_value.clone());
+
+                let binding = self.role_binding_mut(role)?;
+                binding
+                    .properties
+                    .insert("actor".into(), spawned.actor.0.to_string());
+                binding
+                    .properties
+                    .insert("facet".into(), spawned.root_facet.0.to_string());
+                binding
+                    .properties
+                    .insert("entity".into(), spawned.entity_id.to_string());
+                binding
+                    .properties
+                    .insert("entity-type".into(), resolved_entity_type.clone());
+                if let Some(kind) = resolved_kind.clone() {
+                    binding.properties.insert("agent-kind".into(), kind);
+                }
+
+                let mut fields = vec![
+                    IOValue::new(role.clone()),
+                    IOValue::new(spawned.actor.0.to_string()),
+                    IOValue::new(spawned.root_facet.0.to_string()),
+                    IOValue::new(spawned.entity_id.to_string()),
+                    IOValue::new(resolved_entity_type.clone()),
+                ];
+
+                if let Some(kind) = resolved_kind {
+                    fields.push(IOValue::new(kind));
+                }
+
+                if let Some(props) = Self::encode_role_properties(binding) {
+                    fields.push(props);
+                }
+
+                let record = IOValue::record(IOValue::symbol("interpreter-entity"), fields);
+                let handle = Handle::new();
+                self.activation.assert(handle.clone(), record.clone());
+                self.assertions.entry(record).or_default().push(handle);
+                Ok(())
+            }
             Action::InvokeTool {
                 role,
                 capability,
@@ -1789,11 +1899,21 @@ mod tests {
     use crate::runtime::actor::Actor;
     use crate::runtime::turn::{ActorId, FacetId, TurnOutput};
 
+    fn activation_for(actor: &Actor) -> Activation {
+        activation_on(actor, actor.root_facet.clone())
+    }
+
+    fn activation_on(actor: &Actor, facet: FacetId) -> Activation {
+        let mut activation = Activation::new(actor.id.clone(), facet, None);
+        activation.set_current_entity(Some(Uuid::new_v4()));
+        activation
+    }
+
     #[test]
     fn interpreter_entity_emits_log_and_prompt() {
         let entity = InterpreterEntity::default();
         let actor = Actor::new(ActorId::new());
-        let mut activation = Activation::new(actor.id.clone(), actor.root_facet.clone(), None);
+        let mut activation = activation_for(&actor);
 
         let program = "(workflow demo)
                (state start (action (assert (record agent-request \"planner\" \"hello\")) (log \"hello\")) (terminal))";
@@ -1829,7 +1949,7 @@ mod tests {
     fn interpreter_send_message_action() {
         let entity = InterpreterEntity::default();
         let actor = Actor::new(ActorId::new());
-        let mut activation = Activation::new(actor.id.clone(), actor.root_facet.clone(), None);
+        let mut activation = activation_for(&actor);
 
         let target_actor = ActorId::new();
         let target_facet = FacetId::new();
@@ -1876,7 +1996,7 @@ mod tests {
     fn interpreter_observe_signal_triggers_handler() {
         let entity = InterpreterEntity::default();
         let actor = Actor::new(ActorId::new());
-        let mut activation = Activation::new(actor.id.clone(), actor.root_facet.clone(), None);
+        let mut activation = activation_for(&actor);
 
         let handler_source = r#"(workflow observer-handler)
 (state start
@@ -1943,7 +2063,7 @@ mod tests {
     fn interpreter_observer_survives_snapshot_restore() {
         let entity = InterpreterEntity::default();
         let actor = Actor::new(ActorId::new());
-        let mut activation = Activation::new(actor.id.clone(), actor.root_facet.clone(), None);
+        let mut activation = activation_for(&actor);
 
         let handler_source = r#"(workflow observer-handler)
 (state start
@@ -1976,8 +2096,7 @@ mod tests {
             "observer should be restored from snapshot"
         );
 
-        let mut resume_activation =
-            Activation::new(actor.id.clone(), actor.root_facet.clone(), None);
+        let mut resume_activation = activation_for(&actor);
         let ready_signal = IOValue::record(IOValue::symbol("ready"), vec![]);
         restored
             .process_assertion(&mut resume_activation, &ready_signal)
@@ -2001,7 +2120,7 @@ mod tests {
     fn interpreter_spawn_facet_action() {
         let entity = InterpreterEntity::default();
         let actor = Actor::new(ActorId::new());
-        let mut activation = Activation::new(actor.id.clone(), actor.root_facet.clone(), None);
+        let mut activation = activation_for(&actor);
 
         let program = "(workflow spawn-demo)\n(state start (action (spawn)) (terminal))";
 
@@ -2040,10 +2159,148 @@ mod tests {
     }
 
     #[test]
+    fn interpreter_spawn_entity_action() {
+        let entity = InterpreterEntity::default();
+        let actor = Actor::new(ActorId::new());
+        let mut activation = activation_for(&actor);
+
+        let program = "(workflow spawn-entity-demo)
+(roles (worker :agent-kind \"claude-code\"))
+(state start
+  (action (spawn-entity :role worker :config (record agent-config \"demo\")))
+  (terminal))";
+
+        let payload = IOValue::record(
+            IOValue::symbol(RUN_MESSAGE_LABEL),
+            vec![IOValue::new(program.to_string())],
+        );
+
+        entity.on_message(&mut activation, &payload).unwrap();
+
+        let spawn_output = activation.outputs.iter().find_map(|output| {
+            if let TurnOutput::EntitySpawned { entity_type, .. } = output {
+                Some(entity_type.clone())
+            } else {
+                None
+            }
+        });
+        assert_eq!(
+            spawn_output.as_deref(),
+            Some("agent-claude-code"),
+            "spawn-entity should emit EntitySpawned output"
+        );
+
+        let capability_granted = activation.outputs.iter().any(|output| {
+            matches!(
+                output,
+                TurnOutput::CapabilityGranted { kind, .. }
+                if kind == ENTITY_SPAWN_CAPABILITY_KIND
+            )
+        });
+        assert!(
+            capability_granted,
+            "interpreter should mint the entity/spawn capability automatically"
+        );
+
+        let entity_record = activation
+            .assertions_added
+            .iter()
+            .find_map(|(_, value)| {
+                value
+                    .label()
+                    .as_symbol()
+                    .filter(|sym| sym.as_ref() == "interpreter-entity")
+                    .and(Some(value.clone()))
+            })
+            .expect("spawn-entity should assert interpreter-entity record");
+
+        let entity_view =
+            record_with_label(&entity_record, "interpreter-entity").expect("entity record view");
+        assert_eq!(entity_view.field_string(0).as_deref(), Some("worker"));
+        assert_eq!(
+            entity_view.field_string(4).as_deref(),
+            Some("agent-claude-code")
+        );
+        assert_eq!(entity_view.field_string(5).as_deref(), Some("claude-code"));
+
+        let props_view = record_with_label(&entity_view.field(6), "role-properties")
+            .expect("role properties record present");
+        let mut observed_keys = Vec::new();
+        for idx in 0..props_view.len() {
+            if let Some(entry) = record_with_label(&props_view.field(idx), "role-property") {
+                if let (Some(key), Some(value)) = (entry.field_symbol(0), entry.field_string(1)) {
+                    match key.as_ref() {
+                        "actor" | "facet" | "entity" => {
+                            observed_keys.push(key.to_string());
+                            assert!(!value.is_empty(), "{key} should not be empty");
+                        }
+                        "entity-type" => assert_eq!(value, "agent-claude-code"),
+                        "agent-kind" => assert_eq!(value, "claude-code"),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        assert!(observed_keys.contains(&"actor".to_string()));
+        assert!(observed_keys.contains(&"facet".to_string()));
+        assert!(observed_keys.contains(&"entity".to_string()));
+    }
+
+    #[test]
+    fn interpreter_spawn_entity_with_explicit_agent_kind() {
+        let entity = InterpreterEntity::default();
+        let actor = Actor::new(ActorId::new());
+        let mut activation = activation_for(&actor);
+
+        let program = "(workflow spawn-entity-explicit)
+(roles (worker))
+(state start
+  (action (spawn-entity :role worker :agent-kind \"claude-code\"))
+  (terminal))";
+
+        let payload = IOValue::record(
+            IOValue::symbol(RUN_MESSAGE_LABEL),
+            vec![IOValue::new(program.to_string())],
+        );
+
+        entity.on_message(&mut activation, &payload).unwrap();
+
+        let spawn_output = activation.outputs.iter().find_map(|output| {
+            if let TurnOutput::EntitySpawned { entity_type, .. } = output {
+                Some(entity_type.clone())
+            } else {
+                None
+            }
+        });
+        assert_eq!(
+            spawn_output.as_deref(),
+            Some("agent-claude-code"),
+            "explicit agent-kind should resolve to Claude entity"
+        );
+
+        let role_binding_record = activation
+            .assertions_added
+            .iter()
+            .find_map(|(_, value)| {
+                value
+                    .label()
+                    .as_symbol()
+                    .filter(|sym| sym.as_ref() == "interpreter-entity")
+                    .and(Some(value.clone()))
+            })
+            .expect("interpreter-entity record asserted");
+
+        let entity_view =
+            record_with_label(&role_binding_record, "interpreter-entity").unwrap();
+        assert_eq!(entity_view.field_string(0).as_deref(), Some("worker"));
+        assert_eq!(entity_view.field_string(5).as_deref(), Some("claude-code"));
+    }
+
+    #[test]
     fn interpreter_stop_facet_action() {
         let entity = InterpreterEntity::default();
         let actor = Actor::new(ActorId::new());
-        let mut activation = Activation::new(actor.id.clone(), actor.root_facet.clone(), None);
+        let mut activation = activation_for(&actor);
 
         let target_facet = FacetId::new();
         let program = format!(
@@ -2071,7 +2328,7 @@ mod tests {
     fn interpreter_define_and_run_by_id() {
         let entity = InterpreterEntity::default();
         let actor = Actor::new(ActorId::new());
-        let mut activation = Activation::new(actor.id.clone(), actor.root_facet.clone(), None);
+        let mut activation = activation_for(&actor);
 
         let define_payload = IOValue::record(
             IOValue::symbol(DEFINE_MESSAGE_LABEL),
@@ -2096,7 +2353,7 @@ mod tests {
             })
             .expect("definition id");
 
-        let mut run_activation = Activation::new(actor.id.clone(), actor.root_facet.clone(), None);
+        let mut run_activation = activation_for(&actor);
         let run_payload = IOValue::record(
             IOValue::symbol(RUN_MESSAGE_LABEL),
             vec![IOValue::symbol("definition"), IOValue::new(definition_id)],
@@ -2128,7 +2385,7 @@ mod tests {
     fn interpreter_definitions_survive_snapshot_restore() {
         let entity = InterpreterEntity::default();
         let actor = Actor::new(ActorId::new());
-        let mut activation = Activation::new(actor.id.clone(), actor.root_facet.clone(), None);
+        let mut activation = activation_for(&actor);
 
         let define_payload = IOValue::record(
             IOValue::symbol(DEFINE_MESSAGE_LABEL),
@@ -2161,7 +2418,7 @@ mod tests {
         restored.restore_state(&snapshot).unwrap();
         assert_eq!(restored.definition_count(), 1);
 
-        let mut run_activation = Activation::new(actor.id.clone(), actor.root_facet.clone(), None);
+        let mut run_activation = activation_for(&actor);
         let run_payload = IOValue::record(
             IOValue::symbol(RUN_MESSAGE_LABEL),
             vec![IOValue::symbol("definition"), IOValue::new(definition_id)],
@@ -2190,7 +2447,7 @@ mod tests {
     fn interpreter_waits_and_resumes() {
         let entity = InterpreterEntity::default();
         let actor = Actor::new(ActorId::new());
-        let mut activation = Activation::new(actor.id.clone(), actor.root_facet.clone(), None);
+        let mut activation = activation_for(&actor);
 
         let program = r#"(workflow wait-demo)
 (state start
@@ -2230,8 +2487,7 @@ mod tests {
             ],
         );
 
-        let mut resume_activation =
-            Activation::new(actor.id.clone(), actor.root_facet.clone(), None);
+        let mut resume_activation = activation_for(&actor);
         entity
             .on_message(&mut resume_activation, &resume_payload)
             .unwrap();
@@ -2257,7 +2513,7 @@ mod tests {
     fn interpreter_invoke_tool_action() {
         let entity = InterpreterEntity::default();
         let actor = Actor::new(ActorId::new());
-        let mut activation = Activation::new(actor.id.clone(), actor.root_facet.clone(), None);
+        let mut activation = activation_for(&actor);
 
         let capability_id = Uuid::new_v4();
         let program = format!(
@@ -2342,7 +2598,7 @@ mod tests {
     fn interpreter_invoke_tool_unknown_role_errors() {
         let entity = InterpreterEntity::default();
         let actor = Actor::new(ActorId::new());
-        let mut activation = Activation::new(actor.id.clone(), actor.root_facet.clone(), None);
+        let mut activation = activation_for(&actor);
 
         let program = "(workflow bad-role)
                (state start
@@ -2384,7 +2640,7 @@ mod tests {
     fn interpreter_invoke_tool_invalid_capability_id_errors() {
         let entity = InterpreterEntity::default();
         let actor = Actor::new(ActorId::new());
-        let mut activation = Activation::new(actor.id.clone(), actor.root_facet.clone(), None);
+        let mut activation = activation_for(&actor);
 
         let program = "(workflow bad-capability)
                (roles (workspace :capability \"not-a-uuid\"))

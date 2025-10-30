@@ -267,6 +267,10 @@ fn agent_commands_roundtrip() {
 
     let assertions = lines[2]["result"]["assertions"].as_array().unwrap();
     assert_eq!(assertions.len(), 1);
+    let first_assertion = &assertions[0];
+    assert!(first_assertion.get("actor_info").is_some());
+    assert!(first_assertion.get("value_structured").is_some());
+    assert!(first_assertion.get("summary").is_some());
 
     let first_events = lines[3]["result"]["events"].as_array().unwrap();
     assert!(!first_events.is_empty());

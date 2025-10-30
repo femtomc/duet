@@ -323,6 +323,11 @@ impl<H: InterpreterHost> InterpreterRuntime<H> {
         &self.program
     }
 
+    /// Mutable access to the underlying program.
+    pub fn program_mut(&mut self) -> &mut ProgramIr {
+        &mut self.program
+    }
+
     /// Access the host (useful for inspection in tests).
     pub fn host(&self) -> &H {
         &self.host
@@ -502,6 +507,20 @@ impl<H: InterpreterHost> InterpreterRuntime<H> {
             }),
             ActionTemplate::Spawn { parent } => Ok(Action::Spawn {
                 parent: parent.clone(),
+            }),
+            ActionTemplate::SpawnEntity {
+                role,
+                entity_type,
+                agent_kind,
+                config,
+            } => Ok(Action::SpawnEntity {
+                role: role.clone(),
+                entity_type: entity_type.clone(),
+                agent_kind: agent_kind.clone(),
+                config: match config {
+                    Some(expr) => Some(expr.resolve(bindings).map_err(|err| err.to_string())?),
+                    None => None,
+                },
             }),
             ActionTemplate::Stop { facet } => Ok(Action::Stop {
                 facet: facet.clone(),

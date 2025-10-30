@@ -1891,23 +1891,54 @@ def _print_dataspace_assertions(result: Any) -> None:
     panels = []
     for entry in assertions:
         actor = entry.get("actor")
+        actor_info = entry.get("actor_info") if isinstance(entry, dict) else None
         handle = entry.get("handle")
-        value = entry.get("value")
+        summary = entry.get("summary")
+        value_structured = entry.get("value_structured")
+        value_raw = entry.get("value")
 
-        metadata = _metadata_block([
-            ("Actor", _short_id(actor)),
+        actor_display = None
+        entities_display = None
+        if isinstance(actor_info, dict):
+            actor_display = actor_info.get("short_id") or actor_info.get("id")
+            entity_types = actor_info.get("entity_types")
+            if isinstance(entity_types, list):
+                names = [str(name) for name in entity_types if isinstance(name, str)]
+                if names:
+                    visible = names[:3]
+                    remainder = len(names) - len(visible)
+                    text = ", ".join(visible)
+                    if remainder > 0:
+                        text += f" (+{remainder} more)"
+                    entities_display = text
+
+        metadata_pairs = [
+            ("Actor", actor_display or _short_id(actor)),
             ("Handle", _short_id(handle)),
-        ])
-        value_text = Text(_summarize_value(value, max_length=200))
+        ]
+        if actor and actor_display and actor_display != actor:
+            metadata_pairs.append(("Actor ID", actor))
+        if summary and summary != value_raw:
+            metadata_pairs.append(("Summary", summary))
+        if entities_display:
+            metadata_pairs.append(("Entities", entities_display))
+
+        metadata = _metadata_block(metadata_pairs)
+        value_renderable = _structured_value_renderable(value_structured)
+        if value_renderable is None and value_raw is not None:
+            value_renderable = Text(_summarize_value(value_raw, max_length=200))
 
         body_parts: List[Any] = []
         if metadata is not None:
             body_parts.append(metadata)
-        body_parts.append(value_text)
+        if value_renderable is not None:
+            body_parts.append(value_renderable)
+        if not body_parts and value_raw:
+            body_parts.append(Text(_summarize_value(value_raw, max_length=200)))
 
-        body = Group(*body_parts) if len(body_parts) > 1 else body_parts[0]
-
-        panels.append(Panel(body, border_style="cyan", box=box.ROUNDED))
+        if body_parts:
+            body = Group(*body_parts) if len(body_parts) > 1 else body_parts[0]
+            panels.append(Panel(body, border_style="cyan", box=box.ROUNDED))
 
     console.print(Group(*panels) if len(panels) > 1 else panels[0])
 
@@ -1926,17 +1957,38 @@ def _print_dataspace_events(result: Any) -> None:
     for batch in batches:
         turn_id = batch.get("turn_id") or batch.get("turn")
         actor = batch.get("actor")
+        actor_info = batch.get("actor_info") if isinstance(batch, dict) else None
         clock = batch.get("clock")
         timestamp = batch.get("timestamp")
         formatted_batch_timestamp = _format_timestamp(timestamp)
 
-        metadata = _metadata_block([
+        actor_display = None
+        entities_display = None
+        if isinstance(actor_info, dict):
+            actor_display = actor_info.get("short_id") or actor_info.get("id")
+            entity_types = actor_info.get("entity_types")
+            if isinstance(entity_types, list):
+                names = [str(name) for name in entity_types if isinstance(name, str)]
+                if names:
+                    visible = names[:3]
+                    remainder = len(names) - len(visible)
+                    text = ", ".join(visible)
+                    if remainder > 0:
+                        text += f" (+{remainder} more)"
+                    entities_display = text
+
+        metadata_pairs = [
             ("Turn", _short_id(turn_id)),
-            ("Actor", _short_id(actor)),
+            ("Actor", actor_display or _short_id(actor)),
             ("Clock", str(clock) if clock is not None else None),
             ("Timestamp", formatted_batch_timestamp),
-        ])
+        ]
+        if actor and actor_display and actor_display != actor:
+            metadata_pairs.append(("Actor ID", actor))
+        if entities_display:
+            metadata_pairs.append(("Entities", entities_display))
 
+        metadata = _metadata_block(metadata_pairs)
         entry_renderables: List[Any] = [metadata] if metadata is not None else []
 
         for event in batch.get("events", []):

@@ -342,6 +342,9 @@ fn interpreter_tool_invocation_roundtrip() {
     let output_view = record_with_label(&output_value, "tool-output").unwrap();
     assert_eq!(output_view.field_string(0).as_deref(), Some("ok"));
 
+    // Allow the interpreter to observe the tool result and finish.
+    control.step(5).unwrap();
+
     // Ensure the interpreter instance completed successfully.
     let final_assertions = control
         .runtime()

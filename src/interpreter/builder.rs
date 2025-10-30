@@ -415,6 +415,43 @@ fn parse_action_literal(expr: &Expr) -> Result<Action> {
 
             Ok(Action::Spawn { parent })
         }
+        "spawn-entity" => {
+            let mut role = None;
+            let mut entity_type = None;
+            let mut agent_kind = None;
+            let mut config = None;
+            let mut idx = 1;
+            while idx < list.len() {
+                let key = expect_keyword(&list[idx])?;
+                idx += 1;
+                match key.as_str() {
+                    "role" => {
+                        role = Some(expect_symbol(&list[idx])?);
+                        idx += 1;
+                    }
+                    "entity-type" | "type" => {
+                        entity_type = Some(expect_string(&list[idx])?);
+                        idx += 1;
+                    }
+                    "agent-kind" => {
+                        agent_kind = Some(expect_string(&list[idx])?);
+                        idx += 1;
+                    }
+                    "config" => {
+                        config = Some(parse_value_literal(&list[idx])?);
+                        idx += 1;
+                    }
+                    _ => return Err(validation("unknown spawn-entity argument")),
+                }
+            }
+
+            Ok(Action::SpawnEntity {
+                role: role.ok_or_else(|| validation("spawn-entity requires :role"))?,
+                entity_type,
+                agent_kind,
+                config,
+            })
+        }
         "stop" | "stop-facet" => {
             if list.len() != 3 {
                 return Err(validation("stop expects :facet <uuid>"));
@@ -707,6 +744,43 @@ fn parse_action_template(expr: &Expr, params: &HashSet<String>) -> Result<Action
             }
 
             Ok(ActionTemplate::Spawn { parent })
+        }
+        "spawn-entity" => {
+            let mut role = None;
+            let mut entity_type = None;
+            let mut agent_kind = None;
+            let mut config = None;
+            let mut idx = 1;
+            while idx < list.len() {
+                let key = expect_keyword(&list[idx])?;
+                idx += 1;
+                match key.as_str() {
+                    "role" => {
+                        role = Some(expect_symbol(&list[idx])?);
+                        idx += 1;
+                    }
+                    "entity-type" | "type" => {
+                        entity_type = Some(expect_string(&list[idx])?);
+                        idx += 1;
+                    }
+                    "agent-kind" => {
+                        agent_kind = Some(expect_string(&list[idx])?);
+                        idx += 1;
+                    }
+                    "config" => {
+                        config = Some(parse_value_expr(&list[idx], params)?);
+                        idx += 1;
+                    }
+                    _ => return Err(validation("unknown spawn-entity argument")),
+                }
+            }
+
+            Ok(ActionTemplate::SpawnEntity {
+                role: role.ok_or_else(|| validation("spawn-entity requires :role"))?,
+                entity_type,
+                agent_kind,
+                config,
+            })
         }
         "stop" | "stop-facet" => {
             if list.len() != 3 {
@@ -1052,6 +1126,7 @@ mod tests {
         let entity = InterpreterEntity::default();
         let actor = Actor::new(ActorId::new());
         let mut activation = Activation::new(actor.id.clone(), actor.root_facet.clone(), None);
+        activation.set_current_entity(Some(Uuid::new_v4()));
 
         let run_payload =
             IOValue::record(IOValue::symbol(RUN_MESSAGE_LABEL), vec![IOValue::new(src)]);

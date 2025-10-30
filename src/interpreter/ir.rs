@@ -113,6 +113,17 @@ pub enum Action {
         /// Optional parent facet identifier; defaults to current facet when `None`.
         parent: Option<String>,
     },
+    /// Spawn a new entity/actor and bind it to a role.
+    SpawnEntity {
+        /// Role whose properties will be updated with the spawned entity identifiers.
+        role: String,
+        /// Explicit entity type identifier, when provided.
+        entity_type: Option<String>,
+        /// Agent kind identifier, used to derive the entity type when supplied.
+        agent_kind: Option<String>,
+        /// Optional configuration payload supplied to the entity.
+        config: Option<Value>,
+    },
     /// Terminate a facet by identifier.
     Stop {
         /// Facet identifier (UUID string) to terminate.
@@ -189,6 +200,12 @@ pub enum ActionTemplate {
     },
     Spawn {
         parent: Option<String>,
+    },
+    SpawnEntity {
+        role: String,
+        entity_type: Option<String>,
+        agent_kind: Option<String>,
+        config: Option<ValueExpr>,
     },
     Stop {
         facet: String,
