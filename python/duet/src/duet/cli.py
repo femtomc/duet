@@ -270,8 +270,7 @@ def main(
     )
 
     if ctx.invoked_subcommand is None:
-        _run(_run_status(ctx.obj, branch=None))
-        raise typer.Exit()
+        _show_group_help(ctx)
 
 
 @app.command(rich_help_panel="Runtime")

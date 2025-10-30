@@ -327,6 +327,24 @@ fn parse_action_literal(expr: &Expr) -> Result<Action> {
                 tag,
             })
         }
+        "assert" => {
+            if list.len() != 2 {
+                return Err(validation("assert expects a value"));
+            }
+            Ok(Action::Assert(parse_value_literal(&list[1])?))
+        }
+        "retract" => {
+            if list.len() != 2 {
+                return Err(validation("retract expects a value"));
+            }
+            Ok(Action::Retract(parse_value_literal(&list[1])?))
+        }
+        "log" => {
+            if list.len() != 2 {
+                return Err(validation("log expects a string message"));
+            }
+            Ok(Action::Log(expect_string(&list[1])?))
+        }
         "send" => {
             let mut actor = None;
             let mut facet = None;
@@ -352,29 +370,29 @@ fn parse_action_literal(expr: &Expr) -> Result<Action> {
                 }
             }
 
-            Ok(Action::SendMessage {
+            Ok(Action::Send {
                 actor: actor.ok_or_else(|| validation("send requires :actor"))?,
                 facet: facet.ok_or_else(|| validation("send requires :facet"))?,
                 payload: payload.ok_or_else(|| validation("send requires :value"))?,
             })
         }
-        "observe" => {
+        "observe" | "on" => {
             if list.len() != 3 {
-                return Err(validation("observe expects a pattern and handler"));
+                return Err(validation("on expects a pattern and handler"));
             }
             let wait = parse_wait(&list[1])?;
             let label = match wait {
                 WaitCondition::Signal { label } => label,
                 _ => {
                     return Err(validation(
-                        "observe currently only supports (signal <label>) patterns",
+                        "on currently only supports (signal <label>) patterns",
                     ));
                 }
             };
             let handler = parse_program_ref_expr(&list[2])?;
-            Ok(Action::ObserveSignal { label, handler })
+            Ok(Action::Observe { label, handler })
         }
-        "spawn-facet" => {
+        "spawn" | "spawn-facet" => {
             let mut parent = None;
             let mut idx = 1;
             while idx < list.len() {
@@ -385,50 +403,24 @@ fn parse_action_literal(expr: &Expr) -> Result<Action> {
                         parent = Some(expect_string(&list[idx])?);
                         idx += 1;
                     }
-                    _ => return Err(validation("unknown spawn-facet argument")),
+                    _ => return Err(validation("unknown spawn argument")),
                 }
             }
 
-            Ok(Action::SpawnFacet { parent })
+            Ok(Action::Spawn { parent })
         }
-        "stop-facet" => {
+        "stop" | "stop-facet" => {
             if list.len() != 3 {
-                return Err(validation("stop-facet expects :facet <uuid>"));
+                return Err(validation("stop expects :facet <uuid>"));
             }
             if !matches!(list[1], Expr::Keyword(_)) || expect_keyword(&list[1])? != "facet" {
-                return Err(validation("stop-facet expects :facet <uuid>"));
+                return Err(validation("stop expects :facet <uuid>"));
             }
-            Ok(Action::TerminateFacet {
+            Ok(Action::Stop {
                 facet: expect_string(&list[2])?,
             })
         }
-        "emit" => {
-            if list.len() != 2 {
-                return Err(validation("emit expects a single expression"));
-            }
-            match &list[1] {
-                Expr::List(inner) if matches_symbol(inner.first(), "log") => {
-                    if inner.len() != 2 {
-                        return Err(validation("log expects a string message"));
-                    }
-                    Ok(Action::EmitLog(expect_string(&inner[1])?))
-                }
-                Expr::List(inner) if matches_symbol(inner.first(), "assert") => {
-                    if inner.len() != 2 {
-                        return Err(validation("assert expects a value"));
-                    }
-                    Ok(Action::Assert(parse_value_literal(&inner[1])?))
-                }
-                Expr::List(inner) if matches_symbol(inner.first(), "retract") => {
-                    if inner.len() != 2 {
-                        return Err(validation("retract expects a value"));
-                    }
-                    Ok(Action::Retract(parse_value_literal(&inner[1])?))
-                }
-                _ => Err(validation("unknown emit form")),
-            }
-        }
-        _ => Err(validation("unknown action")),
+        other => Err(validation(&format!("unknown action form: {}", other))),
     }
 }
 
@@ -622,6 +614,24 @@ fn parse_action_template(expr: &Expr, params: &HashSet<String>) -> Result<Action
                 tag,
             })
         }
+        "assert" => {
+            if list.len() != 2 {
+                return Err(validation("assert expects a value"));
+            }
+            Ok(ActionTemplate::Assert(parse_value_expr(&list[1], params)?))
+        }
+        "retract" => {
+            if list.len() != 2 {
+                return Err(validation("retract expects a value"));
+            }
+            Ok(ActionTemplate::Retract(parse_value_expr(&list[1], params)?))
+        }
+        "log" => {
+            if list.len() != 2 {
+                return Err(validation("log expects a string message"));
+            }
+            Ok(ActionTemplate::Log(expect_string(&list[1])?))
+        }
         "send" => {
             let mut actor = None;
             let mut facet = None;
@@ -647,29 +657,29 @@ fn parse_action_template(expr: &Expr, params: &HashSet<String>) -> Result<Action
                 }
             }
 
-            Ok(ActionTemplate::SendMessage {
+            Ok(ActionTemplate::Send {
                 actor: actor.ok_or_else(|| validation("send requires :actor"))?,
                 facet: facet.ok_or_else(|| validation("send requires :facet"))?,
                 payload: payload.ok_or_else(|| validation("send requires :value"))?,
             })
         }
-        "observe" => {
+        "observe" | "on" => {
             if list.len() != 3 {
-                return Err(validation("observe expects a pattern and handler"));
+                return Err(validation("on expects a pattern and handler"));
             }
             let wait = parse_wait(&list[1])?;
             let label = match wait {
                 WaitCondition::Signal { label } => label,
                 _ => {
                     return Err(validation(
-                        "observe currently only supports (signal <label>) patterns",
+                        "on currently only supports (signal <label>) patterns",
                     ));
                 }
             };
             let handler = parse_program_ref_expr(&list[2])?;
-            Ok(ActionTemplate::ObserveSignal { label, handler })
+            Ok(ActionTemplate::Observe { label, handler })
         }
-        "spawn-facet" => {
+        "spawn" | "spawn-facet" => {
             let mut parent = None;
             let mut idx = 1;
             while idx < list.len() {
@@ -680,52 +690,24 @@ fn parse_action_template(expr: &Expr, params: &HashSet<String>) -> Result<Action
                         parent = Some(expect_string(&list[idx])?);
                         idx += 1;
                     }
-                    _ => return Err(validation("unknown spawn-facet argument")),
+                    _ => return Err(validation("unknown spawn argument")),
                 }
             }
 
-            Ok(ActionTemplate::SpawnFacet { parent })
+            Ok(ActionTemplate::Spawn { parent })
         }
-        "stop-facet" => {
+        "stop" | "stop-facet" => {
             if list.len() != 3 {
-                return Err(validation("stop-facet expects :facet <uuid>"));
+                return Err(validation("stop expects :facet <uuid>"));
             }
             if !matches!(list[1], Expr::Keyword(_)) || expect_keyword(&list[1])? != "facet" {
-                return Err(validation("stop-facet expects :facet <uuid>"));
+                return Err(validation("stop expects :facet <uuid>"));
             }
-            Ok(ActionTemplate::TerminateFacet {
+            Ok(ActionTemplate::Stop {
                 facet: expect_string(&list[2])?,
             })
         }
-        "emit" => {
-            if list.len() != 2 {
-                return Err(validation("emit expects a single expression"));
-            }
-            match &list[1] {
-                Expr::List(inner) if matches_symbol(inner.first(), "log") => {
-                    if inner.len() != 2 {
-                        return Err(validation("log expects a string message"));
-                    }
-                    Ok(ActionTemplate::EmitLog(expect_string(&inner[1])?))
-                }
-                Expr::List(inner) if matches_symbol(inner.first(), "assert") => {
-                    if inner.len() != 2 {
-                        return Err(validation("assert expects a value"));
-                    }
-                    Ok(ActionTemplate::Assert(parse_value_expr(&inner[1], params)?))
-                }
-                Expr::List(inner) if matches_symbol(inner.first(), "retract") => {
-                    if inner.len() != 2 {
-                        return Err(validation("retract expects a value"));
-                    }
-                    Ok(ActionTemplate::Retract(parse_value_expr(
-                        &inner[1], params,
-                    )?))
-                }
-                _ => Err(validation("unknown emit form")),
-            }
-        }
-        _ => Err(validation("unknown action")),
+        other => Err(validation(&format!("unknown action form: {}", other))),
     }
 }
 
