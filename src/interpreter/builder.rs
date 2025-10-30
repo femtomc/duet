@@ -1196,6 +1196,32 @@ mod tests {
     }
 
     #[test]
+    fn builds_spawn_entity_with_agent_kind() {
+        let src = "(workflow spawn)
+(roles (worker :agent-kind \"claude-code\"))
+(state start
+  (action (spawn-entity :role worker))
+  (terminal))";
+
+        let ir = build(src);
+        assert_eq!(ir.states.len(), 1);
+        match &ir.states[0].body[0] {
+            Instruction::Action(Action::SpawnEntity {
+                role,
+                entity_type,
+                agent_kind,
+                config,
+            }) => {
+                assert_eq!(role, "worker");
+                assert!(entity_type.is_none());
+                assert!(agent_kind.is_none());
+                assert!(config.is_none());
+            }
+            other => panic!("expected spawn-entity action, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn produces_call_instruction_for_functions() {
         let src = "
             (workflow demo)

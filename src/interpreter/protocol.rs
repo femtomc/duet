@@ -8,8 +8,10 @@
 use preserves::IOValue;
 use serde::{Deserialize, Serialize};
 use serde_json;
+use std::collections::BTreeMap;
 use std::convert::TryFrom;
 
+use crate::interpreter::ir::RoleBinding;
 use crate::interpreter::{RuntimeSnapshot, Value};
 use crate::runtime::turn::FacetId;
 use crate::util::io_value::{RecordView, as_record, record_with_label};
@@ -37,6 +39,101 @@ pub const DEFINITION_RECORD_LABEL: &str = "interpreter-definition";
 pub const INSTANCE_RECORD_LABEL: &str = "interpreter-instance";
 /// Dataspace label for interpreter log entries.
 pub const LOG_RECORD_LABEL: &str = "interpreter-log";
+/// Dataspace label for interpreter entity spawn records.
+pub const ENTITY_RECORD_LABEL: &str = "interpreter-entity";
+
+const ROLES_RECORD_LABEL: &str = "roles";
+const ROLE_BINDING_RECORD_LABEL: &str = "role-binding";
+const ROLE_PROPERTY_RECORD_LABEL: &str = "role-property";
+const ROLE_PROPERTIES_RECORD_LABEL: &str = "role-properties";
+
+fn role_properties_to_value(props: &BTreeMap<String, String>) -> Option<IOValue> {
+    if props.is_empty() {
+        return None;
+    }
+
+    let entries = props
+        .iter()
+        .map(|(key, value)| {
+            IOValue::record(
+                IOValue::symbol(ROLE_PROPERTY_RECORD_LABEL),
+                vec![IOValue::symbol(key.clone()), IOValue::new(value.clone())],
+            )
+        })
+        .collect();
+
+    Some(IOValue::record(
+        IOValue::symbol(ROLE_PROPERTIES_RECORD_LABEL),
+        entries,
+    ))
+}
+
+fn role_properties_from_value(value: &IOValue) -> BTreeMap<String, String> {
+    let mut props = BTreeMap::new();
+    if let Some(view) = record_with_label(value, ROLE_PROPERTIES_RECORD_LABEL) {
+        for idx in 0..view.len() {
+            let entry = view.field(idx);
+            if let Some(prop_view) = record_with_label(&entry, ROLE_PROPERTY_RECORD_LABEL) {
+                if prop_view.len() >= 2 {
+                    if let (Some(key), Some(val)) =
+                        (prop_view.field_symbol(0), prop_view.field_string(1))
+                    {
+                        props.insert(key.to_string(), val);
+                    }
+                }
+            }
+        }
+    }
+    props
+}
+
+fn role_binding_to_value(binding: &RoleBinding) -> IOValue {
+    let mut fields = vec![IOValue::new(binding.name.clone())];
+    if let Some(props) = role_properties_to_value(&binding.properties) {
+        fields.push(props);
+    }
+    IOValue::record(IOValue::symbol(ROLE_BINDING_RECORD_LABEL), fields)
+}
+
+fn role_binding_from_value(value: &IOValue) -> Option<RoleBinding> {
+    let view = record_with_label(value, ROLE_BINDING_RECORD_LABEL)?;
+    if view.len() == 0 {
+        return None;
+    }
+    let name = view.field_string(0)?;
+    let properties = if view.len() > 1 {
+        role_properties_from_value(&view.field(1))
+    } else {
+        BTreeMap::new()
+    };
+    Some(RoleBinding { name, properties })
+}
+
+fn roles_to_value(roles: &[RoleBinding]) -> Option<IOValue> {
+    if roles.is_empty() {
+        return None;
+    }
+
+    let entries = roles.iter().map(role_binding_to_value).collect();
+
+    Some(IOValue::record(
+        IOValue::symbol(ROLES_RECORD_LABEL),
+        entries,
+    ))
+}
+
+fn roles_from_value(value: &IOValue) -> Vec<RoleBinding> {
+    let mut roles = Vec::new();
+    if let Some(view) = record_with_label(value, ROLES_RECORD_LABEL) {
+        for idx in 0..view.len() {
+            let entry = view.field(idx);
+            if let Some(binding) = role_binding_from_value(&entry) {
+                roles.push(binding);
+            }
+        }
+    }
+    roles
+}
 
 /// Parsed representation of an interpreter definition record.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -412,6 +509,8 @@ pub struct InstanceRecord {
     pub status: InstanceStatus,
     /// Execution progress snapshot.
     pub progress: Option<InstanceProgress>,
+    /// Role bindings (including runtime-populated properties).
+    pub roles: Vec<RoleBinding>,
 }
 
 impl InstanceRecord {
@@ -435,6 +534,10 @@ impl InstanceRecord {
             fields.push(progress.to_value());
         }
 
+        if let Some(roles_value) = roles_to_value(&self.roles) {
+            fields.push(roles_value);
+        }
+
         IOValue::record(IOValue::symbol(INSTANCE_RECORD_LABEL), fields)
     }
 
@@ -456,11 +559,20 @@ impl InstanceRecord {
 
         let status = InstanceStatus::parse(&record.field(4))?;
 
-        let progress = if record.len() > 5 {
-            InstanceProgress::parse(&record.field(5))
-        } else {
-            None
-        };
+        let mut next_index = 5;
+        let mut progress = None;
+        if record.len() > next_index {
+            let candidate = record.field(next_index);
+            if let Some(parsed) = InstanceProgress::parse(&candidate) {
+                progress = Some(parsed);
+                next_index += 1;
+            }
+        }
+
+        let mut roles = Vec::new();
+        if record.len() > next_index {
+            roles = roles_from_value(&record.field(next_index));
+        }
 
         Some(Self {
             instance_id,
@@ -469,6 +581,7 @@ impl InstanceRecord {
             state,
             status,
             progress,
+            roles,
         })
     }
 }

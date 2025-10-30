@@ -1,4 +1,4 @@
-//! Stub implementation of a Claude Code agent entity.
+//! Stub implementation of a Codex agent entity.
 
 use super::{
     AgentEntity, AgentExchange, REQUEST_LABEL, RESPONSE_LABEL, exchanges_from_preserves,
@@ -18,7 +18,7 @@ use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use uuid::Uuid;
 
-/// Global default configuration used when instantiating Claude agents.
+/// Global default configuration used when instantiating Codex agents.
 #[derive(Debug, Clone)]
 struct AgentSettings {
     command: Option<String>,
@@ -28,10 +28,10 @@ struct AgentSettings {
 impl Default for AgentSettings {
     fn default() -> Self {
         Self {
-            command: std::env::var("DUET_CLAUDE_COMMAND")
+            command: std::env::var("DUET_CODEX_COMMAND")
                 .ok()
                 .filter(|s| !s.is_empty()),
-            args: std::env::var("DUET_CLAUDE_ARGS")
+            args: std::env::var("DUET_CODEX_ARGS")
                 .ok()
                 .map(|value| value.split_whitespace().map(str::to_string).collect())
                 .unwrap_or_default(),
@@ -42,7 +42,7 @@ impl Default for AgentSettings {
 static DEFAULT_SETTINGS: Lazy<Mutex<AgentSettings>> =
     Lazy::new(|| Mutex::new(AgentSettings::default()));
 
-/// Configure the external command used to invoke Claude Code.
+/// Configure the external command used to invoke Codex.
 pub fn set_external_command(command: Option<String>, args: Vec<String>) {
     let mut settings = DEFAULT_SETTINGS.lock().unwrap();
     settings.command = command;
@@ -50,24 +50,22 @@ pub fn set_external_command(command: Option<String>, args: Vec<String>) {
 }
 
 /// Entity type name registered in the global registry.
-pub const ENTITY_TYPE: &str = "agent-claude-code";
+pub const ENTITY_TYPE: &str = "agent-codex";
 /// Agent kind identifier exposed in dataspace assertions.
-pub const CLAUDE_KIND: &str = "claude-code";
+pub const CODEX_KIND: &str = "codex";
 
 /// Default conversational role emitted for responses.
 const DEFAULT_ROLE: &str = "assistant";
 
-/// Minimal Claude Code agent entity.
+/// Minimal Codex agent entity.
 ///
-/// This stub implements deterministic behaviour suitable for testing and for
-/// demonstrating the persistence/time-travel pipeline. Real integrations can
-/// swap in their own implementation while reusing the surrounding helpers.
-pub struct ClaudeCodeAgent {
+/// Behaviour mirrors the Claude stub so tests and demos can target either tool.
+pub struct CodexAgent {
     settings: AgentSettings,
     exchanges: Mutex<Vec<AgentExchange>>,
 }
 
-impl ClaudeCodeAgent {
+impl CodexAgent {
     /// Create a new agent with empty history.
     pub fn new() -> Self {
         let settings = {
@@ -88,7 +86,7 @@ impl ClaudeCodeAgent {
         let command = settings
             .command
             .clone()
-            .unwrap_or_else(|| "claude".to_string());
+            .unwrap_or_else(|| "codex".to_string());
         Self::invoke_external(&command, &settings.args, prompt)
     }
 
@@ -168,7 +166,7 @@ impl ClaudeCodeAgent {
         let async_sender = activation.async_sender();
         activation.outputs.push(TurnOutput::ExternalRequest {
             request_id: request_uuid,
-            service: "claude-code".to_string(),
+            service: "codex".to_string(),
             request: preserves::IOValue::record(
                 preserves::IOValue::symbol(REQUEST_LABEL),
                 vec![
@@ -186,7 +184,7 @@ impl ClaudeCodeAgent {
             std::thread::spawn(move || {
                 let response = match Self::execute_prompt(&settings_clone, &prompt) {
                     Ok(value) => value,
-                    Err(err) => format!("Claude Code error: {err}"),
+                    Err(err) => format!("Codex error: {err}"),
                 };
 
                 let timestamp = Utc::now().to_rfc3339();
@@ -259,13 +257,13 @@ impl ClaudeCodeAgent {
     }
 }
 
-impl AgentEntity for ClaudeCodeAgent {
+impl AgentEntity for CodexAgent {
     fn agent_kind(&self) -> &'static str {
-        CLAUDE_KIND
+        CODEX_KIND
     }
 }
 
-impl Entity for ClaudeCodeAgent {
+impl Entity for CodexAgent {
     fn on_message(
         &self,
         activation: &mut Activation,
@@ -302,7 +300,7 @@ impl Entity for ClaudeCodeAgent {
     }
 }
 
-/// Register the Claude Code agent in the entity catalog.
+/// Register the Codex agent in the entity catalog.
 pub fn register(catalog: &EntityCatalog) {
     catalog.register_hydratable(ENTITY_TYPE, |config| {
         let defaults = {
@@ -310,11 +308,11 @@ pub fn register(catalog: &EntityCatalog) {
             guard.clone()
         };
         let settings = settings_from_config(config).unwrap_or(defaults);
-        Ok(ClaudeCodeAgent::with_settings(settings))
+        Ok(CodexAgent::with_settings(settings))
     });
 }
 
-impl HydratableEntity for ClaudeCodeAgent {
+impl HydratableEntity for CodexAgent {
     fn snapshot_state(&self) -> preserves::IOValue {
         let exchanges = self.exchanges.lock().unwrap();
         exchanges_to_preserves(&exchanges)
@@ -329,7 +327,7 @@ impl HydratableEntity for ClaudeCodeAgent {
 }
 
 fn settings_from_config(value: &preserves::IOValue) -> Option<AgentSettings> {
-    let record = record_with_label(value, "claude-config")?;
+    let record = record_with_label(value, "codex-config")?;
 
     let mut settings = AgentSettings::default();
 

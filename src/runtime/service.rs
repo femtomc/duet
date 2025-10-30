@@ -29,6 +29,7 @@ use uuid::Uuid;
 pub struct Service {
     control: Control,
     pending_requests: HashMap<String, transcript::TranscriptCursor>,
+    request_agents: HashMap<String, String>,
 }
 
 impl Service {
@@ -37,12 +38,18 @@ impl Service {
         Self {
             control,
             pending_requests: HashMap::new(),
+            request_agents: HashMap::new(),
         }
     }
 
     /// Process a single connection by consuming requests from the reader and writing responses.
     pub fn handle<R: BufRead, W: Write>(&mut self, reader: R, writer: W) -> io::Result<()> {
-        let mut session = Session::new(&mut self.control, &mut self.pending_requests, writer);
+        let mut session = Session::new(
+            &mut self.control,
+            &mut self.pending_requests,
+            &mut self.request_agents,
+            writer,
+        );
         session.run(reader)
     }
 }
@@ -50,6 +57,7 @@ impl Service {
 struct Session<'a, W: Write> {
     control: &'a mut Control,
     pending_requests: &'a mut HashMap<String, transcript::TranscriptCursor>,
+    request_agents: &'a mut HashMap<String, String>,
     writer: W,
     handshake_completed: bool,
     interpreter: Option<InterpreterBinding>,
@@ -65,11 +73,13 @@ impl<'a, W: Write> Session<'a, W> {
     fn new(
         control: &'a mut Control,
         pending_requests: &'a mut HashMap<String, transcript::TranscriptCursor>,
+        request_agents: &'a mut HashMap<String, String>,
         writer: W,
     ) -> Self {
         Self {
             control,
             pending_requests,
+            request_agents,
             writer,
             handshake_completed: false,
             interpreter: None,
@@ -577,9 +587,21 @@ impl<'a, W: Write> Session<'a, W> {
             .and_then(Value::as_str)
             .ok_or_else(|| ServiceError::invalid_param("prompt"))?;
 
-        let handle = self.ensure_claude_handle()?;
-        let invocation = codebase::invoke_claude_agent(&mut self.control, &handle, prompt)
-            .map_err(ServiceError::from)?;
+        let agent_override = params.get("agent").and_then(Value::as_str);
+        let handle = self.ensure_agent_handle(agent_override)?;
+        let invocation = match handle.kind.as_str() {
+            k if k == codebase::agent::claude::CLAUDE_KIND => {
+                codebase::invoke_claude_agent(&mut self.control, &handle, prompt)
+            }
+            k if k == codebase::agent::codex::CODEX_KIND => {
+                codebase::invoke_codex_agent(&mut self.control, &handle, prompt)
+            }
+            k if k == codebase::agent::harness::HARNESS_KIND => {
+                codebase::invoke_harness_agent(&mut self.control, &handle, prompt)
+            }
+            _ => return Err(ServiceError::invalid_param("agent")),
+        }
+        .map_err(ServiceError::from)?;
 
         let (queued_turn_value, last_turn_for_cursor) = match invocation.queued_turn.clone() {
             Some(turn) => (Value::from(turn.to_string()), turn),
@@ -599,6 +621,8 @@ impl<'a, W: Write> Session<'a, W> {
                 actor: Some(invocation.actor.clone()),
             },
         );
+        self.request_agents
+            .insert(invocation.request_id.clone(), invocation.agent.clone());
 
         Ok(json!({
             "agent": invocation.agent,
@@ -627,7 +651,17 @@ impl<'a, W: Write> Session<'a, W> {
             .and_then(Value::as_u64)
             .map(|v| v as usize);
 
-        let handle = self.ensure_claude_handle()?;
+        let agent_override = params.get("agent").and_then(Value::as_str);
+        let agent_kind_owned = agent_override
+            .map(|s| s.to_string())
+            .or_else(|| {
+                request_filter
+                    .as_deref()
+                    .and_then(|req_id| self.request_agents.get(req_id).map(|s| s.to_string()))
+            })
+            .unwrap_or_else(|| codebase::agent::claude::CLAUDE_KIND.to_string());
+
+        let handle = self.ensure_agent_handle(Some(agent_kind_owned.as_str()))?;
         let status = self.control.status().map_err(ServiceError::from)?;
 
         if total_wait_ms > 0 {
@@ -665,17 +699,27 @@ impl<'a, W: Write> Session<'a, W> {
             }
 
             if !responses.is_empty() {
-                let entry = self
-                    .pending_requests
+                use std::collections::hash_map::Entry;
+
+                match self.pending_requests.entry(request_id.to_string()) {
+                    Entry::Occupied(mut slot) => {
+                        let cursor = slot.get_mut();
+                        cursor.branch = status.active_branch.clone();
+                        cursor.last_turn = status.head_turn.clone();
+                        cursor.actor.get_or_insert_with(|| handle.actor.clone());
+                    }
+                    Entry::Vacant(slot) => {
+                        slot.insert(transcript::TranscriptCursor {
+                            branch: status.active_branch.clone(),
+                            last_turn: status.head_turn.clone(),
+                            actor: Some(handle.actor.clone()),
+                        });
+                    }
+                }
+
+                self.request_agents
                     .entry(request_id.to_string())
-                    .or_insert(transcript::TranscriptCursor {
-                        branch: status.active_branch.clone(),
-                        last_turn: status.head_turn.clone(),
-                        actor: Some(handle.actor.clone()),
-                    });
-                entry.branch = status.active_branch.clone();
-                entry.last_turn = status.head_turn.clone();
-                entry.actor.get_or_insert_with(|| handle.actor.clone());
+                    .or_insert_with(|| handle.kind.clone());
             }
         } else if let Some(limit) = limit {
             if responses.len() > limit {
@@ -1187,10 +1231,6 @@ impl<'a, W: Write> Session<'a, W> {
                 Value::String(io_value_summary(&assertion.value, 80)),
             );
             entry.insert(
-                "value".to_string(),
-                Value::String(format!("{:?}", assertion.value)),
-            );
-            entry.insert(
                 "value_structured".to_string(),
                 io_value_to_json(&assertion.value),
             );
@@ -1293,7 +1333,6 @@ impl<'a, W: Write> Session<'a, W> {
                 );
 
                 if let Some(value) = event.value.as_ref() {
-                    event_obj.insert("value".to_string(), Value::String(format!("{:?}", value)));
                     event_obj.insert("value_structured".to_string(), io_value_to_json(value));
                     event_obj.insert(
                         "summary".to_string(),
@@ -1366,11 +1405,24 @@ impl<'a, W: Write> Session<'a, W> {
         codebase::workspace_handle(&self.control)
     }
 
-    fn ensure_claude_handle(&mut self) -> Result<codebase::AgentHandle, ServiceError> {
-        match codebase::ensure_claude_agent(&mut self.control) {
-            Ok(handle) => Ok(handle),
-            Err(err) => Err(ServiceError::from(err)),
-        }
+    fn ensure_agent_handle(
+        &mut self,
+        agent_kind: Option<&str>,
+    ) -> Result<codebase::AgentHandle, ServiceError> {
+        let kind = agent_kind.unwrap_or(codebase::agent::claude::CLAUDE_KIND);
+        let handle = match kind {
+            k if k == codebase::agent::claude::CLAUDE_KIND => {
+                codebase::ensure_claude_agent(&mut self.control)
+            }
+            k if k == codebase::agent::codex::CODEX_KIND => {
+                codebase::ensure_codex_agent(&mut self.control)
+            }
+            k if k == codebase::agent::harness::HARNESS_KIND => {
+                codebase::ensure_harness_agent(&mut self.control)
+            }
+            _ => return Err(ServiceError::invalid_param("agent")),
+        };
+        handle.map_err(ServiceError::from)
     }
 }
 
@@ -1491,6 +1543,48 @@ fn serialize_instance(instance: &InstanceRecord) -> Value {
             .as_object_mut()
             .unwrap()
             .insert("progress".into(), serialize_progress(progress));
+    }
+
+    if !instance.roles.is_empty() {
+        let mut roles_json = Vec::with_capacity(instance.roles.len());
+        let mut entities_json = Vec::new();
+
+        for role in &instance.roles {
+            let mut role_obj = serde_json::Map::new();
+            role_obj.insert("name".into(), Value::String(role.name.clone()));
+
+            let mut props = serde_json::Map::new();
+            for (key, value_str) in &role.properties {
+                props.insert(key.clone(), Value::String(value_str.clone()));
+            }
+            role_obj.insert("properties".into(), Value::Object(props.clone()));
+            roles_json.push(Value::Object(role_obj));
+
+            if let (Some(actor), Some(facet)) =
+                (role.properties.get("actor"), role.properties.get("facet"))
+            {
+                let mut entity_obj = serde_json::Map::new();
+                entity_obj.insert("role".into(), Value::String(role.name.clone()));
+                entity_obj.insert("actor".into(), Value::String(actor.clone()));
+                entity_obj.insert("facet".into(), Value::String(facet.clone()));
+                if let Some(entity_id) = role.properties.get("entity") {
+                    entity_obj.insert("entity".into(), Value::String(entity_id.clone()));
+                }
+                if let Some(entity_type) = role.properties.get("entity-type") {
+                    entity_obj.insert("entity_type".into(), Value::String(entity_type.clone()));
+                }
+                if let Some(agent_kind) = role.properties.get("agent-kind") {
+                    entity_obj.insert("agent_kind".into(), Value::String(agent_kind.clone()));
+                }
+                entities_json.push(Value::Object(entity_obj));
+            }
+        }
+
+        let object = value.as_object_mut().unwrap();
+        object.insert("roles".into(), Value::Array(roles_json));
+        if !entities_json.is_empty() {
+            object.insert("entities".into(), Value::Array(entities_json));
+        }
     }
 
     value

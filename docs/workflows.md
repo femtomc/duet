@@ -134,10 +134,15 @@ Actions (non-exhaustive):
 
 * `(send-prompt :agent <role> :template <fmt> :args (<expr> …) :tag <id>)`
 * `(invoke-tool :role <role> :capability <alias-or-uuid> [:payload <expr>] [:tag <id>])`
-* `(spawn-entity :role <role> :entity-type <id> [:config <expr>])` – mint an `entity/spawn`
-  capability-backed request. The role’s properties are updated with the spawned actor and
-  facet identifiers (`actor`, `facet`, `entity`, `entity-type`). The interpreter also asserts
-  `(interpreter-entity …)` records for observability.
+* `(spawn-entity :role <role> [:entity-type <id>] [:agent-kind <kind>] [:config <expr>])` –
+  mint an `entity/spawn` capability-backed request. You can supply an explicit
+  entity type, reference an agent kind (`"claude-code"`, etc.), or rely on the
+  role’s existing `:agent-kind` / `:entity-type` properties. The interpreter
+  updates the role bindings with the spawned actor/facet/entity identifiers and
+  asserts `(interpreter-entity <instance-id> <role> <actor> <facet> <entity-id> <entity-type> [<agent-kind>] [role-properties …])`
+  records for observability. The trailing `role-properties` payload mirrors the
+  interpreter’s role bindings so other entities can discover and reuse the
+  spawned actors.
 * `(observe (signal <label> [:scope …]) <handler-program>)` – register a persistent
   observer that runs `handler-program` whenever the dataspace emits the matching
   signal. The interpreter stores observers as

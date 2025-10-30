@@ -68,7 +68,7 @@ workspace_app = typer.Typer(
     rich_markup_mode="rich",
 )
 agent_app = typer.Typer(
-    help="Queue prompts and inspect responses from Claude Code.",
+    help="Queue prompts and inspect responses from code agents.",
     add_completion=True,
     rich_markup_mode="rich",
 )
@@ -508,11 +508,17 @@ def agent_group(ctx: typer.Context) -> None:
 @debug_app.command("agent-invoke")
 def agent_invoke(
     ctx: typer.Context,
-    prompt: str = typer.Argument(..., help="Prompt text for Claude Code."),
+    prompt: str = typer.Argument(..., help="Prompt text for the agent."),
+    agent: str = typer.Option(
+        "claude-code",
+        "--agent",
+        help="Agent kind to invoke (e.g., 'claude-code', 'codex', 'noface').",
+        show_default=True,
+    ),
 ) -> None:
-    """Queue a prompt for the Claude Code agent."""
+    """Queue a prompt for a configured agent."""
 
-    params = {"prompt": prompt}
+    params = {"prompt": prompt, "agent": agent}
     _run(_run_call(ctx.obj, "agent_invoke", params, "agent:invoke"))
 
 
@@ -527,6 +533,11 @@ def agent_responses(
         "--select",
         help="Interactively choose a request identifier to filter responses.",
     ),
+    agent: Optional[str] = typer.Option(
+        None,
+        "--agent",
+        help="Agent kind to query (e.g., 'claude-code', 'codex', 'noface').",
+    ),
 ) -> None:
     """List cached agent responses."""
 
@@ -536,6 +547,7 @@ def agent_responses(
         request_id = _choose_request_id(
             ctx.obj,
             title="Agent Requests",
+            agent=agent,
         )
         if not request_id:
             console.print("[yellow]No request selected; showing all responses.[/yellow]")
@@ -546,6 +558,8 @@ def agent_responses(
     params["wait_ms"] = int(wait * 1000)
     if limit is not None:
         params["limit"] = limit
+    if agent:
+        params["agent"] = agent
     _run(_run_call(ctx.obj, "agent_responses", params, "agent:responses"))
 
 
@@ -585,8 +599,17 @@ def agent_chat(
         min=1,
         show_default=True,
     ),
+    agent: str = typer.Option(
+        "claude-code",
+        "--agent",
+        help="Agent kind to use (e.g., 'claude-code', 'codex', 'noface').",
+        show_default=True,
+    ),
 ) -> None:
     """Send a prompt to the agent. Combine with --wait-for-response to block for results."""
+
+    if not agent.strip():
+        raise typer.BadParameter("--agent cannot be empty")
 
     message = prompt or typer.prompt("Prompt")
 
@@ -594,9 +617,9 @@ def agent_chat(
     if continue_last:
         if resume_request_id or resume_select:
             raise typer.BadParameter("--continue cannot be combined with --resume or --resume-select")
-        resume_id = _latest_request_id(ctx.obj)
+        resume_id = _latest_request_id(ctx.obj, agent=agent)
         if resume_id:
-            preview = _preview_text(_recent_prompt_for_request(ctx.obj, resume_id))
+            preview = _preview_text(_recent_prompt_for_request(ctx.obj, resume_id, agent=agent))
             label = f"[bold]{_short_id(resume_id)}[/bold]"
             if preview:
                 label += f" · {preview}"
@@ -610,6 +633,7 @@ def agent_chat(
         resume_id = _choose_request_id(
             ctx.obj,
             title="Select request to resume",
+            agent=agent,
         )
         if not resume_id:
             console.print("[yellow]No request selected; starting a fresh conversation.[/yellow]")
@@ -622,6 +646,7 @@ def agent_chat(
             wait,
             resume_id,
             history_limit,
+            agent,
         )
     )
 
@@ -997,6 +1022,7 @@ async def _run_agent_chat(
     extra_wait: float,
     resume_request_id: Optional[str],
     history_limit: int,
+    agent: str,
 ) -> None:
     client = await _connect_client(state)
     try:
@@ -1006,7 +1032,8 @@ async def _run_agent_chat(
                 client, prompt, resume_request_id, history_limit
             )
 
-        invoke_result = await client.call("agent_invoke", {"prompt": final_prompt})
+        invoke_params: Dict[str, Any] = {"prompt": final_prompt, "agent": agent}
+        invoke_result = await client.call("agent_invoke", invoke_params)
         if isinstance(invoke_result, dict) and prompt is not None:
             invoke_result.setdefault("prompt_preview", prompt)
         _print_result(invoke_result, "agent:invoke")
@@ -1024,11 +1051,11 @@ async def _run_agent_chat(
                 )
             console.print(
                 f"[dim]Request {request_id} dispatched. Retrieve results with "
-                f"`duet agent responses --request-id {request_id}` or transcript commands as needed.[/dim]"
+                f"`duet agent responses --agent {agent} --request-id {request_id}` or transcript commands as needed.[/dim]"
             )
             return
 
-        params: Dict[str, Any] = {"request_id": request_id, "wait_ms": 0}
+        params: Dict[str, Any] = {"request_id": request_id, "wait_ms": 0, "agent": agent}
 
         while True:
             responses = await client.call("agent_responses", params)
@@ -1112,7 +1139,7 @@ async def _augment_prompt_with_history(
     if len(combined_prompt) > 16000:
         console.print(
             Panel(
-                "[yellow]Combined prompt exceeds 16k characters; Claude may truncate context.[/yellow]",
+                "[yellow]Combined prompt exceeds 16k characters; the agent may truncate context.[/yellow]",
                 border_style="yellow",
             )
         )
@@ -1143,10 +1170,15 @@ async def _connect_client(state: CLIState) -> ControlClient:
     return client
 
 
-async def _fetch_recent_requests(state: CLIState, limit: int) -> List[Dict[str, Any]]:
+async def _fetch_recent_requests(
+    state: CLIState, limit: int, agent: Optional[str] = None
+) -> List[Dict[str, Any]]:
     client = await _connect_client(state)
     try:
-        result = await client.call("agent_responses", {"limit": limit, "wait_ms": 0})
+        params: Dict[str, Any] = {"limit": limit, "wait_ms": 0}
+        if agent:
+            params["agent"] = agent
+        result = await client.call("agent_responses", params)
     finally:
         await client.close()
 
@@ -1157,9 +1189,11 @@ async def _fetch_recent_requests(state: CLIState, limit: int) -> List[Dict[str, 
     return []
 
 
-def _choose_request_id(state: CLIState, *, title: str, limit: int = 20) -> Optional[str]:
+def _choose_request_id(
+    state: CLIState, *, title: str, limit: int = 20, agent: Optional[str] = None
+) -> Optional[str]:
     try:
-        responses = asyncio.run(_fetch_recent_requests(state, limit))
+        responses = asyncio.run(_fetch_recent_requests(state, limit, agent))
     except ProtocolError as exc:  # pragma: no cover - interactive path
         _print_protocol_error(exc)
         return None
@@ -1232,9 +1266,9 @@ def _metadata_block(pairs: Iterable[Tuple[str, Optional[str]]]) -> Optional[Grou
     return Group(*lines)
 
 
-def _latest_request_id(state: CLIState) -> Optional[str]:
+def _latest_request_id(state: CLIState, agent: Optional[str] = None) -> Optional[str]:
     try:
-        responses = asyncio.run(_fetch_recent_requests(state, 1))
+        responses = asyncio.run(_fetch_recent_requests(state, 1, agent))
     except Exception:
         return None
     if responses:
@@ -1242,9 +1276,11 @@ def _latest_request_id(state: CLIState) -> Optional[str]:
     return None
 
 
-def _recent_prompt_for_request(state: CLIState, request_id: str) -> Optional[str]:
+def _recent_prompt_for_request(
+    state: CLIState, request_id: str, agent: Optional[str] = None
+) -> Optional[str]:
     try:
-        responses = asyncio.run(_fetch_recent_requests(state, 20))
+        responses = asyncio.run(_fetch_recent_requests(state, 20, agent))
     except Exception:
         return None
     for entry in responses:
@@ -1259,11 +1295,16 @@ def _recent_prompt_for_request(state: CLIState, request_id: str) -> Optional[str
 def debug_agent_requests(
     ctx: typer.Context,
     limit: int = typer.Option(20, help="Maximum number of recent requests to display.", min=1),
+    agent: Optional[str] = typer.Option(
+        None,
+        "--agent",
+        help="Agent kind to inspect (e.g., 'claude-code', 'codex', 'noface').",
+    ),
 ) -> None:
     """List recent agent request identifiers with full metadata."""
 
     try:
-        responses = asyncio.run(_fetch_recent_requests(ctx.obj, limit))
+        responses = asyncio.run(_fetch_recent_requests(ctx.obj, limit, agent))
     except ProtocolError as exc:
         _print_protocol_error(exc)
         raise typer.Exit(1)
@@ -2287,6 +2328,7 @@ def _print_workflow_list(result: Any) -> None:
         instance_table.add_column("Status")
         instance_table.add_column("State")
         instance_table.add_column("Program")
+        instance_table.add_column("Bindings")
         instance_table.add_column("Details")
 
         for item in instances:
@@ -2302,15 +2344,18 @@ def _print_workflow_list(result: Any) -> None:
                 if not state and isinstance(item.get("progress"), dict):
                     state = item["progress"].get("state")
 
+                bindings_inline = "; ".join(_instance_binding_lines(item))
+
                 instance_table.add_row(
                     str(item.get("id", "?")),
                     status_label,
                     str(state or "-"),
                     _describe_program(item.get("program"), item.get("program_name")),
+                    bindings_inline or "-",
                     details,
                 )
             else:
-                instance_table.add_row(str(item), "-", "-", "-", "")
+                instance_table.add_row(str(item), "-", "-", "-", "-", "")
 
         panels.append(instance_table)
 
@@ -2360,6 +2405,11 @@ def _print_workflow_start(result: Any) -> None:
             lines.append(f"[bold]State[/bold] {state}")
         if details:
             lines.append(f"[bold]Details[/bold] {details}")
+
+        bindings = _instance_binding_lines(instance)
+        if bindings:
+            lines.append("[bold]Bindings[/bold]")
+            lines.extend(f"  {entry}" for entry in bindings)
 
     console.print(
         Panel(
@@ -2653,6 +2703,58 @@ def _describe_progress(progress: Any) -> str:
         return f"frames {frame_depth}"
 
     return ""
+
+
+def _instance_binding_lines(instance: Any) -> List[str]:
+    if not isinstance(instance, dict):
+        return []
+
+    lines: List[str] = []
+    entities = instance.get("entities")
+    if isinstance(entities, list) and entities:
+        for entry in entities:
+            if not isinstance(entry, dict):
+                continue
+            role = entry.get("role") or "?"
+            entity_type = entry.get("entity_type") or entry.get("agent_kind") or "-"
+            extras = []
+            agent_kind = entry.get("agent_kind")
+            if agent_kind and agent_kind != entity_type:
+                extras.append(agent_kind)
+            actor = _short_id(entry.get("actor"))
+            if actor:
+                extras.append(f"actor {actor}")
+            facet = _short_id(entry.get("facet"))
+            if facet:
+                extras.append(f"facet {facet}")
+            entity_id = _short_id(entry.get("entity"))
+            if entity_id:
+                extras.append(f"entity {entity_id}")
+            detail = f" ({', '.join(extras)})" if extras else ""
+            lines.append(f"{role}: {entity_type}{detail}")
+        if lines:
+            return lines
+
+    roles = instance.get("roles")
+    if isinstance(roles, list):
+        for role in roles:
+            if not isinstance(role, dict):
+                continue
+            name = role.get("name") or "?"
+            props = role.get("properties") or {}
+            entity_type = props.get("entity-type")
+            agent_kind = props.get("agent-kind")
+            descriptor = entity_type or agent_kind or "-"
+            extras = []
+            for key in ("actor", "facet", "entity"):
+                short = _short_id(props.get(key))
+                if short:
+                    extras.append(f"{key} {short}")
+            if extras:
+                descriptor = f"{descriptor} ({', '.join(extras)})"
+            lines.append(f"{name}: {descriptor}")
+
+    return lines
 
 
 def _print_operation_result(result: Any, operation: str) -> None:

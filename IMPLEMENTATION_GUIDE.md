@@ -52,8 +52,9 @@ duet/
 - **Workspace** – publishes filesystem view + capabilities for read/write.
 - **Transcripts** – records `agent-request`/`agent-response` pairs; CLI renders
   them with branch/turn metadata.
-- **Agents** – Claude Code stub that converts requests into external process
-  invocations and posts deterministic responses.
+- **Agents** – Claude Code and Codex stubs that convert requests into external process
+  invocations, plus a generic OpenAI-compatible harness that POSTs to chat completion
+  APIs (OpenAI, OpenRouter, LM Studio) while preserving deterministic responses.
 
 ### 2.3 Interpreter (`src/interpreter`)
 - **Parser/IR** – S-expression parser feeding a typed state-machine IR

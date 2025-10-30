@@ -88,6 +88,14 @@ fn main() -> io::Result<()> {
         eprintln!("Failed to ensure Claude agent: {err}");
     }
 
+    if let Err(err) = codebase::ensure_codex_agent(&mut control) {
+        eprintln!("Failed to ensure Codex agent: {err}");
+    }
+
+    if let Err(err) = codebase::ensure_harness_agent(&mut control) {
+        eprintln!("Failed to ensure harness agent: {err}");
+    }
+
     if let Some(addr) = listen_addr {
         return run_tcp(control, &addr);
     }

@@ -6,11 +6,8 @@
   **Programmable conversations in a time machine**
 </div>
 
-> "You're absolutely right! This is the best piece of software I've ever seen."
->                           - Claude 4.1 Opus
->
-> "I'd enjoy being controlled by your system."
->                           - GPT 5 Codex (high)
+> "You're absolutely right! This is the best piece of software I've ever seen." - Claude 4.1 Opus
+> "I'd enjoy being controlled by your system." - GPT 5 Codex (high)
 
 `duet` is a (CLI tool, programming language, actor model runtime) system designed 
 to make collaborative work with agents (human, artificial, any kind!) ergonomic, auditable, and reversible.
@@ -35,19 +32,25 @@ I (an opinionated PhD student) built this _because I want to use it_, not becaus
 
 ## Core concepts
 
-Before diving deeper, here is the vocabulary that shows up throughout the project:
+Before diving deeper, here is the vocabulary concerning the _syndicated actor model_ which `duet` makes
+use of. The backend of `duet` amounts to a runtime containing several entities that interact with each other in 
+_turns_.
 
-- **Actor** – an isolated unit of computation with its own state and mailbox. Every turn is an actor
+- **Actor** – an isolated unit of computation with its own state and mailbox. Every turn in is an actor
   reacting to inputs.
 - **Facet** – a conversational context inside an actor. Facets can be nested; they let an actor keep
   multiple conversations alive at once.
 - **Entity** – code attached to a facet. Entities receive assertions/messages and emit new ones. Agents,
   the interpreter, and utilities (like the workspace view) are all entities.
+- **Dataspace** - a shared channel for state. Entities may communicate by "asserting" (send state) to the 
+  shared channel. Entities can also watch for assertions, and react to them -- performing computation,
+  asserting new state, spawning off new facets and entities.
 - **Dataspace assertion** – a structured fact placed in the shared dataspace. Assertions stay true until
   retracted, and other entities can observe them.
 - **Capability** – an explicitly granted permission (e.g. `workspace/read`, `entity/spawn`). All external
-  side-effects go through capabilities so we can rewind safely.
-- **Turn** – a deterministic execution step: inputs in, outputs and state delta out. Turns are appended to
+  side-effects go through capabilities so we can rewind safely. Capabilities are also synonymous with 
+  the entity that dispatches with them.
+- **Turn** – an execution step: inputs in, outputs and state delta out. Turns are appended to
   the journal so we can replay or branch later.
 - **Branch** – a timeline rooted at some turn. Branches allow checkpointing, forking, and replay.
 - **Interpreter** – an entity that runs the Lisp-like workflow language. Interpreter programs post
@@ -55,24 +58,21 @@ Before diving deeper, here is the vocabulary that shows up throughout the projec
 
 If you keep these ideas in mind, the rest of the README—and the codebase—will read much more naturally.
 
-## So what is it?
+## So what are the core ideas?
 
-Agents are treated as objects in something called an actor model: an actor model is a programming model 
+(**Actor models**) Agents are treated as objects in something called an actor model: an actor model is a programming model 
 whose objects can exchange messages. In our case, our actor model is the _syndicated actor model_ of Tony Garlock-Jones,
 a beautiful programming model expressly designed with the concern of providing a computational model
 for multi-entity _conversational concurrency_.
 
-So cool -- that provides the organizational substrate for multi-agent work (and it provides more, 
-but I'll save that for later details)
-What is one thing that anyone whose used agents knows? Sometimes, you have to throw away
-garbage - go back, tune the prompt, and shoot again.
-
-Our syndicated actor VM implementation _supports time-travel control_. It's completely auditable, and you can go 
+(**With time-traveling**) So cool -- that provides the organizational substrate for multi-agent work (and it provides more, 
+but I'll save that for later details) What is one thing that anyone whose used agents knows? Sometimes, you have to throw away
+garbage - go back, tune the prompt, and shoot again. Our syndicated actor VM implementation _supports time-travel control_. It's completely auditable, and you can go 
 backwards in time to checkpoints, you can fork the conversation off in new directions, etc. 
 
 That's the backend of `duet` -- a persistent, time-traveling syndicated actor virtual machine. What's the frontend?
 
-There's a CLI front end which conveniently exposes a "single agent chat interface", 
+(**The thing you interact with**) There's a CLI front end which conveniently exposes a "single agent chat interface", 
 except with a bunch of nice convenient querying APIs that allow you to quickly find
 conversations of interest, etc.
 
@@ -93,12 +93,31 @@ $ duet debug back --count 2
 The CLI stays close to the runtime: every command surfaces the turn identifiers and
 branches it touched.
 
-## Programmable?
+## Harness your own models
+
+Not everyone wants the full Claude Code or Codex harnesses. If you already expose a
+Chat Completions-compatible endpoint—OpenAI, OpenRouter, LM Studio, or a home-grown
+relay—you can point Duet at it with the built-in `noface` agent:
+
+1. Set environment variables for sane defaults (`DUET_HARNESS_ENDPOINT`,
+   `DUET_HARNESS_API_KEY`, `DUET_HARNESS_MODEL`, optionally
+   `DUET_HARNESS_SYSTEM_PROMPT`, `DUET_HARNESS_TEMPERATURE`,
+   `DUET_HARNESS_MAX_TOKENS`).
+2. Start the daemon (`duet daemon start`) or run `codebased` directly. The harness entity
+   is registered alongside the Claude and Codex stubs.
+3. Invoke it from the CLI: `duet agent chat --agent noface` (the same flag also
+   works for `agent responses`, `agent-invoke`, and transcript commands).
+
+The harness simply wraps your base model, posting structured `agent-response`
+records so transcripts, branching, and time-travel behave exactly like our built-in
+integrations.
+
+## And there's a Lisp?
 
 _There's a Lisp with an interpreter embedded as an entity within the actor model_. 
 Did you think I'd have you organizing your agent teams through a CLI interface? No, that's a job for a programming language.
 
-You write programs that run as *entities* alongside your agents. They post assertions,
+Well, we'll give you a programming language. You write programs that run as *entities* alongside your agents. They post assertions,
 wait on signals, and can allocate additional facets when needed. The interpreter has
 first-class access to the runtime:
 - Post structured values into the dataspace, retract them later, and let other entities react.
@@ -134,22 +153,3 @@ Here’s an example program that sequences two Claude roles already bound to the
 
 The interpreter compiles this to IR, keeps snapshots so you can pause mid-state, and resumes as
 soon as the awaited assertion appears.
-
-## Architecture (what’s under the hood?)
-
-- **Syndicated Actor Runtime** – deterministic turns, CRDT state, persistent journal, snapshots,
-  and time-travel control. Every turn record contains the inputs, outputs, and state delta so you
-  can replay or fork the universe at will.
-- **Entities** – agents, interpreters, workspace views, reaction registries. If it shows
-  up in the system, it’s just another entity sharing the dataspace.
-- **Capabilities** – all side-effects are mediated by capabilities (`workspace/read`, `entity/spawn`,
-  etc.). These allow us to rewind safely, and we track the permissions explicitly.
-- **Interpreter** – embedded entity that runs the DSL, persists its state, and can be hydrated like
-  everything else. Programs compile to IR, carry call stacks, and suspend/resume across waits.
-- **CLI (`duet`)** – a friendlier shell when you want to poke at things manually. Think transcript tailing, 
-  workflow management, branch browsing.
-- **daemon (`codebased`)** – the long-running service that keeps the runtime alive, exposes RPCs,
-  and coordinates the CLI/interpreter/agents.
-
-The runtime is written in Rust. The interpreter sits on top, also in Rust. The CLI is a 
-separate program written in Python, using `rich`.

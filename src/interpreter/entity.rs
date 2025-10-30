@@ -461,6 +461,7 @@ impl InterpreterEntity {
 
         let program_ref = waiting_entry.program_ref.clone();
         let program = waiting_entry.program.clone();
+        let mut program_clone = program.clone();
         let snapshot = waiting_entry.snapshot.clone();
         let status_handle = waiting_entry.handle.clone();
         let stored_assertions = waiting_entry.assertions.clone();
@@ -577,6 +578,10 @@ impl InterpreterEntity {
             }
         }
 
+        let updated_roles = runtime.host().roles_snapshot();
+        runtime.program_mut().roles = updated_roles.clone();
+        program_clone.roles = updated_roles.clone();
+
         let observer_specs = runtime.host_mut().drain_observers();
 
         if let (Some(wait_status), Some(snapshot), Some(wait_handle)) = (
@@ -595,7 +600,7 @@ impl InterpreterEntity {
             let facets = pending_wait_facets.take().unwrap_or_default();
             next_wait = Some(WaitingInstance {
                 program_ref: program_ref.clone(),
-                program: program.clone(),
+                program: program_clone.clone(),
                 snapshot,
                 wait: wait_status,
                 handle: status_handle.clone(),
@@ -615,10 +620,11 @@ impl InterpreterEntity {
         let final_record = InstanceRecord {
             instance_id: instance_id.clone(),
             program: program_ref.clone(),
-            program_name: program.name.clone(),
+            program_name: program_clone.name.clone(),
             state: progress.state.clone(),
             status: status.clone(),
             progress: Some(progress.clone()),
+            roles: program_clone.roles.clone(),
         };
 
         if let Some(entry) = next_wait {
@@ -1180,6 +1186,7 @@ impl InterpreterEntity {
             state: progress.state.clone(),
             status: status.clone(),
             progress: Some(progress.clone()),
+            roles: program_clone.roles.clone(),
         };
         activation.assert(status_handle.clone(), running_record.to_value());
 
@@ -1315,6 +1322,7 @@ impl InterpreterEntity {
             state: progress.state.clone(),
             status: status.clone(),
             progress: Some(progress.clone()),
+            roles: program_clone.roles.clone(),
         };
 
         if let Some(entry) = waiting_entry {
@@ -1520,9 +1528,7 @@ impl<'a> ActivationHost<'a> {
 
     fn role_binding_mut(&mut self, name: &str) -> Result<&mut RoleBinding, ActorError> {
         self.roles.get_mut(name).ok_or_else(|| {
-            ActorError::InvalidActivation(format!(
-                "spawn-entity references unknown role '{name}'"
-            ))
+            ActorError::InvalidActivation(format!("spawn-entity references unknown role '{name}'"))
         })
     }
 
@@ -1801,11 +1807,8 @@ impl<'a> InterpreterHost for ActivationHost<'a> {
                 agent_kind,
                 config,
             } => {
-                let (resolved_entity_type, resolved_kind) = self.resolve_spawn_target(
-                    role,
-                    entity_type.as_ref(),
-                    agent_kind.as_ref(),
-                )?;
+                let (resolved_entity_type, resolved_kind) =
+                    self.resolve_spawn_target(role, entity_type.as_ref(), agent_kind.as_ref())?;
 
                 let config_value = config
                     .as_ref()
@@ -1814,7 +1817,7 @@ impl<'a> InterpreterHost for ActivationHost<'a> {
 
                 let spawned = self
                     .activation
-                    .spawn_entity(resolved_entity_type.clone(), config_value.clone());
+                    .spawn_entity(resolved_entity_type.clone(), config_value);
 
                 let binding = self.role_binding_mut(role)?;
                 binding
@@ -1833,7 +1836,10 @@ impl<'a> InterpreterHost for ActivationHost<'a> {
                     binding.properties.insert("agent-kind".into(), kind);
                 }
 
+                let role_properties_value = Self::encode_role_properties(binding);
+
                 let mut fields = vec![
+                    IOValue::new(self.instance_id.clone()),
                     IOValue::new(role.clone()),
                     IOValue::new(spawned.actor.0.to_string()),
                     IOValue::new(spawned.root_facet.0.to_string()),
@@ -1845,7 +1851,7 @@ impl<'a> InterpreterHost for ActivationHost<'a> {
                     fields.push(IOValue::new(kind));
                 }
 
-                if let Some(props) = Self::encode_role_properties(binding) {
+                if let Some(props) = role_properties_value {
                     fields.push(props);
                 }
 
@@ -2216,14 +2222,18 @@ mod tests {
 
         let entity_view =
             record_with_label(&entity_record, "interpreter-entity").expect("entity record view");
-        assert_eq!(entity_view.field_string(0).as_deref(), Some("worker"));
+        let instance_id = entity_view.field_string(0).expect("instance id present");
+        assert!(!instance_id.is_empty(), "instance id should not be empty");
+        assert_eq!(entity_view.field_string(1).as_deref(), Some("worker"));
         assert_eq!(
-            entity_view.field_string(4).as_deref(),
+            entity_view.field_string(5).as_deref(),
             Some("agent-claude-code")
         );
-        assert_eq!(entity_view.field_string(5).as_deref(), Some("claude-code"));
+        assert_eq!(entity_view.field_string(6).as_deref(), Some("claude-code"));
 
-        let props_view = record_with_label(&entity_view.field(6), "role-properties")
+        let props_index = entity_view.len() - 1;
+        let props_field = entity_view.field(props_index);
+        let props_view = record_with_label(&props_field, "role-properties")
             .expect("role properties record present");
         let mut observed_keys = Vec::new();
         for idx in 0..props_view.len() {
@@ -2244,6 +2254,27 @@ mod tests {
         assert!(observed_keys.contains(&"actor".to_string()));
         assert!(observed_keys.contains(&"facet".to_string()));
         assert!(observed_keys.contains(&"entity".to_string()));
+
+        let instance_records: Vec<_> = activation
+            .assertions_added
+            .iter()
+            .filter_map(|(_, value)| InstanceRecord::parse(value))
+            .collect();
+        let latest = instance_records.last().expect("instance record present");
+        let worker_binding = latest
+            .roles
+            .iter()
+            .find(|binding| binding.name == "worker")
+            .expect("worker role binding recorded");
+        assert_eq!(
+            worker_binding.properties.get("entity-type"),
+            Some(&"agent-claude-code".to_string())
+        );
+        assert_eq!(
+            worker_binding.properties.get("agent-kind"),
+            Some(&"claude-code".to_string())
+        );
+        assert!(worker_binding.properties.contains_key("actor"));
     }
 
     #[test]
@@ -2253,7 +2284,7 @@ mod tests {
         let mut activation = activation_for(&actor);
 
         let program = "(workflow spawn-entity-explicit)
-(roles (worker))
+(roles (worker :label \"primary\"))
 (state start
   (action (spawn-entity :role worker :agent-kind \"claude-code\"))
   (terminal))";
@@ -2290,10 +2321,31 @@ mod tests {
             })
             .expect("interpreter-entity record asserted");
 
-        let entity_view =
-            record_with_label(&role_binding_record, "interpreter-entity").unwrap();
-        assert_eq!(entity_view.field_string(0).as_deref(), Some("worker"));
-        assert_eq!(entity_view.field_string(5).as_deref(), Some("claude-code"));
+        let entity_view = record_with_label(&role_binding_record, "interpreter-entity").unwrap();
+        let instance_id = entity_view.field_string(0).expect("instance id present");
+        assert!(!instance_id.is_empty());
+        assert_eq!(entity_view.field_string(1).as_deref(), Some("worker"));
+        assert_eq!(entity_view.field_string(6).as_deref(), Some("claude-code"));
+
+        let instance_records: Vec<_> = activation
+            .assertions_added
+            .iter()
+            .filter_map(|(_, value)| InstanceRecord::parse(value))
+            .collect();
+        let latest = instance_records.last().expect("instance record present");
+        let worker_binding = latest
+            .roles
+            .iter()
+            .find(|binding| binding.name == "worker")
+            .expect("worker role binding recorded");
+        assert_eq!(
+            worker_binding.properties.get("agent-kind"),
+            Some(&"claude-code".to_string())
+        );
+        assert_eq!(
+            worker_binding.properties.get("entity-type"),
+            Some(&"agent-claude-code".to_string())
+        );
     }
 
     #[test]

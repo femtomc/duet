@@ -179,7 +179,7 @@ pub fn transcript_events(
         .or_else(|| cursor.map(|c| c.last_turn.clone()));
 
     let mut filter = AssertionEventFilter::inclusive();
-    filter.label = Some(agent::claude::RESPONSE_LABEL.to_string());
+    filter.label = Some(agent::RESPONSE_LABEL.to_string());
     filter.request_id = Some(request_id.to_string());
 
     let chunk =
@@ -201,11 +201,11 @@ pub fn transcript_events(
 }
 
 fn matches_label(value: &IOValue) -> bool {
-    record_with_label(value, agent::claude::RESPONSE_LABEL).is_some()
+    record_with_label(value, agent::RESPONSE_LABEL).is_some()
 }
 
 fn matches_request(value: &IOValue, request_id: &str) -> bool {
-    record_with_label(value, agent::claude::RESPONSE_LABEL)
+    record_with_label(value, agent::RESPONSE_LABEL)
         .and_then(|record| record.field_string(0))
         .map(|s| s == request_id)
         .unwrap_or(false)
@@ -238,8 +238,6 @@ pub fn event_batches_payload(chunk: &AssertionEventChunk) -> Vec<Value> {
                     );
 
                     if let Some(value) = event.value.as_ref() {
-                        event_obj
-                            .insert("value".to_string(), Value::String(format!("{:?}", value)));
                         event_obj.insert("value_structured".to_string(), io_value_to_json(value));
                         event_obj.insert(
                             "summary".to_string(),

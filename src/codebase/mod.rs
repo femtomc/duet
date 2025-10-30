@@ -43,6 +43,8 @@ pub fn register_codebase_entities() {
 
         workspace::register(catalog);
         agent::claude::register(catalog);
+        agent::codex::register(catalog);
+        agent::harness::register(catalog);
 
         catalog.register("echo", |config| {
             let topic = config
@@ -260,7 +262,60 @@ pub fn read_file(
 
 /// Ensure a Claude Code agent entity exists for this runtime.
 pub fn ensure_claude_agent(control: &mut Control) -> RuntimeResult<AgentHandle> {
-    if let Some(handle) = agent_handle(control, agent::claude::CLAUDE_KIND) {
+    ensure_agent(
+        control,
+        agent::claude::ENTITY_TYPE,
+        agent::claude::CLAUDE_KIND,
+    )
+}
+
+/// Ensure a Codex agent entity exists for this runtime.
+pub fn ensure_codex_agent(control: &mut Control) -> RuntimeResult<AgentHandle> {
+    ensure_agent(control, agent::codex::ENTITY_TYPE, agent::codex::CODEX_KIND)
+}
+
+/// Ensure an OpenAI-harness agent entity exists for this runtime.
+pub fn ensure_harness_agent(control: &mut Control) -> RuntimeResult<AgentHandle> {
+    ensure_agent(
+        control,
+        agent::harness::ENTITY_TYPE,
+        agent::harness::HARNESS_KIND,
+    )
+}
+
+/// Enqueue a prompt for the Claude Code agent to process.
+pub fn invoke_claude_agent(
+    control: &mut Control,
+    handle: &AgentHandle,
+    prompt: &str,
+) -> RuntimeResult<AgentInvocation> {
+    invoke_agent(control, handle, prompt)
+}
+
+/// Enqueue a prompt for the Codex agent to process.
+pub fn invoke_codex_agent(
+    control: &mut Control,
+    handle: &AgentHandle,
+    prompt: &str,
+) -> RuntimeResult<AgentInvocation> {
+    invoke_agent(control, handle, prompt)
+}
+
+/// Enqueue a prompt for the OpenAI harness agent to process.
+pub fn invoke_harness_agent(
+    control: &mut Control,
+    handle: &AgentHandle,
+    prompt: &str,
+) -> RuntimeResult<AgentInvocation> {
+    invoke_agent(control, handle, prompt)
+}
+
+fn ensure_agent(
+    control: &mut Control,
+    entity_type: &str,
+    kind: &str,
+) -> RuntimeResult<AgentHandle> {
+    if let Some(handle) = agent_handle(control, kind) {
         return Ok(handle);
     }
 
@@ -269,14 +324,14 @@ pub fn ensure_claude_agent(control: &mut Control) -> RuntimeResult<AgentHandle> 
     let entity_id = control.register_entity(
         actor.clone(),
         facet.clone(),
-        agent::claude::ENTITY_TYPE.to_string(),
+        entity_type.to_string(),
         preserves::IOValue::symbol("default"),
     )?;
 
     let pattern = Pattern {
         id: uuid::Uuid::new_v4(),
         pattern: preserves::IOValue::record(
-            preserves::IOValue::symbol(agent::claude::REQUEST_LABEL),
+            preserves::IOValue::symbol(agent::REQUEST_LABEL),
             vec![
                 preserves::IOValue::symbol("<_>"),
                 preserves::IOValue::symbol("<_>"),
@@ -292,19 +347,18 @@ pub fn ensure_claude_agent(control: &mut Control) -> RuntimeResult<AgentHandle> 
         entity_id,
         actor,
         facet,
-        kind: agent::claude::CLAUDE_KIND.to_string(),
+        kind: kind.to_string(),
     })
 }
 
-/// Enqueue a prompt for the Claude Code agent to process.
-pub fn invoke_claude_agent(
+fn invoke_agent(
     control: &mut Control,
     handle: &AgentHandle,
     prompt: &str,
 ) -> RuntimeResult<AgentInvocation> {
     let request_id = uuid::Uuid::new_v4().to_string();
     let message = preserves::IOValue::record(
-        preserves::IOValue::symbol(agent::claude::REQUEST_LABEL),
+        preserves::IOValue::symbol(agent::REQUEST_LABEL),
         vec![
             preserves::IOValue::new(request_id.clone()),
             preserves::IOValue::new(prompt.to_string()),
@@ -404,8 +458,10 @@ fn parse_workspace_entry(value: &preserves::IOValue) -> Option<WorkspaceEntry> {
 }
 
 fn agent_handle(control: &Control, kind: &str) -> Option<AgentHandle> {
+    let target_type = agent::entity_type_for_kind(kind)?;
+
     control.list_entities().into_iter().find_map(|entity| {
-        if entity.entity_type == agent::claude::ENTITY_TYPE {
+        if entity.entity_type == target_type {
             Some(AgentHandle {
                 entity_id: entity.id,
                 actor: entity.actor,
@@ -421,7 +477,7 @@ fn agent_handle(control: &Control, kind: &str) -> Option<AgentHandle> {
 /// Attempt to interpret a preserves value as an agent response record.
 /// Attempt to interpret a preserves payload as an agent response.
 pub fn parse_agent_response(value: &preserves::IOValue) -> Option<AgentResponse> {
-    let record = record_with_label(value, agent::claude::RESPONSE_LABEL)?;
+    let record = record_with_label(value, agent::RESPONSE_LABEL)?;
     if record.len() < 4 {
         return None;
     }
