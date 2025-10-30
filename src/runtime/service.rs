@@ -10,13 +10,17 @@ use super::error::{CapabilityError, RuntimeError};
 use super::turn::{ActorId, BranchId, FacetId, TurnId};
 use crate::PROTOCOL_VERSION;
 use crate::codebase::{self, transcript};
+use crate::interpreter::protocol::{
+    DefinitionRecord, InstanceProgress, InstanceRecord, InstanceStatus, ProgramRef,
+    RUN_MESSAGE_LABEL, WaitStatus,
+};
 use crate::runtime::pattern::Pattern;
 use crate::runtime::reaction::{ReactionDefinition, ReactionEffect, ReactionValue};
 use crate::util::io_value::as_record;
 use preserves::IOValue;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, BufRead, Write};
 use std::time::Duration;
 use uuid::Uuid;
@@ -48,6 +52,13 @@ struct Session<'a, W: Write> {
     pending_requests: &'a mut HashMap<String, transcript::TranscriptCursor>,
     writer: W,
     handshake_completed: bool,
+    interpreter: Option<InterpreterBinding>,
+}
+
+#[derive(Clone)]
+struct InterpreterBinding {
+    actor: ActorId,
+    facet: FacetId,
 }
 
 impl<'a, W: Write> Session<'a, W> {
@@ -61,6 +72,7 @@ impl<'a, W: Write> Session<'a, W> {
             pending_requests,
             writer,
             handshake_completed: false,
+            interpreter: None,
         }
     }
 
@@ -178,7 +190,7 @@ impl<'a, W: Write> Session<'a, W> {
                     "dataspace_inspection",
                     "dataspace_events",
                     "reactions",
-                    "workflow_scaffolding"
+                    "workflow_interpreter"
                 ]
             }
         }))
@@ -192,6 +204,77 @@ impl<'a, W: Write> Session<'a, W> {
                 "handshake required before issuing commands".into(),
             ))
         }
+    }
+
+    fn ensure_interpreter_binding(&mut self) -> Result<InterpreterBinding, ServiceError> {
+        if let Some(binding) = &self.interpreter {
+            return Ok(binding.clone());
+        }
+
+        let binding = if let Some(info) = self
+            .control
+            .list_entities()
+            .into_iter()
+            .find(|info| info.entity_type == "interpreter")
+        {
+            InterpreterBinding {
+                actor: info.actor,
+                facet: info.facet,
+            }
+        } else {
+            let actor = ActorId::new();
+            let facet = FacetId::new();
+            self.control
+                .register_entity(
+                    actor.clone(),
+                    facet.clone(),
+                    "interpreter".to_string(),
+                    IOValue::symbol("default"),
+                )
+                .map_err(ServiceError::from)?;
+
+            InterpreterBinding { actor, facet }
+        };
+
+        self.interpreter = Some(binding.clone());
+        Ok(binding)
+    }
+
+    fn collect_interpreter_state(
+        &mut self,
+        binding: &InterpreterBinding,
+    ) -> (Vec<DefinitionRecord>, Vec<InstanceRecord>) {
+        let assertions = self.control.list_assertions_for_actor(&binding.actor);
+
+        let mut definitions: HashMap<String, DefinitionRecord> = HashMap::new();
+        let mut instances: HashMap<String, InstanceRecord> = HashMap::new();
+
+        for (_, value) in assertions {
+            if let Some(definition) = DefinitionRecord::parse(&value) {
+                definitions.insert(definition.definition_id.clone(), definition);
+                continue;
+            }
+
+            if let Some(instance) = InstanceRecord::parse(&value) {
+                instances.insert(instance.instance_id.clone(), instance);
+            }
+        }
+
+        let mut definition_list: Vec<_> = definitions.into_values().collect();
+        definition_list.sort_by(|a, b| a.program_name.cmp(&b.program_name));
+
+        let mut instance_list: Vec<_> = instances.into_values().collect();
+        instance_list.sort_by(|a, b| a.instance_id.cmp(&b.instance_id));
+
+        (definition_list, instance_list)
+    }
+
+    fn interpreter_instance_ids(&mut self, binding: &InterpreterBinding) -> HashSet<String> {
+        self.collect_interpreter_state(binding)
+            .1
+            .into_iter()
+            .map(|record| record.instance_id)
+            .collect()
     }
 
     fn cmd_status(&mut self, params: &Value) -> Result<Value, ServiceError> {
@@ -748,8 +831,15 @@ impl<'a, W: Write> Session<'a, W> {
 
     fn cmd_workflow_list(&mut self, _params: &Value) -> Result<Value, ServiceError> {
         self.ensure_handshake()?;
+        let binding = self.ensure_interpreter_binding()?;
+        let (definitions, instances) = self.collect_interpreter_state(&binding);
+
+        let definitions_json: Vec<Value> = definitions.iter().map(serialize_definition).collect();
+        let instances_json: Vec<Value> = instances.iter().map(serialize_instance).collect();
+
         Ok(json!({
-            "workflows": Value::Array(vec![])
+            "definitions": definitions_json,
+            "instances": instances_json,
         }))
     }
 
@@ -760,23 +850,51 @@ impl<'a, W: Write> Session<'a, W> {
             .and_then(Value::as_str)
             .ok_or_else(|| ServiceError::invalid_param("definition"))?;
         let label = params.get("label").and_then(Value::as_str);
+        let binding = self.ensure_interpreter_binding()?;
+        let before_ids = self.interpreter_instance_ids(&binding);
 
-        // Placeholder response until the workflow interpreter lands.
-        let mut message = "workflow orchestration is not implemented yet".to_string();
+        let payload = IOValue::record(
+            IOValue::symbol(RUN_MESSAGE_LABEL),
+            vec![IOValue::new(definition.to_string())],
+        );
+
+        let turn = self
+            .control
+            .send_message(binding.actor.clone(), binding.facet.clone(), payload)
+            .map_err(ServiceError::from)?;
+
+        let (_, instances_after) = self.collect_interpreter_state(&binding);
+        let new_instance = instances_after
+            .into_iter()
+            .find(|instance| !before_ids.contains(&instance.instance_id));
+
+        let mut response = json!({
+            "status": "started",
+            "turn": turn.to_string(),
+        });
+
+        if let Some(instance) = new_instance {
+            response
+                .as_object_mut()
+                .unwrap()
+                .insert("instance".into(), serialize_instance(&instance));
+        }
+
         if let Some(path) = params.get("definition_path").and_then(Value::as_str) {
-            message.push_str(&format!(" (definition: {path})"));
-        }
-        if let Some(id) = label {
-            message.push_str(&format!(" [label: {id}]"));
+            response
+                .as_object_mut()
+                .unwrap()
+                .insert("definition_path".into(), json!(path));
         }
 
-        // Touch `definition` so it is considered used.
-        let _ = definition;
+        if let Some(label_value) = label {
+            response
+                .as_object_mut()
+                .unwrap()
+                .insert("label".into(), json!(label_value));
+        }
 
-        Ok(json!({
-            "status": "accepted",
-            "message": message,
-        }))
+        Ok(response)
     }
 
     fn cmd_reaction_register(&mut self, params: &Value) -> Result<Value, ServiceError> {
@@ -1187,6 +1305,109 @@ impl ResponseEnvelope {
             error: Some(ErrorEnvelope::from(error)),
         }
     }
+}
+
+fn serialize_definition(definition: &DefinitionRecord) -> Value {
+    json!({
+        "id": definition.definition_id,
+        "name": definition.program_name,
+        "source": definition.source,
+    })
+}
+
+fn serialize_instance(instance: &InstanceRecord) -> Value {
+    let mut value = json!({
+        "id": instance.instance_id,
+        "program": serialize_program_ref(&instance.program),
+        "program_name": instance.program_name,
+        "status": serialize_instance_status(&instance.status),
+    });
+
+    if let Some(state) = &instance.state {
+        value
+            .as_object_mut()
+            .unwrap()
+            .insert("state".into(), json!(state));
+    }
+
+    if let Some(progress) = &instance.progress {
+        value
+            .as_object_mut()
+            .unwrap()
+            .insert("progress".into(), serialize_progress(progress));
+    }
+
+    value
+}
+
+fn serialize_program_ref(program: &ProgramRef) -> Value {
+    match program {
+        ProgramRef::Definition(id) => json!({
+            "type": "definition",
+            "id": id,
+        }),
+        ProgramRef::Inline(source) => json!({
+            "type": "inline",
+            "source": source,
+        }),
+    }
+}
+
+fn serialize_instance_status(status: &InstanceStatus) -> Value {
+    match status {
+        InstanceStatus::Running => json!({ "state": "running" }),
+        InstanceStatus::Waiting(wait) => json!({
+            "state": "waiting",
+            "wait": serialize_wait_status(wait),
+        }),
+        InstanceStatus::Completed => json!({ "state": "completed" }),
+        InstanceStatus::Failed(message) => json!({
+            "state": "failed",
+            "message": message,
+        }),
+    }
+}
+
+fn serialize_wait_status(wait: &WaitStatus) -> Value {
+    match wait {
+        WaitStatus::RecordFieldEq {
+            label,
+            field,
+            value,
+        } => json!({
+            "type": "record-field-eq",
+            "label": label,
+            "field": field,
+            "value": format!("{:?}", value.to_io_value()),
+        }),
+        WaitStatus::Signal { label } => json!({
+            "type": "signal",
+            "label": label,
+        }),
+    }
+}
+
+fn serialize_progress(progress: &InstanceProgress) -> Value {
+    let mut value = json!({
+        "entry_pending": progress.entry_pending,
+        "frame_depth": progress.frame_depth,
+    });
+
+    if let Some(state) = &progress.state {
+        value
+            .as_object_mut()
+            .unwrap()
+            .insert("state".into(), json!(state));
+    }
+
+    if let Some(wait) = &progress.waiting {
+        value
+            .as_object_mut()
+            .unwrap()
+            .insert("waiting".into(), serialize_wait_status(wait));
+    }
+
+    value
 }
 
 #[derive(Serialize)]

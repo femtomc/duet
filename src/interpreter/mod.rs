@@ -8,23 +8,38 @@
 
 /// Abstract syntax tree definitions for the interpreter language.
 pub mod ast;
-/// Runtime driver that will execute programs against the actor VM.
-pub mod runtime;
-/// Parser for the interpreter DSL.
-pub mod parser;
-/// Typed intermediate representation structures.
-pub mod ir;
 /// Builders that translate parsed programs into the IR.
 pub mod builder;
 /// Interpreter entity implementation.
 pub mod entity;
+/// Typed intermediate representation structures.
+pub mod ir;
+/// Parser for the interpreter DSL.
+pub mod parser;
+/// Dataspace protocol structures for interpreter definitions/instances.
+pub mod protocol;
+/// Runtime driver that will execute programs against the actor VM.
+pub mod runtime;
+/// Structured value handling for interpreter programs.
+pub mod value;
 
 pub use ast::{Expr, Program};
 pub use builder::build_ir;
-pub use ir::{Action, BranchArm, Condition, Instruction, ProgramIr, RoleBinding, State, WaitCondition};
-pub use parser::parse_program;
-pub use runtime::{InterpreterHost, InterpreterRuntime, RuntimeError, RuntimeEvent};
 pub use entity::InterpreterEntity;
+pub use ir::{
+    Action, BranchArm, Condition, Instruction, ProgramIr, RoleBinding, State, WaitCondition,
+};
+pub use parser::parse_program;
+pub use protocol::{
+    DEFINE_MESSAGE_LABEL, DEFINITION_RECORD_LABEL, DefinitionRecord, INSTANCE_RECORD_LABEL,
+    InstanceProgress, InstanceRecord, InstanceStatus, LOG_RECORD_LABEL, NOTIFY_MESSAGE_LABEL,
+    ProgramRef, RESUME_MESSAGE_LABEL, RUN_MESSAGE_LABEL, WaitStatus,
+};
+pub use runtime::{
+    FrameKindSnapshot, FrameSnapshot, InterpreterHost, InterpreterRuntime, RuntimeError,
+    RuntimeEvent, RuntimeSnapshot,
+};
+pub use value::{Value, ValueExpr, parse_value, parse_value_expr, parse_value_literal};
 
 use thiserror::Error;
 

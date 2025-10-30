@@ -147,9 +147,9 @@ impl ClaudeCodeAgent {
             ));
         }
 
-        let request_id = record
-            .field_string(0)
-            .ok_or_else(|| ActorError::InvalidActivation("agent request id must be string".into()))?;
+        let request_id = record.field_string(0).ok_or_else(|| {
+            ActorError::InvalidActivation("agent request id must be string".into())
+        })?;
 
         let prompt = record
             .field_string(1)

@@ -23,7 +23,6 @@ use super::state::{
     FacetStatus, PNCounter, StateDelta,
 };
 use super::turn::{ActorId, FacetId, Handle, TurnInput, TurnOutput};
-
 /// An actor: isolated unit of computation with its own state
 pub struct Actor {
     /// Unique actor ID
@@ -484,15 +483,15 @@ impl Actor {
         {
             let mut reactions = self.reactions.write();
             reactions.insert(
-            pattern_id,
-            ReactionEntry {
-                reaction_id: id,
-                effect,
-                default_facet,
-                stats: ReactionStats::default(),
-            },
-        );
-    }
+                pattern_id,
+                ReactionEntry {
+                    reaction_id: id,
+                    effect,
+                    default_facet,
+                    stats: ReactionStats::default(),
+                },
+            );
+        }
 
         self.reaction_index.write().insert(id, pattern_id);
         id

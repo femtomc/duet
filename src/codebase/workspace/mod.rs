@@ -250,9 +250,8 @@ impl WorkspaceCatalog {
     }
 
     fn parse_path(&self, payload: &preserves::IOValue, label: &str) -> ActorResult<PathBuf> {
-        let record = record_with_label(payload, label).ok_or_else(|| {
-            ActorError::InvalidActivation(format!("expected '{label}' payload"))
-        })?;
+        let record = record_with_label(payload, label)
+            .ok_or_else(|| ActorError::InvalidActivation(format!("expected '{label}' payload")))?;
 
         if record.len() == 0 {
             return Err(ActorError::InvalidActivation(format!(

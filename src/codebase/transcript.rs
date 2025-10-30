@@ -11,12 +11,12 @@ use crate::runtime::control::{
 };
 use crate::runtime::error::Result as RuntimeResult;
 use crate::runtime::turn::{ActorId, BranchId, Handle, TurnId};
+use crate::util::io_value::record_with_label;
 use chrono::{DateTime, Utc};
 use codebase::AgentResponse;
 use preserves::IOValue;
-use std::time::Duration;
 use serde_json::{Map, Value, json};
-use crate::util::io_value::record_with_label;
+use std::time::Duration;
 
 /// Snapshot describing the most recent transcript state we observed.
 #[derive(Debug, Clone)]
@@ -231,18 +231,15 @@ pub fn event_batches_payload(chunk: &AssertionEventChunk) -> Vec<Value> {
                     };
 
                     let mut event_obj = Map::new();
-                    event_obj
-                        .insert("action".to_string(), Value::String(action.to_string()));
+                    event_obj.insert("action".to_string(), Value::String(action.to_string()));
                     event_obj.insert(
                         "handle".to_string(),
                         Value::String(event.handle.to_string()),
                     );
 
                     if let Some(value) = event.value.as_ref() {
-                        event_obj.insert(
-                            "value".to_string(),
-                            Value::String(format!("{:?}", value)),
-                        );
+                        event_obj
+                            .insert("value".to_string(), Value::String(format!("{:?}", value)));
 
                         if let Some(agent_response) = parse_agent_response(value) {
                             let AgentResponse {
@@ -255,8 +252,7 @@ pub fn event_batches_payload(chunk: &AssertionEventChunk) -> Vec<Value> {
                                 tool,
                             } = agent_response;
                             let mut transcript = Map::new();
-                            transcript
-                                .insert("request_id".to_string(), Value::String(request_id));
+                            transcript.insert("request_id".to_string(), Value::String(request_id));
                             transcript.insert("prompt".to_string(), Value::String(prompt));
                             transcript.insert("response".to_string(), Value::String(response));
                             transcript.insert("agent".to_string(), Value::String(agent));

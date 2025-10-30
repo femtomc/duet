@@ -17,9 +17,17 @@ fn main() -> io::Result<()> {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--root" => {
-                let path = args
-                    .next()
-                    .unwrap_or_else(|| panic!("--root requires a path argument"));
+                let path = match args.next() {
+                    Some(path) => path,
+                    None => {
+                        eprintln!("--root requires a path argument");
+                        print_usage();
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "missing value for --root",
+                        ));
+                    }
+                };
                 root = Some(PathBuf::from(path));
             }
             "--no-init" => {
@@ -29,9 +37,17 @@ fn main() -> io::Result<()> {
                 // Stdio is the default transport; accept the flag for compatibility.
             }
             "--listen" => {
-                let addr = args
-                    .next()
-                    .unwrap_or_else(|| panic!("--listen requires an address argument"));
+                let addr = match args.next() {
+                    Some(addr) => addr,
+                    None => {
+                        eprintln!("--listen requires an address argument");
+                        print_usage();
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "missing value for --listen",
+                        ));
+                    }
+                };
                 listen_addr = Some(addr);
             }
             "--help" | "-h" => {
@@ -116,12 +132,13 @@ fn run_tcp(control: Control, addr: &str) -> io::Result<()> {
 
 fn print_usage() {
     eprintln!(
-        "Usage: codebased [--root PATH] [--no-init] [--stdio]\n\
+        "Usage: codebased [--root PATH] [--no-init] [--stdio] [--listen ADDR]\n\
          \n\
          Options:\n\
-           --root PATH   Use PATH as the runtime root (default: .duet)\n\
+           --root PATH   Runtime root directory (default: nearest .duet folder)\n\
            --no-init     Skip storage initialization (assumes existing data)\n\
-           --stdio       Communicate over stdin/stdout (default)\n"
+           --stdio       Communicate over stdin/stdout (default)\n\
+           --listen ADDR Listen on TCP ADDR instead of stdio\n"
     );
 }
 

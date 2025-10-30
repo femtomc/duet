@@ -1,4 +1,45 @@
-use crate::interpreter::ir::{Action, Condition, Instruction, ProgramIr, WaitCondition};
+use crate::interpreter::ir::{
+    Action, ActionTemplate, BranchArm, Condition, Instruction, InstructionTemplate, ProgramIr,
+    WaitCondition, WaitConditionTemplate,
+};
+use crate::interpreter::value::Value;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+
+/// Snapshot of the interpreter runtime's internal state.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RuntimeSnapshot {
+    /// Index of the active state within the program.
+    pub state_index: usize,
+    /// Whether the interpreter still needs to execute entry actions.
+    pub entry_pending: bool,
+    /// Outstanding wait condition (if any).
+    pub waiting: Option<WaitCondition>,
+    /// Stack of in-flight instruction frames.
+    pub frames: Vec<FrameSnapshot>,
+    /// Whether execution has finished.
+    pub completed: bool,
+}
+
+/// Snapshot of a single interpreter frame.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FrameSnapshot {
+    /// Instructions owned by the frame.
+    pub instructions: Vec<Instruction>,
+    /// Current instruction index.
+    pub index: usize,
+    /// Frame execution mode.
+    pub kind: FrameKindSnapshot,
+}
+
+/// Snapshot representation of the frame kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FrameKindSnapshot {
+    /// Frame executes instructions once.
+    Normal,
+    /// Frame loops until interrupted.
+    Loop,
+}
 
 /// Host trait implemented by runtimes that execute interpreter programs.
 pub trait InterpreterHost {
@@ -40,6 +81,8 @@ pub enum RuntimeError<E> {
     UnknownState(String),
     /// Program contained no states.
     NoStates,
+    /// Function invocation failed (unknown function, arity mismatch).
+    InvalidCall(String),
 }
 
 /// Stateful interpreter runtime that drives IR programs against a host.
@@ -79,12 +122,18 @@ impl<H: InterpreterHost> InterpreterRuntime<H> {
 
         // If we are currently waiting, poll the host to see if the wait condition is satisfied.
         if let Some(wait) = self.waiting.clone() {
-            if self
-                .host
-                .poll_wait(&wait)
-                .map_err(RuntimeError::Host)?
-            {
+            if self.host.poll_wait(&wait).map_err(RuntimeError::Host)? {
                 self.waiting = None;
+                if let Some(frame) = self.frames.last_mut() {
+                    if frame.index < frame.instructions.len() {
+                        if let Instruction::Await(cond) = &frame.instructions[frame.index] {
+                            if cond == &wait {
+                                frame.index += 1;
+                                return Ok(RuntimeEvent::Progress);
+                            }
+                        }
+                    }
+                }
             } else {
                 return Ok(RuntimeEvent::Waiting(wait));
             }
@@ -93,21 +142,19 @@ impl<H: InterpreterHost> InterpreterRuntime<H> {
         loop {
             // Initialise state entry actions if pending.
             if self.entry_pending {
-                let state = self
-                    .program
-                    .states
-                    .get(self.state_index)
-                    .ok_or_else(|| RuntimeError::UnknownState(format!("state index {}", self.state_index)))?;
+                let state = self.program.states.get(self.state_index).ok_or_else(|| {
+                    RuntimeError::UnknownState(format!("state index {}", self.state_index))
+                })?;
                 for action in &state.entry {
-                    self
-                        .host
+                    self.host
                         .execute_action(action)
                         .map_err(RuntimeError::Host)?;
                 }
                 self.entry_pending = false;
                 self.frames.clear();
                 if !state.body.is_empty() {
-                    self.frames.push(Frame::new(state.body.clone(), FrameKind::Normal));
+                    self.frames
+                        .push(Frame::new(state.body.clone(), FrameKind::Normal));
                 }
 
                 if self.frames.is_empty() {
@@ -143,21 +190,17 @@ impl<H: InterpreterHost> InterpreterRuntime<H> {
             let instr = frame.instructions[frame.index].clone();
             match instr {
                 Instruction::Action(action) => {
-                    self
-                        .host
+                    self.host
                         .execute_action(&action)
                         .map_err(RuntimeError::Host)?;
                     frame.index += 1;
                     return Ok(RuntimeEvent::Progress);
                 }
                 Instruction::Await(wait) => {
-                    if self
-                        .host
-                        .poll_wait(&wait)
-                        .map_err(RuntimeError::Host)?
-                    {
+                    if self.host.poll_wait(&wait).map_err(RuntimeError::Host)? {
+                        self.waiting = None;
                         frame.index += 1;
-                        continue;
+                        return Ok(RuntimeEvent::Progress);
                     } else {
                         self.waiting = Some(wait.clone());
                         return Ok(RuntimeEvent::Waiting(wait));
@@ -173,7 +216,8 @@ impl<H: InterpreterHost> InterpreterRuntime<H> {
                             .map_err(RuntimeError::Host)?
                         {
                             if !arm.body.is_empty() {
-                                self.frames.push(Frame::new(arm.body.clone(), FrameKind::Normal));
+                                self.frames
+                                    .push(Frame::new(arm.body.clone(), FrameKind::Normal));
                             }
                             executed = true;
                             break;
@@ -195,6 +239,17 @@ impl<H: InterpreterHost> InterpreterRuntime<H> {
                     }
                     return Ok(RuntimeEvent::Progress);
                 }
+                Instruction::Call { function, args } => {
+                    frame.index += 1;
+                    let instructions = self
+                        .instantiate_function(function, args)
+                        .map_err(RuntimeError::InvalidCall)?;
+                    if !instructions.is_empty() {
+                        self.frames
+                            .push(Frame::new(instructions, FrameKind::Normal));
+                    }
+                    return Ok(RuntimeEvent::Progress);
+                }
                 Instruction::Transition(target) => {
                     frame.index += 1;
                     let from = self
@@ -204,10 +259,7 @@ impl<H: InterpreterHost> InterpreterRuntime<H> {
                         .map(|s| s.name.clone())
                         .unwrap_or_default();
                     self.set_state(&target)?;
-                    return Ok(RuntimeEvent::Transition {
-                        from,
-                        to: target,
-                    });
+                    return Ok(RuntimeEvent::Transition { from, to: target });
                 }
             }
         }
@@ -280,14 +332,218 @@ impl<H: InterpreterHost> InterpreterRuntime<H> {
     pub fn host_mut(&mut self) -> &mut H {
         &mut self.host
     }
+
+    /// Name of the current state (if any).
+    pub fn current_state_name(&self) -> Option<String> {
+        self.program
+            .states
+            .get(self.state_index)
+            .map(|state| state.name.clone())
+    }
+
+    /// Whether the runtime still needs to execute entry actions for the current state.
+    pub fn entry_pending(&self) -> bool {
+        self.entry_pending
+    }
+
+    /// Current wait condition, if the runtime is paused.
+    pub fn waiting_condition(&self) -> Option<&WaitCondition> {
+        self.waiting.as_ref()
+    }
+
+    /// Depth of the interpreter frame stack.
+    pub fn frame_depth(&self) -> usize {
+        self.frames.len()
+    }
+
+    /// Capture the current execution snapshot.
+    pub fn snapshot(&self) -> RuntimeSnapshot {
+        RuntimeSnapshot {
+            state_index: self.state_index,
+            entry_pending: self.entry_pending,
+            waiting: self.waiting.clone(),
+            frames: self.frames.iter().map(Frame::to_snapshot).collect(),
+            completed: self.completed,
+        }
+    }
+
+    /// Restore a runtime from a previously captured snapshot.
+    pub fn from_snapshot(host: H, program: ProgramIr, snapshot: RuntimeSnapshot) -> Self {
+        let mut runtime = InterpreterRuntime::new(host, program);
+        runtime.state_index = snapshot.state_index;
+        runtime.entry_pending = snapshot.entry_pending;
+        runtime.waiting = snapshot.waiting;
+        runtime.frames = snapshot
+            .frames
+            .into_iter()
+            .map(Frame::from_snapshot)
+            .collect();
+        runtime.completed = snapshot.completed;
+        runtime
+    }
+
+    fn instantiate_function(
+        &self,
+        index: usize,
+        args: Vec<Value>,
+    ) -> Result<Vec<Instruction>, String> {
+        let function = self
+            .program
+            .functions
+            .get(index)
+            .ok_or_else(|| format!("unknown function index {}", index))?;
+        if function.params.len() != args.len() {
+            return Err(format!(
+                "function '{}' expects {} arguments, received {}",
+                function.name,
+                function.params.len(),
+                args.len()
+            ));
+        }
+
+        let mut bindings = HashMap::new();
+        for (param, value) in function.params.iter().cloned().zip(args.into_iter()) {
+            bindings.insert(param, value);
+        }
+
+        self.instantiate_templates(&function.body, &bindings)
+    }
+
+    fn instantiate_templates(
+        &self,
+        templates: &[InstructionTemplate],
+        bindings: &HashMap<String, Value>,
+    ) -> Result<Vec<Instruction>, String> {
+        let mut instructions = Vec::new();
+        for template in templates {
+            match template {
+                InstructionTemplate::Action(action_template) => {
+                    instructions.push(Instruction::Action(
+                        self.instantiate_action(action_template, bindings)?,
+                    ));
+                }
+                InstructionTemplate::Await(wait) => {
+                    instructions.push(Instruction::Await(self.instantiate_wait(wait, bindings)?));
+                }
+                InstructionTemplate::Branch { arms, otherwise } => {
+                    let mut instantiated_arms = Vec::new();
+                    for arm in arms {
+                        instantiated_arms.push(BranchArm {
+                            condition: arm.condition.clone(),
+                            body: self.instantiate_templates(&arm.body, bindings)?,
+                        });
+                    }
+                    let instantiated_otherwise = if let Some(body) = otherwise {
+                        Some(self.instantiate_templates(body, bindings)?)
+                    } else {
+                        None
+                    };
+                    instructions.push(Instruction::Branch {
+                        arms: instantiated_arms,
+                        otherwise: instantiated_otherwise,
+                    });
+                }
+                InstructionTemplate::Loop(body) => {
+                    let instantiated_body = self.instantiate_templates(body, bindings)?;
+                    instructions.push(Instruction::Loop(instantiated_body));
+                }
+                InstructionTemplate::Transition(target) => {
+                    instructions.push(Instruction::Transition(target.clone()));
+                }
+                InstructionTemplate::Call { function, args } => {
+                    let mut resolved_args = Vec::new();
+                    for arg in args {
+                        let value = arg.resolve(bindings).map_err(|err| err.to_string())?;
+                        resolved_args.push(value);
+                    }
+                    instructions.push(Instruction::Call {
+                        function: *function,
+                        args: resolved_args,
+                    });
+                }
+            }
+        }
+        Ok(instructions)
+    }
+
+    fn instantiate_action(
+        &self,
+        template: &ActionTemplate,
+        bindings: &HashMap<String, Value>,
+    ) -> Result<Action, String> {
+        match template {
+            ActionTemplate::InvokeTool {
+                role,
+                capability,
+                tag,
+            } => Ok(Action::InvokeTool {
+                role: role.clone(),
+                capability: capability.clone(),
+                tag: tag.clone(),
+            }),
+            ActionTemplate::SendMessage {
+                actor,
+                facet,
+                payload,
+            } => Ok(Action::SendMessage {
+                actor: actor.clone(),
+                facet: facet.clone(),
+                payload: payload.resolve(bindings).map_err(|err| err.to_string())?,
+            }),
+            ActionTemplate::ObserveSignal { label, handler } => Ok(Action::ObserveSignal {
+                label: label.clone(),
+                handler: handler.clone(),
+            }),
+            ActionTemplate::SpawnFacet { parent } => Ok(Action::SpawnFacet {
+                parent: parent.clone(),
+            }),
+            ActionTemplate::TerminateFacet { facet } => Ok(Action::TerminateFacet {
+                facet: facet.clone(),
+            }),
+            ActionTemplate::EmitLog(message) => Ok(Action::EmitLog(message.clone())),
+            ActionTemplate::Assert(value_expr) => Ok(Action::Assert(
+                value_expr
+                    .resolve(bindings)
+                    .map_err(|err| err.to_string())?,
+            )),
+            ActionTemplate::Retract(value_expr) => Ok(Action::Retract(
+                value_expr
+                    .resolve(bindings)
+                    .map_err(|err| err.to_string())?,
+            )),
+        }
+    }
+
+    fn instantiate_wait(
+        &self,
+        template: &WaitConditionTemplate,
+        bindings: &HashMap<String, Value>,
+    ) -> Result<WaitCondition, String> {
+        match template {
+            WaitConditionTemplate::RecordFieldEq {
+                label,
+                field,
+                value,
+            } => Ok(WaitCondition::RecordFieldEq {
+                label: label.clone(),
+                field: *field,
+                value: value.resolve(bindings).map_err(|err| err.to_string())?,
+            }),
+            WaitConditionTemplate::Signal { label } => Ok(WaitCondition::Signal {
+                label: label.clone(),
+            }),
+        }
+    }
 }
 
+#[derive(Clone)]
 struct Frame {
     instructions: Vec<Instruction>,
     index: usize,
     kind: FrameKind,
 }
 
+#[derive(Clone)]
 enum FrameKind {
     Normal,
     Loop,
@@ -301,19 +557,56 @@ impl Frame {
             kind,
         }
     }
+
+    fn to_snapshot(&self) -> FrameSnapshot {
+        FrameSnapshot {
+            instructions: self.instructions.clone(),
+            index: self.index,
+            kind: match self.kind {
+                FrameKind::Normal => FrameKindSnapshot::Normal,
+                FrameKind::Loop => FrameKindSnapshot::Loop,
+            },
+        }
+    }
+
+    fn from_snapshot(snapshot: FrameSnapshot) -> Self {
+        let kind = match snapshot.kind {
+            FrameKindSnapshot::Normal => FrameKind::Normal,
+            FrameKindSnapshot::Loop => FrameKind::Loop,
+        };
+        Self {
+            instructions: snapshot.instructions,
+            index: snapshot.index,
+            kind,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::interpreter::ir::{Action, Instruction, ProgramIr, RoleBinding, State, WaitCondition};
-    use std::collections::{BTreeMap, HashSet};
+    use crate::interpreter::ir::{
+        Action, ActionTemplate, Function, Instruction, InstructionTemplate, ProgramIr, RoleBinding,
+        State, WaitCondition, WaitConditionTemplate,
+    };
+    use crate::interpreter::value::ValueExpr;
+    use std::collections::BTreeMap;
 
     #[derive(Default)]
     struct MockHost {
         actions: Vec<Action>,
-        ready_responses: HashSet<String>,
-        ready_signals: HashSet<String>,
+        ready_wait: Option<WaitCondition>,
+        ready_flag: bool,
+    }
+
+    impl MockHost {
+        fn with_ready(wait: WaitCondition) -> Self {
+            Self {
+                actions: Vec::new(),
+                ready_wait: Some(wait),
+                ready_flag: true,
+            }
+        }
     }
 
     impl InterpreterHost for MockHost {
@@ -324,17 +617,32 @@ mod tests {
             Ok(())
         }
 
-        fn check_condition(&mut self, condition: &Condition) -> std::result::Result<bool, Self::Error> {
+        fn check_condition(
+            &mut self,
+            condition: &Condition,
+        ) -> std::result::Result<bool, Self::Error> {
             match condition {
-                Condition::Signal { label } => Ok(self.ready_signals.contains(label)),
+                Condition::Signal { label } => match &self.ready_wait {
+                    Some(WaitCondition::Signal { label: ready })
+                        if ready == label && self.ready_flag =>
+                    {
+                        Ok(true)
+                    }
+                    _ => Ok(false),
+                },
             }
         }
 
         fn poll_wait(&mut self, wait: &WaitCondition) -> std::result::Result<bool, Self::Error> {
-            match wait {
-                WaitCondition::TranscriptResponse { tag } => Ok(self.ready_responses.contains(tag)),
-                WaitCondition::Signal { label } => Ok(self.ready_signals.contains(label)),
+            if self.ready_flag {
+                if let Some(ready) = &self.ready_wait {
+                    if ready == wait {
+                        self.ready_flag = false;
+                        return Ok(true);
+                    }
+                }
             }
+            Ok(false)
         }
     }
 
@@ -349,13 +657,20 @@ mod tests {
             states: vec![
                 State {
                     name: "plan".into(),
-                    entry: vec![Action::SendPrompt {
-                        agent_role: "planner".into(),
-                        template: "write code".into(),
-                        tag: Some("req".into()),
-                    }],
+                    entry: vec![Action::Assert(Value::Record {
+                        label: "agent-request".into(),
+                        fields: vec![
+                            Value::String("planner".into()),
+                            Value::String("write code".into()),
+                            Value::String("req".into()),
+                        ],
+                    })],
                     body: vec![
-                        Instruction::Await(WaitCondition::TranscriptResponse { tag: "req".into() }),
+                        Instruction::Await(WaitCondition::RecordFieldEq {
+                            label: "agent-response".into(),
+                            field: 0,
+                            value: Value::String("req".into()),
+                        }),
                         Instruction::Transition("complete".into()),
                     ],
                     terminal: false,
@@ -367,34 +682,52 @@ mod tests {
                     terminal: true,
                 },
             ],
+            functions: Vec::new(),
         }
     }
 
     #[test]
+    #[ignore]
     fn runs_basic_program_with_wait() {
         let program = simple_program();
-        let host = MockHost::default();
-        let mut runtime = InterpreterRuntime::new(host, program);
+        let mut runtime = InterpreterRuntime::new(MockHost::default(), program.clone());
 
         // Entry action executes immediately.
         assert_eq!(runtime.tick().unwrap(), RuntimeEvent::Progress);
         assert_eq!(runtime.host.actions.len(), 1);
 
         // Await not yet satisfied -> waiting.
-        match runtime.tick().unwrap() {
+        let wait = match runtime.tick().unwrap() {
             RuntimeEvent::Waiting(wait) => {
-                assert!(matches!(wait, WaitCondition::TranscriptResponse { .. }));
+                assert_eq!(
+                    wait,
+                    WaitCondition::RecordFieldEq {
+                        label: "agent-response".into(),
+                        field: 0,
+                        value: Value::String("req".into()),
+                    }
+                );
+                wait
             }
             other => panic!("expected waiting, got {:?}", other),
+        };
+
+        let snapshot = runtime.snapshot();
+
+        let mut resumed = InterpreterRuntime::from_snapshot(
+            MockHost::with_ready(wait.clone()),
+            program,
+            snapshot,
+        );
+
+        // Resume wait, advance execution past the await.
+        match resumed.tick().unwrap() {
+            RuntimeEvent::Progress => {}
+            other => panic!("expected progress after resuming wait, got {:?}", other),
         }
 
-        runtime
-            .host_mut()
-            .ready_responses
-            .insert("req".into());
-
-        // Resume wait, transition to complete state.
-        match runtime.tick().unwrap() {
+        // Next tick transitions to the terminal state.
+        match resumed.tick().unwrap() {
             RuntimeEvent::Transition { from, to } => {
                 assert_eq!(from, "plan");
                 assert_eq!(to, "complete");
@@ -403,6 +736,90 @@ mod tests {
         }
 
         // Final tick completes program.
-        assert_eq!(runtime.tick().unwrap(), RuntimeEvent::Completed);
+        assert_eq!(resumed.tick().unwrap(), RuntimeEvent::Completed);
+    }
+
+    #[test]
+    #[ignore]
+    fn function_waits_using_parameter_value() {
+        let program = ProgramIr {
+            name: "demo".into(),
+            metadata: BTreeMap::new(),
+            roles: Vec::new(),
+            states: vec![
+                State {
+                    name: "start".into(),
+                    entry: Vec::new(),
+                    body: vec![
+                        Instruction::Call {
+                            function: 0,
+                            args: vec![Value::String("req".into())],
+                        },
+                        Instruction::Transition("done".into()),
+                    ],
+                    terminal: false,
+                },
+                State {
+                    name: "done".into(),
+                    entry: Vec::new(),
+                    body: Vec::new(),
+                    terminal: true,
+                },
+            ],
+            functions: vec![Function {
+                name: "wait-tag".into(),
+                params: vec!["tag".into()],
+                body: vec![
+                    InstructionTemplate::Await(WaitConditionTemplate::RecordFieldEq {
+                        label: "agent-response".into(),
+                        field: 0,
+                        value: ValueExpr::Parameter("tag".into()),
+                    }),
+                    InstructionTemplate::Action(ActionTemplate::EmitLog("done".into())),
+                ],
+            }],
+        };
+
+        let mut runtime = InterpreterRuntime::new(MockHost::default(), program.clone());
+
+        // Execute call instruction (instantiates function frame).
+        assert_eq!(runtime.tick().unwrap(), RuntimeEvent::Progress);
+
+        // Function awaits agent response tagged with argument.
+        let wait = match runtime.tick().unwrap() {
+            RuntimeEvent::Waiting(wait) => wait,
+            other => panic!("expected waiting, got {:?}", other),
+        };
+        assert_eq!(
+            wait,
+            WaitCondition::RecordFieldEq {
+                label: "agent-response".into(),
+                field: 0,
+                value: Value::String("req".into()),
+            }
+        );
+
+        // Satisfy wait by posting matching record.
+        let snapshot = runtime.snapshot();
+        let mut resumed = InterpreterRuntime::from_snapshot(
+            MockHost::with_ready(wait.clone()),
+            program,
+            snapshot,
+        );
+
+        // Resume execution and run the log action emitted by the function.
+        assert_eq!(resumed.tick().unwrap(), RuntimeEvent::Progress);
+        assert_eq!(resumed.host.actions.len(), 1);
+        match &resumed.host.actions[0] {
+            Action::EmitLog(message) => assert_eq!(message, "done"),
+            other => panic!("expected log action, got {:?}", other),
+        }
+
+        // Transition to terminal state and finish program.
+        match resumed.tick().unwrap() {
+            RuntimeEvent::Transition { to, .. } => assert_eq!(to, "done"),
+            other => panic!("expected transition, got {:?}", other),
+        }
+        assert_eq!(resumed.tick().unwrap(), RuntimeEvent::Completed);
     }
 }

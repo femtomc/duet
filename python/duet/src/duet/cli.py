@@ -13,7 +13,7 @@ import time
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, NoReturn
 
 import rich_click as click  # Must be imported before typer to patch Click
 import typer
@@ -37,43 +37,43 @@ click.rich_click.MAX_WIDTH = 100
 console = Console()
 
 app = typer.Typer(
-    add_completion=False,
+    add_completion=True,
     help="Interact with the Duet runtime over the NDJSON control protocol.",
     rich_markup_mode="rich",
 )
 workspace_app = typer.Typer(
     help="Workspace operations",
-    add_completion=False,
+    add_completion=True,
     rich_markup_mode="rich",
 )
 agent_app = typer.Typer(
     help="Agent operations",
-    add_completion=False,
+    add_completion=True,
     rich_markup_mode="rich",
 )
 reaction_app = typer.Typer(
     help="Reactive automations",
-    add_completion=False,
+    add_completion=True,
     rich_markup_mode="rich",
 )
 workflow_app = typer.Typer(
     help="Programmable workflows",
-    add_completion=False,
+    add_completion=True,
     rich_markup_mode="rich",
 )
 transcript_app = typer.Typer(
     help="Agent transcripts",
-    add_completion=False,
+    add_completion=True,
     rich_markup_mode="rich",
 )
 dataspace_app = typer.Typer(
     help="Dataspace inspection",
-    add_completion=False,
+    add_completion=True,
     rich_markup_mode="rich",
 )
 daemon_app = typer.Typer(
     help="Manage the codebased daemon",
-    add_completion=False,
+    add_completion=True,
     rich_markup_mode="rich",
 )
 app.add_typer(workspace_app, name="workspace", rich_help_panel="Workspace")
@@ -86,7 +86,7 @@ app.add_typer(daemon_app, name="daemon", rich_help_panel="Runtime")
 
 
 
-DEFAULT_ROOT = Path('.duet')
+DEFAULT_ROOT_NAME = ".duet"
 DEFAULT_DAEMON_HOST = '127.0.0.1'
 DAEMON_STATE_FILE = 'daemon.json'
 DAEMON_LOG_FILE = 'daemon.log'
@@ -103,8 +103,17 @@ class DaemonState:
 
 
 def _resolve_root_path(root: Optional[Path]) -> Path:
-    path = root or DEFAULT_ROOT
-    return path.expanduser()
+    if root:
+        return root.expanduser().resolve()
+
+    cwd = Path.cwd()
+    search_roots = [cwd, *cwd.parents]
+    for candidate_parent in search_roots:
+        candidate = candidate_parent / DEFAULT_ROOT_NAME
+        if candidate.exists():
+            return candidate.resolve()
+
+    return (cwd / DEFAULT_ROOT_NAME).resolve()
 
 
 def _ensure_root_dir(root: Optional[Path]) -> Path:
@@ -188,6 +197,15 @@ class CLIState:
 
     root: Optional[Path]
     codebased_bin: Optional[Path]
+    daemon_host: Optional[str]
+    daemon_port: Optional[int]
+
+
+def _show_group_help(ctx: typer.Context) -> NoReturn:
+    """Display help text for a command group and exit."""
+
+    typer.echo(ctx.get_help())
+    raise typer.Exit()
 
 
 def _run(coro: asyncio.Future[Any]) -> None:
@@ -222,10 +240,34 @@ def main(
         help="Path to the codebased daemon binary (overrides auto-discovery).",
         rich_help_panel="Runtime",
     ),
+    daemon_host: Optional[str] = typer.Option(  # noqa: B008
+        None,
+        "--daemon-host",
+        help="Connect to an already-running daemon at this host (requires --daemon-port).",
+        rich_help_panel="Runtime",
+    ),
+    daemon_port: Optional[int] = typer.Option(  # noqa: B008
+        None,
+        "--daemon-port",
+        help="Connect to an already-running daemon on this port.",
+        min=1,
+        max=65535,
+        rich_help_panel="Runtime",
+    ),
 ) -> None:
     """Top-level callback storing shared CLI state."""
 
-    ctx.obj = CLIState(root=root, codebased_bin=codebased_bin)
+    if (daemon_host is None) != (daemon_port is None):
+        raise typer.BadParameter(
+            "Provide both --daemon-host and --daemon-port to connect to a remote daemon."
+        )
+
+    ctx.obj = CLIState(
+        root=root,
+        codebased_bin=codebased_bin,
+        daemon_host=daemon_host,
+        daemon_port=daemon_port,
+    )
 
     if ctx.invoked_subcommand is None:
         _run(_run_status(ctx.obj, branch=None))
@@ -388,6 +430,12 @@ def raw(
     _run(_run_call(ctx.obj, rpc_command, payload, "raw"))
 
 
+@workspace_app.callback(invoke_without_command=True)
+def workspace_group(ctx: typer.Context) -> None:
+    if ctx.invoked_subcommand is None:
+        _show_group_help(ctx)
+
+
 @workspace_app.command("entries")
 def workspace_entries(ctx: typer.Context) -> None:
     """List workspace dataspace entries."""
@@ -422,6 +470,12 @@ def workspace_write(
 
     params = {"path": path, "content": content}
     _run(_run_call(ctx.obj, "workspace_write", params, "workspace:write"))
+
+
+@agent_app.callback(invoke_without_command=True)
+def agent_group(ctx: typer.Context) -> None:
+    if ctx.invoked_subcommand is None:
+        _show_group_help(ctx)
 
 
 @agent_app.command("invoke")
@@ -494,6 +548,12 @@ def agent_chat(
             history_limit,
         )
     )
+
+
+@reaction_app.callback(invoke_without_command=True)
+def reaction_group(ctx: typer.Context) -> None:
+    if ctx.invoked_subcommand is None:
+        _show_group_help(ctx)
 
 
 @reaction_app.command("register")
@@ -634,6 +694,12 @@ def reaction_list(ctx: typer.Context) -> None:
     _run(_run_call(ctx.obj, "reaction_list", {}, "reaction:list"))
 
 
+@dataspace_app.callback(invoke_without_command=True)
+def dataspace_group(ctx: typer.Context) -> None:
+    if ctx.invoked_subcommand is None:
+        _show_group_help(ctx)
+
+
 @dataspace_app.command("assertions")
 def dataspace_assertions(
     ctx: typer.Context,
@@ -657,6 +723,12 @@ def dataspace_assertions(
         params["limit"] = limit
 
     _run(_run_call(ctx.obj, "dataspace_assertions", params, "dataspace:assertions"))
+
+
+@daemon_app.callback(invoke_without_command=True)
+def daemon_group(ctx: typer.Context) -> None:
+    if ctx.invoked_subcommand is None:
+        _show_group_help(ctx)
 
 
 
@@ -959,22 +1031,24 @@ async def _augment_prompt_with_history(
 
 
 async def _connect_client(state: CLIState) -> ControlClient:
-    root = _resolve_root_path(state.root)
-    daemon_state = _load_daemon_state(root)
     runtime_addr: Optional[Tuple[str, int]] = None
+    root = _resolve_root_path(state.root)
 
-    if daemon_state:
-        if _is_process_alive(daemon_state.pid) and _ping_daemon(daemon_state.host, daemon_state.port):
-            runtime_addr = (daemon_state.host, daemon_state.port)
-        else:
-            _clear_daemon_state(root)
+    if state.daemon_host and state.daemon_port:
+        runtime_addr = (state.daemon_host, state.daemon_port)
+    else:
+        daemon_state = _load_daemon_state(root)
+        if daemon_state:
+            if _is_process_alive(daemon_state.pid) and _ping_daemon(daemon_state.host, daemon_state.port):
+                runtime_addr = (daemon_state.host, daemon_state.port)
+            else:
+                _clear_daemon_state(root)
 
     if runtime_addr:
         client = ControlClient(runtime_addr=runtime_addr)
     else:
         cmd = list(_codebased_command(state))
-        if state.root:
-            cmd.extend(["--root", str(state.root)])
+        cmd.extend(["--root", str(root)])
         client = ControlClient(tuple(cmd))
     await client.connect()
     return client
@@ -1589,40 +1663,126 @@ def _print_workflow_list(result: Any) -> None:
         console.print(JSON.from_data(result))
         return
 
-    workflows = result.get("workflows")
-    if not workflows:
-        console.print("[yellow]No workflows found.[/yellow]")
+    definitions = result.get("definitions") or []
+    instances = result.get("instances") or []
+
+    if not definitions and not instances:
+        console.print(
+            "[yellow]No interpreter definitions or instances found.[/yellow]"
+        )
         return
 
-    table = Table(title="Workflows", show_lines=False, header_style="bold cyan")
-    table.add_column("ID", style="bold")
-    table.add_column("Status")
-    table.add_column("Description")
+    panels: List[Any] = []
 
-    for item in workflows:
-        if isinstance(item, dict):
-            identifier = item.get("id") or item.get("workflow_id") or "?"
-            status = item.get("status") or "-"
-            description = item.get("description") or ""
-            table.add_row(str(identifier), str(status), str(description))
-        else:
-            table.add_row(str(item), "-", "")
+    if definitions:
+        definition_table = Table(
+            title="Definitions", show_lines=False, header_style="bold cyan"
+        )
+        definition_table.add_column("ID", style="bold")
+        definition_table.add_column("Name")
+        definition_table.add_column("Preview")
 
-    console.print(table)
+        for item in definitions:
+            if isinstance(item, dict):
+                preview = _short_source(item.get("source"))
+                definition_table.add_row(
+                    str(item.get("id", "?")),
+                    str(item.get("name", "?")),
+                    preview,
+                )
+            else:
+                definition_table.add_row(str(item), "-", "-")
+
+        panels.append(definition_table)
+
+    if instances:
+        instance_table = Table(
+            title="Instances", show_lines=False, header_style="bold magenta"
+        )
+        instance_table.add_column("ID", style="bold")
+        instance_table.add_column("Status")
+        instance_table.add_column("State")
+        instance_table.add_column("Program")
+        instance_table.add_column("Details")
+
+        for item in instances:
+            if isinstance(item, dict):
+                status_label, status_detail = _describe_instance_status(
+                    item.get("status")
+                )
+                progress_detail = _describe_progress(item.get("progress"))
+                detail_parts = [status_detail, progress_detail]
+                details = " | ".join(part for part in detail_parts if part)
+
+                state = item.get("state")
+                if not state and isinstance(item.get("progress"), dict):
+                    state = item["progress"].get("state")
+
+                instance_table.add_row(
+                    str(item.get("id", "?")),
+                    status_label,
+                    str(state or "-"),
+                    _describe_program(item.get("program"), item.get("program_name")),
+                    details,
+                )
+            else:
+                instance_table.add_row(str(item), "-", "-", "-", "")
+
+        panels.append(instance_table)
+
+    if len(panels) == 1:
+        console.print(panels[0])
+    else:
+        console.print(Group(*panels))
 
 
 def _print_workflow_start(result: Any) -> None:
-    if isinstance(result, dict):
-        message = result.get("message", "Workflow request submitted.")
-        status = result.get("status", "accepted")
-        console.print(
-            Panel(
-                f"[bold]Status[/bold] {status}\n{message}",
-                border_style="green" if status == "accepted" else "yellow",
-            )
-        )
-    else:
+    if not isinstance(result, dict):
         console.print(JSON.from_data(result))
+        return
+
+    status = result.get("status", "started")
+    lines = [f"[bold]Status[/bold] {status}"]
+
+    if result.get("turn"):
+        lines.append(f"[bold]Turn[/bold] {result['turn']}")
+
+    if result.get("label"):
+        lines.append(f"[bold]Label[/bold] {result['label']}")
+
+    if result.get("definition_path"):
+        lines.append(f"[bold]Source[/bold] {result['definition_path']}")
+
+    instance = result.get("instance")
+    if isinstance(instance, dict):
+        status_label, status_detail = _describe_instance_status(instance.get("status"))
+        progress_detail = _describe_progress(instance.get("progress"))
+        detail_parts = [status_detail, progress_detail]
+        details = " | ".join(part for part in detail_parts if part)
+
+        state = instance.get("state") or (
+            instance.get("progress", {}).get("state")
+            if isinstance(instance.get("progress"), dict)
+            else None
+        )
+
+        lines.append(
+            f"[bold]Instance[/bold] {instance.get('id', '?')} [{status_label}]"
+        )
+        lines.append(
+            f"[bold]Program[/bold] {_describe_program(instance.get('program'), instance.get('program_name'))}"
+        )
+        if state:
+            lines.append(f"[bold]State[/bold] {state}")
+        if details:
+            lines.append(f"[bold]Details[/bold] {details}")
+
+    console.print(
+        Panel(
+            "\n".join(lines),
+            border_style="green" if status in {"started", "accepted"} else "yellow",
+        )
+    )
 
 
 def _print_reaction_register(result: Any) -> None:
@@ -1788,6 +1948,88 @@ def _summarize_value(value: Any, max_length: int = 80) -> str:
     return text
 
 
+def _short_source(source: Any, limit: int = 60) -> str:
+    if not isinstance(source, str):
+        return _summarize_value(source, max_length=limit)
+
+    stripped = source.strip()
+    if not stripped:
+        return "-"
+
+    first_line = stripped.splitlines()[0]
+    if len(first_line) > limit:
+        return f"{first_line[: limit - 3]}..."
+    return first_line
+
+
+def _describe_wait(wait: Any) -> str:
+    if not isinstance(wait, dict):
+        return _summarize_value(wait, max_length=60)
+
+    wait_type = wait.get("type")
+    if wait_type == "signal":
+        label = wait.get("label", "?")
+        return f"signal {label}"
+    if wait_type == "record-field-eq":
+        label = wait.get("label", "?")
+        field = wait.get("field", "?")
+        value = wait.get("value", "?")
+        return f"{label}[{field}] == {value}"
+
+    return _summarize_value(wait, max_length=60)
+
+
+def _describe_instance_status(status: Any) -> Tuple[str, str]:
+    if isinstance(status, dict):
+        state = str(status.get("state", "?"))
+        detail = ""
+        if state == "waiting":
+            detail = _describe_wait(status.get("wait"))
+        elif state == "failed":
+            detail = str(status.get("message", ""))
+        return state, detail
+
+    if isinstance(status, str):
+        return status, ""
+
+    return str(status), ""
+
+
+def _describe_program(program: Any, program_name: Any) -> str:
+    if isinstance(program, dict):
+        kind = program.get("type")
+        if kind == "definition":
+            identifier = program.get("id", "?")
+            if program_name:
+                return f"definition:{identifier} ({program_name})"
+            return f"definition:{identifier}"
+        if kind == "inline":
+            return f"inline: {_short_source(program.get('source', ''), limit=40)}"
+
+    if program_name:
+        return str(program_name)
+
+    return "-"
+
+
+def _describe_progress(progress: Any) -> str:
+    if not isinstance(progress, dict):
+        return ""
+
+    waiting = progress.get("waiting")
+    if waiting:
+        return _describe_wait(waiting)
+
+    if progress.get("entry_pending"):
+        return "entry actions pending"
+
+    frame_depth = progress.get("frame_depth")
+    if isinstance(frame_depth, int) and frame_depth > 0:
+        return f"frames {frame_depth}"
+
+    return ""
+
+
 def _print_operation_result(result: Any, operation: str) -> None:
     if isinstance(result, dict):
         title = "[bold green]Success[/bold green]"
@@ -1910,6 +2152,12 @@ def _print_unexpected_error(exc: Exception) -> None:
     )
 
 
+@transcript_app.callback(invoke_without_command=True)
+def transcript_group(ctx: typer.Context) -> None:
+    if ctx.invoked_subcommand is None:
+        _show_group_help(ctx)
+
+
 @transcript_app.command("show")
 def transcript_show(
     ctx: typer.Context,
@@ -1972,6 +2220,12 @@ def transcript_export(
             destination=output,
         )
     )
+
+
+@workflow_app.callback(invoke_without_command=True)
+def workflow_group(ctx: typer.Context) -> None:
+    if ctx.invoked_subcommand is None:
+        _show_group_help(ctx)
 
 
 @workflow_app.command("list")

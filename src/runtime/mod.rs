@@ -64,6 +64,8 @@ use snapshot::SnapshotManager;
 use storage::Storage;
 use turn::{BranchId, TurnInput, TurnOutput};
 
+use crate::interpreter::protocol::{NOTIFY_MESSAGE_LABEL, wait_record_from_value};
+use crate::runtime::turn::{ActorId, FacetId};
 use actor::Actor;
 use error::{ActorError, StorageError};
 use reaction::{ReactionDefinition, ReactionId, ReactionInfo, ReactionStore, StoredReaction};
@@ -336,24 +338,29 @@ impl Runtime {
         let clock = scheduled_turn.clock;
         let inputs = scheduled_turn.inputs;
 
-        // Get or create actor
-        let actor = self
-            .actors
-            .entry(actor_id.clone())
-            .or_insert_with(|| Actor::new(actor_id.clone()));
+        // Execute the turn and apply its delta to the hosting actor.
+        let (outputs, delta) = {
+            let actor = self
+                .actors
+                .entry(actor_id.clone())
+                .or_insert_with(|| Actor::new(actor_id.clone()));
 
-        // Execute the turn
-        let (outputs, delta) = actor
-            .execute_turn(inputs.clone(), Some(&self.async_sender))
-            .map_err(|e| error::RuntimeError::Actor(e))?;
+            let (outputs, delta) = actor
+                .execute_turn(inputs.clone(), Some(&self.async_sender))
+                .map_err(|e| error::RuntimeError::Actor(e))?;
+            actor.apply_delta(&delta);
+            (outputs, delta)
+        };
 
         // Update flow control in scheduler (before consuming delta)
         let borrowed = delta.accounts.borrowed;
         let repaid = delta.accounts.repaid;
         self.scheduler.update_account(&actor_id, borrowed, repaid);
 
-        // Apply the delta to in-memory actor state so subsequent turns see the new data
-        actor.apply_delta(&delta);
+        self.dispatch_turn_outputs(&outputs);
+
+        // Notify interpreter entities about new assertions.
+        self.notify_interpreters(&delta);
 
         // Build turn record with parent turn tracking
         let parent = self.last_turn_per_actor.get(&actor_id).cloned();
@@ -393,6 +400,93 @@ impl Runtime {
         self.record_branch_head(self.current_branch.clone(), turn_id.clone());
 
         Ok(Some(turn_record))
+    }
+
+    fn dispatch_turn_outputs(&mut self, outputs: &[TurnOutput]) {
+        for output in outputs {
+            if let TurnOutput::Message {
+                target_actor,
+                target_facet,
+                payload,
+            } = output
+            {
+                let input = TurnInput::ExternalMessage {
+                    actor: target_actor.clone(),
+                    facet: target_facet.clone(),
+                    payload: payload.clone(),
+                };
+
+                self.scheduler
+                    .enqueue(target_actor.clone(), input, ScheduleCause::Message);
+            }
+        }
+    }
+
+    fn notify_interpreters(&mut self, delta: &state::StateDelta) {
+        if delta.assertions.added.is_empty() {
+            return;
+        }
+
+        let interpreter_entities: Vec<(ActorId, FacetId)> = self
+            .entity_manager()
+            .entities
+            .values()
+            .filter(|meta| meta.entity_type == "interpreter")
+            .map(|meta| (meta.actor.clone(), meta.facet.clone()))
+            .collect();
+
+        if interpreter_entities.is_empty() {
+            return;
+        }
+
+        let mut actor_wait_map = HashMap::new();
+        for (actor_id, _) in &interpreter_entities {
+            let has_waits = self.interpreter_actor_has_waits(actor_id);
+            actor_wait_map.insert(actor_id.clone(), has_waits);
+        }
+
+        if actor_wait_map.values().all(|has| !has) {
+            return;
+        }
+
+        for (_, _, value, _) in &delta.assertions.added {
+            for (actor_id, facet_id) in interpreter_entities.iter() {
+                if !actor_wait_map.get(actor_id).copied().unwrap_or(false) {
+                    continue;
+                }
+
+                let payload = preserves::IOValue::record(
+                    preserves::IOValue::symbol(NOTIFY_MESSAGE_LABEL),
+                    vec![value.clone()],
+                );
+
+                self.scheduler.enqueue(
+                    actor_id.clone(),
+                    TurnInput::ExternalMessage {
+                        actor: actor_id.clone(),
+                        facet: facet_id.clone(),
+                        payload,
+                    },
+                    ScheduleCause::Message,
+                );
+            }
+        }
+    }
+
+    fn interpreter_actor_has_waits(&self, actor_id: &ActorId) -> bool {
+        let actor = match self.actors.get(actor_id) {
+            Some(actor) => actor,
+            None => return false,
+        };
+
+        let assertions = actor.assertions.read();
+        for ((assert_actor, _), (value, _)) in assertions.active.iter() {
+            if assert_actor == actor_id && wait_record_from_value(value).is_some() {
+                return true;
+            }
+        }
+
+        false
     }
 
     /// Step the runtime forward by one turn

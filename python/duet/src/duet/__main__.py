@@ -1,7 +1,7 @@
 """Entry point for the Duet CLI."""
 
-from .cli import main as _main
+from .cli import main_entrypoint
 
 
 if __name__ == "__main__":  # pragma: no cover - exercised manually
-    raise SystemExit(_main())
+    main_entrypoint()

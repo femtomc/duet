@@ -60,7 +60,7 @@ Example (pseudocode; concrete grammar below):
         :template "Please implement the following plan:\n~a"
         :args ((signal-value plan/summary :scope @workflow-id))
         :tag handoff-request))
-    (await (transcript-response :tag handoff-request)))
+    (await (record agent-response :field 0 :equals handoff-request)))
 
   (state review
     (loop
@@ -70,7 +70,7 @@ Example (pseudocode; concrete grammar below):
           :template "Review implementer's diff:\n~a"
           :args ((last-artifact implementer))
           :tag review-request))
-      (await (transcript-response :tag review-request))
+      (await (record agent-response :field 0 :equals review-request))
 
       (branch
         (when (signal review/satisfied :scope @workflow-id)
@@ -82,7 +82,7 @@ Example (pseudocode; concrete grammar below):
               :template "Planner feedback:\n~a"
               :args ((transcript extract-feedback review-request))
               :tag implementer-fix))
-          (await (transcript-response :tag implementer-fix))))))
+          (await (record agent-response :field 0 :equals implementer-fix))))))
 
   (state complete
     (enter (emit (log "Workflow finished")))
@@ -94,7 +94,7 @@ Example (pseudocode; concrete grammar below):
 * `@workflow-id` is a placeholder substitution inserted by the interpreter to scope signals.
 * `signal` expressions refer to dataspace assertions; the interpreter waits for them.
 * `send-prompt` emits a `send_message` command; templates interpolate runtime values.
-* `await transcript-response` watches for `agent-response` assertions with the specified request id.
+* `await (record agent-response :field 0 :equals ...)` watches for `agent-response` assertions tagged with the supplied identifier.
 
 ## Interpreter Expectations
 
@@ -105,7 +105,7 @@ Example (pseudocode; concrete grammar below):
    * Reacts to new instances.
    * Asserts `workflow/state` updates with step name, status, awaited condition.
    * Executes actions (send messages, invoke capabilities) via the existing Control interface.
-   * Watches for assertions that satisfy waits (`signal`, `transcript-response`, future `tool-result`).
+   * Watches for assertions that satisfy waits (`signal`, `record`, future `tool-result`).
    * Emits `workflow/log` entries summarising progress/errors.
 
 ## Core Forms (Draft)
@@ -127,7 +127,7 @@ Example (pseudocode; concrete grammar below):
 Conditions (non-exhaustive):
 
 * `(signal <label> :scope … :fields …)` – waits for an assertion with the given label and optional filters.
-* `(transcript-response :tag <id>)` – waits for an `agent-response` tied to a request tag emitted by `send-prompt`.
+* `(record <label> :field <index> :equals <value>)` – waits for a dataspace record whose field matches the supplied value (e.g. agent responses tagged by request id).
 * `(tool-result :tag <id>)` – future extension for capability completions.
 
 Actions (non-exhaustive):

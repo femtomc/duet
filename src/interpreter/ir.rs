@@ -1,7 +1,12 @@
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+use crate::interpreter::ProgramRef;
+
+use super::value::{Value, ValueExpr};
+
 /// Fully validated interpreter program ready for execution.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProgramIr {
     /// Program identifier.
     pub name: String,
@@ -11,10 +16,12 @@ pub struct ProgramIr {
     pub roles: Vec<RoleBinding>,
     /// Ordered state machine for the program.
     pub states: Vec<State>,
+    /// Function definitions available to the runtime.
+    pub functions: Vec<Function>,
 }
 
 /// Binding between a logical role and its properties.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RoleBinding {
     /// Role name referenced by the program.
     pub name: String,
@@ -23,7 +30,7 @@ pub struct RoleBinding {
 }
 
 /// A named state in the program's state machine.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct State {
     /// Unique state name.
     pub name: String,
@@ -36,7 +43,7 @@ pub struct State {
 }
 
 /// Instructions allowed within a state body.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Instruction {
     /// Perform an action immediately.
     Action(Action),
@@ -53,10 +60,17 @@ pub enum Instruction {
     Loop(Vec<Instruction>),
     /// Transition to another named state.
     Transition(String),
+    /// Invoke a function by index with resolved argument values.
+    Call {
+        /// Function index inside `ProgramIr::functions`.
+        function: usize,
+        /// Resolved argument values supplied to the call.
+        args: Vec<Value>,
+    },
 }
 
 /// One arm of a conditional branch.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BranchArm {
     /// Condition to evaluate for this arm.
     pub condition: Condition,
@@ -65,17 +79,8 @@ pub struct BranchArm {
 }
 
 /// Primitive actions emitted by interpreter programs.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Action {
-    /// Send a prompt to a role-bound agent.
-    SendPrompt {
-        /// Role to deliver the prompt to.
-        agent_role: String,
-        /// Template text for the prompt (arguments handled later).
-        template: String,
-        /// Optional tag correlating the prompt with later responses.
-        tag: Option<String>,
-    },
     /// Invoke a capability exposed by another entity.
     InvokeTool {
         /// Role responsible for the invocation (e.g., workspace entity).
@@ -85,21 +90,141 @@ pub enum Action {
         /// Optional correlation tag.
         tag: Option<String>,
     },
+    /// Send a message to another actor/facet.
+    Send {
+        /// Target actor identifier (UUID string).
+        actor: String,
+        /// Target facet identifier (UUID string).
+        facet: String,
+        /// Payload to deliver.
+        payload: Value,
+    },
+    /// Observe a dataspace signal and run a handler program when it appears.
+    Observe {
+        /// Signal label to watch for.
+        label: String,
+        /// Program to run each time the signal is observed.
+        handler: ProgramRef,
+    },
+    /// Spawn a child facet (optionally under a specific parent).
+    Spawn {
+        /// Optional parent facet identifier; defaults to current facet when `None`.
+        parent: Option<String>,
+    },
+    /// Terminate a facet by identifier.
+    Stop {
+        /// Facet identifier (UUID string) to terminate.
+        facet: String,
+    },
     /// Emit a diagnostic log string.
-    EmitLog(String),
-    /// Assert a value into the dataspace (encoded as text for now).
-    Assert(String),
-    /// Retract a value from the dataspace (encoded as text for now).
-    Retract(String),
+    Log(String),
+    /// Assert a structured value into the dataspace.
+    Assert(Value),
+    /// Retract a structured value from the dataspace.
+    Retract(Value),
+}
+
+/// Function definition stored in the IR.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Function {
+    /// Function name.
+    pub name: String,
+    /// Parameter names in order.
+    pub params: Vec<String>,
+    /// Compiled instruction templates (instantiated at call time).
+    pub body: Vec<InstructionTemplate>,
+}
+
+/// Instruction template used inside function bodies.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum InstructionTemplate {
+    /// Template action.
+    Action(ActionTemplate),
+    /// Wait condition (no templating required).
+    Await(WaitConditionTemplate),
+    /// Branch with templated bodies.
+    Branch {
+        arms: Vec<BranchArmTemplate>,
+        otherwise: Option<Vec<InstructionTemplate>>,
+    },
+    /// Loop with templated body.
+    Loop(Vec<InstructionTemplate>),
+    /// Transition (no templating required).
+    Transition(String),
+    /// Nested function call awaiting instantiation.
+    Call {
+        function: usize,
+        args: Vec<ValueExpr>,
+    },
+}
+
+/// Branch arm template.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BranchArmTemplate {
+    /// Condition is fully concrete (no parameter support yet).
+    pub condition: Condition,
+    /// Body instructions to instantiate.
+    pub body: Vec<InstructionTemplate>,
+}
+
+/// Action template capable of referencing parameters.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum ActionTemplate {
+    InvokeTool {
+        role: String,
+        capability: String,
+        tag: Option<String>,
+    },
+    Send {
+        actor: String,
+        facet: String,
+        payload: ValueExpr,
+    },
+    Observe {
+        label: String,
+        handler: ProgramRef,
+    },
+    Spawn {
+        parent: Option<String>,
+    },
+    Stop {
+        facet: String,
+    },
+    Log(String),
+    Assert(ValueExpr),
+    Retract(ValueExpr),
+}
+
+/// Templated wait condition that may reference parameters.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum WaitConditionTemplate {
+    /// Wait for a record field to match a value expression.
+    RecordFieldEq {
+        /// Record label to match.
+        label: String,
+        /// Field index that must equal the resolved value.
+        field: usize,
+        /// Value expression resolved at call time.
+        value: ValueExpr,
+    },
+    /// Wait for a dataspace signal label.
+    Signal {
+        /// Signal label to match.
+        label: String,
+    },
 }
 
 /// Conditions that may be awaited.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum WaitCondition {
-    /// Wait for an agent transcript response matching the tag.
-    TranscriptResponse {
-        /// Correlation tag (typically emitted by `send-prompt`).
-        tag: String,
+    /// Wait for a dataspace record whose field equals the provided value.
+    RecordFieldEq {
+        /// Record label to match.
+        label: String,
+        /// Positional field index that must equal the supplied value.
+        field: usize,
+        /// Expected field value.
+        value: Value,
     },
     /// Wait for a generic dataspace signal (label match).
     Signal {
@@ -109,7 +234,7 @@ pub enum WaitCondition {
 }
 
 /// Conditional expressions used in branches.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Condition {
     /// Await a dataspace assertion labelled accordingly.
     Signal {

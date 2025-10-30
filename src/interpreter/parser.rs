@@ -138,7 +138,9 @@ impl<'a> Parser<'a> {
             match ch {
                 b'"' => return Ok(Expr::String(buf)),
                 b'\\' => {
-                    let escaped = self.current().ok_or_else(|| self.error("incomplete escape"))?;
+                    let escaped = self
+                        .current()
+                        .ok_or_else(|| self.error("incomplete escape"))?;
                     self.advance();
                     let value = match escaped {
                         b'"' => '"',
@@ -146,7 +148,9 @@ impl<'a> Parser<'a> {
                         b'n' => '\n',
                         b'r' => '\r',
                         b't' => '\t',
-                        other => return Err(self.error(&format!("unknown escape: \\{}", other as char))),
+                        other => {
+                            return Err(self.error(&format!("unknown escape: \\{}", other as char)));
+                        }
                     };
                     buf.push(value);
                 }

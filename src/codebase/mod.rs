@@ -438,9 +438,7 @@ pub fn parse_agent_response(value: &preserves::IOValue) -> Option<AgentResponse>
     };
 
     let role = if record.len() > 5 {
-        record
-            .field_symbol(5)
-            .or_else(|| record.field_string(5))
+        record.field_symbol(5).or_else(|| record.field_string(5))
     } else {
         None
     };
