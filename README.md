@@ -13,11 +13,12 @@
 `duet` is a (CLI tool, programming language, actor model runtime) system designed
 to make collaborative work with agents ergonomic, auditable, and reversible.
 
-First things first: I (an opinionated PhD student) built this _because I myself want to use it_, 
-not because I want to sell you something. That's great: because of that, you can trust I'm not bullshitting you. 
-You can also trust that if this turns out to be trash software, I'll archive this shit faster than you can say Series A.
+> Given the absurdity of economic investment in dumb AI ideas, I feel the need to say this: 
+> I (an opinionated PhD student) built this _because I myself want to use it_, 
+> not because I want to sell you something. That's great: because of that, you can trust I'm not bullshitting you. 
+> You can also trust that if this turns out to be trash software, I'll archive this shit faster than you can say Series A.
 
-It's concerned with treating the act of collaborating with agents as a programmable conversation:
+Now, back to the tool: `duet` is concerned with treating the act of collaborating with agents as a programmable conversation:
 - Have you ever wanted to orchestrate several agents to work together in a team,
   where each agent has a specialized role (prompt), and the agents communicate together
   at your direction?
