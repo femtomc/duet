@@ -236,7 +236,7 @@ impl Control {
         let pattern_id = pattern.id;
 
         // Snapshot metadata to determine actor + facet
-        let (actor_id, entity_facet) = {
+        let (_actor_id, entity_facet) = {
             let metadata =
                 self.runtime
                     .entity_manager()
@@ -258,27 +258,8 @@ impl Control {
             ));
         }
 
-        // Ensure actor exists and register the pattern
-        let actor = self
-            .runtime
-            .actors
-            .entry(actor_id.clone())
-            .or_insert_with(|| Actor::new(actor_id.clone()));
-
-        actor.register_pattern(pattern.clone());
-
-        // Persist pattern definition
-        if let Some(metadata) = self
-            .runtime
-            .entity_manager_mut()
-            .entities
-            .get_mut(&entity_id)
-        {
-            metadata.patterns.push(pattern);
-        }
-
-        // Persist entity metadata
-        self.runtime.persist_entities()?;
+        self.runtime
+            .register_pattern_for_entity(entity_id, pattern.clone())?;
 
         Ok(pattern_id)
     }

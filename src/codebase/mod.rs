@@ -15,6 +15,7 @@ use chrono::{DateTime, Utc};
 use preserves::ValueImpl;
 use serde::Serialize;
 
+use crate::interpreter::entity::InterpreterEntity;
 use crate::runtime::actor::{Activation, Entity, HydratableEntity};
 use crate::runtime::control::Control;
 use crate::runtime::error::{ActorError, ActorResult, Result as RuntimeResult, RuntimeError};
@@ -42,6 +43,7 @@ pub fn register_codebase_entities() {
         let catalog = EntityCatalog::global();
 
         workspace::register(catalog);
+        InterpreterEntity::register(catalog);
         agent::claude::register(catalog);
         agent::codex::register(catalog);
         agent::harness::register(catalog);
@@ -137,6 +139,8 @@ pub struct AgentHandle {
 /// Structured representation of an agent response.
 #[derive(Debug, Clone, Serialize)]
 pub struct AgentResponse {
+    /// Agent entity identifier that produced the response.
+    pub agent_id: String,
     /// Request identifier that triggered the response.
     pub request_id: String,
     /// Prompt supplied with the request.
@@ -333,6 +337,7 @@ fn ensure_agent(
         pattern: preserves::IOValue::record(
             preserves::IOValue::symbol(agent::REQUEST_LABEL),
             vec![
+                preserves::IOValue::new(entity_id.to_string()),
                 preserves::IOValue::symbol("<_>"),
                 preserves::IOValue::symbol("<_>"),
             ],
@@ -360,6 +365,7 @@ fn invoke_agent(
     let message = preserves::IOValue::record(
         preserves::IOValue::symbol(agent::REQUEST_LABEL),
         vec![
+            preserves::IOValue::new(handle.entity_id.to_string()),
             preserves::IOValue::new(request_id.clone()),
             preserves::IOValue::new(prompt.to_string()),
         ],
@@ -384,7 +390,7 @@ pub fn list_agent_responses(control: &Control, handle: &AgentHandle) -> Vec<Agen
         .list_assertions_for_actor(&handle.actor)
         .into_iter()
         .filter_map(|(_handle, value)| parse_agent_response(&value))
-        .filter(|resp| resp.agent == handle.kind)
+        .filter(|resp| resp.agent == handle.kind && resp.agent_id == handle.entity_id.to_string())
         .collect()
 }
 
@@ -478,34 +484,36 @@ fn agent_handle(control: &Control, kind: &str) -> Option<AgentHandle> {
 /// Attempt to interpret a preserves payload as an agent response.
 pub fn parse_agent_response(value: &preserves::IOValue) -> Option<AgentResponse> {
     let record = record_with_label(value, agent::RESPONSE_LABEL)?;
-    if record.len() < 4 {
+    if record.len() < 5 {
         return None;
     }
 
-    let request_id = record.field_string(0)?;
-    let prompt = record.field_string(1)?;
-    let response = record.field_string(2)?;
-    let agent_kind = record.field_symbol(3).unwrap_or_default();
+    let agent_id = record.field_string(0)?;
+    let request_id = record.field_string(1)?;
+    let prompt = record.field_string(2)?;
+    let response = record.field_string(3)?;
+    let agent_kind = record.field_symbol(4).unwrap_or_default();
 
-    let timestamp = if record.len() > 4 {
-        record.field_timestamp(4)
+    let timestamp = if record.len() > 5 {
+        record.field_timestamp(5)
     } else {
         None
     };
 
-    let role = if record.len() > 5 {
-        record.field_symbol(5).or_else(|| record.field_string(5))
+    let role = if record.len() > 6 {
+        record.field_symbol(6).or_else(|| record.field_string(6))
     } else {
         None
     };
 
-    let tool = if record.len() > 6 {
-        record.field_string(6)
+    let tool = if record.len() > 7 {
+        record.field_string(7)
     } else {
         None
     };
 
     Some(AgentResponse {
+        agent_id,
         request_id,
         prompt,
         response,

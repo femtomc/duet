@@ -4,6 +4,7 @@
 //! and state deltas for a single deterministic execution step. Turn IDs are
 //! computed deterministically from inputs using Blake3 hashing.
 
+use super::pattern::Pattern;
 use super::state::{CapId, CapabilityTarget, StateDelta};
 use blake3::Hasher;
 use chrono::{DateTime, Utc};
@@ -347,6 +348,14 @@ pub enum TurnOutput {
         capability: CapId,
     },
 
+    /// Pattern subscription registered during this turn
+    PatternRegistered {
+        /// Entity that owns the subscription
+        entity_id: Uuid,
+        /// Registered pattern definition
+        pattern: Pattern,
+    },
+
     /// Capability invocation requested during this turn
     CapabilityInvoke {
         /// Capability identifier to invoke
@@ -377,6 +386,20 @@ pub enum TurnOutput {
         link: bool,
         /// Entity instance that invoked the spawn (if any)
         issuer_entity: Option<Uuid>,
+    },
+
+    /// Entity attached to an existing actor/facet during this turn
+    EntityAttached {
+        /// Actor receiving the new entity
+        actor: ActorId,
+        /// Facet the entity was attached to
+        facet: FacetId,
+        /// Entity instance identifier
+        entity_id: Uuid,
+        /// Entity type identifier
+        entity_type: String,
+        /// Entity configuration payload
+        config: preserves::IOValue,
     },
 
     /// Result emitted after invoking a capability

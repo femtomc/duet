@@ -65,7 +65,7 @@ pub enum Instruction {
         /// Function index inside `ProgramIr::functions`.
         function: usize,
         /// Resolved argument values supplied to the call.
-        args: Vec<Value>,
+        args: Vec<ValueExpr>,
     },
 }
 
@@ -123,6 +123,26 @@ pub enum Action {
         agent_kind: Option<String>,
         /// Optional configuration payload supplied to the entity.
         config: Option<Value>,
+    },
+    /// Attach an entity to an existing facet within the current actor.
+    AttachEntity {
+        /// Role whose properties will be updated with the attached entity identifiers.
+        role: String,
+        /// Optional facet identifier (UUID string) to attach to; defaults to current facet.
+        facet: Option<String>,
+        /// Explicit entity type identifier, when provided.
+        entity_type: Option<String>,
+        /// Agent kind identifier, used to derive the entity type when supplied.
+        agent_kind: Option<String>,
+        /// Optional configuration payload supplied to the entity.
+        config: Option<Value>,
+    },
+    /// Generate a request identifier for a role and store it as a property.
+    GenerateRequestId {
+        /// Role whose request counter should be incremented.
+        role: String,
+        /// Property name that will store the generated identifier.
+        property: String,
     },
     /// Terminate a facet by identifier.
     Stop {
@@ -190,8 +210,8 @@ pub enum ActionTemplate {
         tag: Option<String>,
     },
     Send {
-        actor: String,
-        facet: String,
+        actor: ValueExpr,
+        facet: ValueExpr,
         payload: ValueExpr,
     },
     Observe {
@@ -206,6 +226,17 @@ pub enum ActionTemplate {
         entity_type: Option<String>,
         agent_kind: Option<String>,
         config: Option<ValueExpr>,
+    },
+    AttachEntity {
+        role: String,
+        facet: Option<ValueExpr>,
+        entity_type: Option<String>,
+        agent_kind: Option<String>,
+        config: Option<ValueExpr>,
+    },
+    GenerateRequestId {
+        role: String,
+        property: String,
     },
     Stop {
         facet: String,

@@ -81,6 +81,24 @@ impl Entity for ToolCapabilityEntity {
     }
 }
 
+struct LocalEchoEntity;
+
+impl Entity for LocalEchoEntity {
+    fn on_message(&self, activation: &mut Activation, payload: &IOValue) -> ActorResult<()> {
+        if payload
+            .label()
+            .as_symbol()
+            .map(|sym| sym.as_ref() == "ping")
+            .unwrap_or(false)
+        {
+            let record =
+                IOValue::record(IOValue::symbol("attached-handled"), vec![payload.clone()]);
+            activation.assert(Handle::new(), record);
+        }
+        Ok(())
+    }
+}
+
 static REGISTER_ENTITIES: Once = Once::new();
 
 fn ensure_entities_registered() {
@@ -91,6 +109,7 @@ fn ensure_entities_registered() {
         catalog.register("test-tool", |config| {
             Ok(Box::new(ToolCapabilityEntity::from_config(config.clone())))
         });
+        catalog.register("test-local", |_config| Ok(Box::new(LocalEchoEntity)));
     });
 }
 
@@ -357,4 +376,79 @@ fn interpreter_tool_invocation_roundtrip() {
         .find(|record| matches!(record.status, InstanceStatus::Completed));
 
     assert!(completed.is_some(), "interpreter instance should complete");
+}
+
+#[test]
+fn interpreter_attach_entity_observes_local_assertions() {
+    ensure_entities_registered();
+
+    let temp_dir = TempDir::new().unwrap();
+    let config = RuntimeConfig {
+        root: temp_dir.path().to_path_buf(),
+        snapshot_interval: 5,
+        flow_control_limit: 100,
+        debug: false,
+    };
+
+    let mut control = Control::init(config).unwrap();
+
+    let interpreter_actor = ActorId::new();
+    let interpreter_facet = FacetId::new();
+
+    control
+        .register_entity(
+            interpreter_actor.clone(),
+            interpreter_facet.clone(),
+            "interpreter".to_string(),
+            IOValue::symbol("unused"),
+        )
+        .unwrap();
+
+    let program = r#"(workflow attach-local)
+(roles (helper :label "Helper"))
+(defn send-ping (actor facet)
+  (action (send :actor actor
+                :facet facet
+                :value (record ping "hello"))))
+(state start
+  (attach-entity :role helper :entity-type "test-local")
+  (send-ping (role-property helper "actor")
+             (role-property helper "facet"))
+  (await (record attached-handled :field 0 :equals (record ping "hello")))
+  (terminal))"#;
+
+    let run_payload = IOValue::record(
+        IOValue::symbol(RUN_MESSAGE_LABEL),
+        vec![IOValue::new(program.to_string())],
+    );
+
+    {
+        let runtime = control.runtime_mut();
+        runtime.send_message(
+            interpreter_actor.clone(),
+            interpreter_facet.clone(),
+            run_payload,
+        );
+        runtime
+            .step()
+            .unwrap()
+            .expect("turn should execute for interpreter run");
+    }
+
+    control.step(10).unwrap();
+
+    let assertions = control
+        .runtime()
+        .assertions_for_actor(&interpreter_actor)
+        .expect("interpreter assertions");
+
+    let handled = assertions.iter().any(|(_, value)| {
+        value
+            .label()
+            .as_symbol()
+            .map(|sym| sym.as_ref() == "attached-handled")
+            .unwrap_or(false)
+    });
+
+    assert!(handled, "attached entity should observe local assertions");
 }

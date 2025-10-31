@@ -20,8 +20,8 @@ program defines:
 * **Signals** – dataspace assertions that notify the interpreter when to advance.
 
 Programs execute deterministically: the interpreter entity materialises actions
-as control-plane requests (send message, invoke capability, emit assertion) and
-waits until the declared conditions occur in the dataspace.
+as activation outputs (messages, capability invocations, dataspace assertions)
+and waits until the declared conditions occur in the dataspace.
 
 Persistence, time-travel, and branching remain automatic; workflow execution is
 just another stream of turns.
@@ -60,7 +60,7 @@ Example (pseudocode; concrete grammar below):
         :template "Please implement the following plan:\n~a"
         :args ((signal-value plan/summary :scope @workflow-id))
         :tag handoff-request))
-    (await (record agent-response :field 0 :equals handoff-request)))
+    (await (record agent-response :field 1 :equals handoff-request)))
 
   (state review
     (loop
@@ -70,7 +70,7 @@ Example (pseudocode; concrete grammar below):
           :template "Review implementer's diff:\n~a"
           :args ((last-artifact implementer))
           :tag review-request))
-      (await (record agent-response :field 0 :equals review-request))
+      (await (record agent-response :field 1 :equals review-request))
 
       (branch
         (when (signal review/satisfied :scope @workflow-id)
@@ -82,7 +82,7 @@ Example (pseudocode; concrete grammar below):
               :template "Planner feedback:\n~a"
               :args ((transcript extract-feedback review-request))
               :tag implementer-fix))
-          (await (record agent-response :field 0 :equals implementer-fix))))))
+          (await (record agent-response :field 1 :equals implementer-fix))))))
 
   (state complete
     (enter (log "Workflow finished"))
@@ -94,7 +94,7 @@ Example (pseudocode; concrete grammar below):
 * `@workflow-id` is a placeholder substitution inserted by the interpreter to scope signals.
 * `signal` expressions refer to dataspace assertions; the interpreter waits for them.
 * `send-prompt` emits a `send_message` command; templates interpolate runtime values.
-* `await (record agent-response :field 0 :equals ...)` watches for `agent-response` assertions tagged with the supplied identifier.
+* `await (record agent-response :field 1 :equals ...)` watches for `agent-response` assertions tagged with the supplied identifier.
 
 ## Interpreter Expectations
 
@@ -104,7 +104,7 @@ Example (pseudocode; concrete grammar below):
 3. Interpreter entity:
    * Reacts to new instances.
    * Asserts `workflow/state` updates with step name, status, awaited condition.
-   * Executes actions (send messages, invoke capabilities) via the existing Control interface.
+   * Executes actions (send messages, invoke capabilities) directly through the activation context so every effect is part of the turn output stream.
    * Watches for assertions that satisfy waits (`signal`, `record`, future `tool-result`).
    * Emits `workflow/log` entries summarising progress/errors.
 
@@ -142,7 +142,16 @@ Actions (non-exhaustive):
   asserts `(interpreter-entity <instance-id> <role> <actor> <facet> <entity-id> <entity-type> [<agent-kind>] [role-properties …])`
   records for observability. The trailing `role-properties` payload mirrors the
   interpreter’s role bindings so other entities can discover and reuse the
-  spawned actors.
+  spawned actors. When the resolved entity corresponds to a Duet agent, the
+  interpreter also registers a wildcard `agent-request` pattern on the new
+  facet so prompts flow to the agent without extra plumbing.
+* `(attach-entity :role <role> [:facet <uuid>] [:entity-type <id>] [:agent-kind <kind>] [:config <expr>])` –
+  instantiate an entity inside the current actor. By default the entity is
+  attached to the active facet, but you can provide a facet UUID (for example
+  one returned by `(spawn-facet …)`). Role bindings are updated with the
+  interpreter actor/facet identifiers, and when an agent kind is supplied the
+  interpreter automatically registers an `agent-request` pattern so the entity
+  sees local dataspace assertions without spawning a helper actor.
 * `(observe (signal <label> [:scope …]) <handler-program>)` – register a persistent
   observer that runs `handler-program` whenever the dataspace emits the matching
   signal. The interpreter stores observers as
@@ -154,7 +163,7 @@ Actions (non-exhaustive):
 
 `(invoke-tool …)` emits an `interpreter-tool-request` record containing the workflow
 instance id, correlation tag, role metadata, capability alias, capability UUID,
-payload (when provided), and optional role properties. The runtime then
+payload (when provided), and optional role properties. The runtime immediately
 executes the capability and asserts an `interpreter-tool-result` record with the
 same tag:
 
@@ -174,6 +183,44 @@ Expressions available in templates / args may include:
 
 These derive from the standard library modules. The core interpreter only understands
 action/condition skeletons; specific helpers are provided by modules.
+
+### Choosing Between `spawn-entity` and `attach-entity`
+
+Both forms update an interpreter role with freshly created entity metadata, but
+they target different lifetimes:
+
+- Use `(spawn-entity …)` when you want a brand-new actor in the runtime. This
+  matches the default Duet agent experience (each Claude Code instance gets its
+  own actor/facet pair) and is appropriate for remote integrations or anything
+  that should keep state outside the interpreter process.
+- Use `(attach-entity …)` when you want to host a helper entity inside the
+  interpreter’s own actor. Attached entities share the interpreter’s lifecycle
+  and are ideal for lightweight utilities, observers, or mock agents used
+  during testing.
+
+The interpreter records both cases with `(interpreter-entity …)` assertions that
+carry the resolved actor/facet ids. Replay and time-travel hydrate those
+records first, then re-run the corresponding spawn/attach outputs so downstream
+patterns continue to function deterministically.
+
+### Building Helper Functions
+
+Reusable orchestration logic belongs in ordinary functions. For example, the
+two-agent demo defines a single helper that addresses any role:
+
+```
+(defn send-request (role request-id prompt)
+  (action
+    (assert (record agent-request
+                    (role-property role "entity")
+                    request-id
+                    prompt))))
+```
+
+By funnelling prompts through helpers like this, programs avoid duplication
+when introducing more agents or alternate conversation flows. Future standard
+library modules will package common helpers so workflows can `(require
+lang/agents)` instead of redefining them inline.
 
 ## Syntax Reference
 
@@ -204,8 +251,8 @@ end of the line.
 3. **Instantiate** – spawn an interpreter entity per instance with:
    * In-memory state (current state name, pending waits, request tags).
    * Dataspace handles for logging progress.
-4. **Execute** – interpret instructions turn-by-turn, emitting runtime commands
-   via the existing `Control` facade.
+4. **Execute** – interpret instructions turn-by-turn, emitting runtime outputs
+   through the activation context so the journal captures every effect.
 
 An AOT compiler could eventually translate workflows into a set of actors/facets
 without a runtime interpreter, but the first milestone is an interpreter entity

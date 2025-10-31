@@ -6,9 +6,11 @@ fn record_conversion_includes_structure_and_summary() {
     let value = IOValue::record(
         IOValue::symbol("agent-response"),
         vec![
+            IOValue::new("agent-1".to_string()),
             IOValue::new("request-123".to_string()),
             IOValue::new("prompt".to_string()),
             IOValue::new("response".to_string()),
+            IOValue::symbol("claude-code"),
         ],
     );
 
@@ -20,7 +22,7 @@ fn record_conversion_includes_structure_and_summary() {
         obj.get("label").and_then(|v| v.as_str()),
         Some("agent-response")
     );
-    assert_eq!(obj.get("field_count").and_then(|v| v.as_u64()), Some(3));
+    assert_eq!(obj.get("field_count").and_then(|v| v.as_u64()), Some(5));
     assert!(
         obj.get("summary")
             .and_then(|v| v.as_str())
@@ -32,7 +34,7 @@ fn record_conversion_includes_structure_and_summary() {
         .get("fields")
         .and_then(|v| v.as_array())
         .expect("fields array present");
-    assert_eq!(fields.len(), 3);
+    assert_eq!(fields.len(), 5);
     assert_eq!(
         fields[0]
             .as_object()

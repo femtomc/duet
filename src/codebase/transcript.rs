@@ -206,7 +206,7 @@ fn matches_label(value: &IOValue) -> bool {
 
 fn matches_request(value: &IOValue, request_id: &str) -> bool {
     record_with_label(value, agent::RESPONSE_LABEL)
-        .and_then(|record| record.field_string(0))
+        .and_then(|record| record.field_string(1))
         .map(|s| s == request_id)
         .unwrap_or(false)
 }
@@ -253,6 +253,7 @@ pub fn event_batches_payload(chunk: &AssertionEventChunk) -> Vec<Value> {
                                 timestamp,
                                 role,
                                 tool,
+                                ..
                             } = agent_response;
                             let mut transcript = Map::new();
                             transcript.insert("request_id".to_string(), Value::String(request_id));

@@ -156,9 +156,21 @@ impl Actor {
 
     fn process_pending_asserts(&self, activation: &mut Activation) -> ActorResult<()> {
         loop {
+            let pending_patterns = activation.drain_pending_patterns();
+            let had_patterns = !pending_patterns.is_empty();
+            if had_patterns {
+                for pattern in pending_patterns {
+                    let _ = self.register_pattern(pattern);
+                }
+            }
+
             let pending = activation.drain_pending_asserts();
             if pending.is_empty() {
-                break;
+                if !had_patterns {
+                    break;
+                } else {
+                    continue;
+                }
             }
 
             for (handle, value) in pending {
@@ -608,6 +620,9 @@ pub struct Activation {
     /// Assertions emitted locally that still need pattern dispatch
     pending_asserts: Vec<(Handle, preserves::IOValue)>,
 
+    /// Pattern registrations requested during this turn that still need to be applied.
+    pending_patterns: Vec<Pattern>,
+
     /// Facets spawned
     pub facets_spawned: Vec<FacetMetadata>,
 
@@ -650,6 +665,15 @@ pub struct SpawnedEntityRef {
     pub entity_id: Uuid,
 }
 
+/// Handle returned when attaching a new entity within the current actor.
+#[derive(Debug, Clone)]
+pub struct AttachedEntityRef {
+    /// Facet receiving the entity.
+    pub facet: FacetId,
+    /// Unique entity instance identifier.
+    pub entity_id: Uuid,
+}
+
 /// Capability kind required to spawn new entities.
 pub const ENTITY_SPAWN_CAPABILITY_KIND: &str = "entity/spawn";
 
@@ -682,6 +706,7 @@ impl Activation {
             assertions_added: Vec::new(),
             assertions_retracted: Vec::new(),
             pending_asserts: Vec::new(),
+            pending_patterns: Vec::new(),
             facets_spawned: Vec::new(),
             facets_terminated: Vec::new(),
             tokens_borrowed: 0,
@@ -712,6 +737,11 @@ impl Activation {
         self.pending_asserts.drain(..).collect()
     }
 
+    /// Drain pending pattern registrations for immediate application.
+    pub fn drain_pending_patterns(&mut self) -> Vec<Pattern> {
+        self.pending_patterns.drain(..).collect()
+    }
+
     /// Remove the most recently queued pending assertion (used for external inputs)
     pub fn pop_last_pending_assert(&mut self) {
         self.pending_asserts.pop();
@@ -719,6 +749,11 @@ impl Activation {
 
     pub(crate) fn set_current_entity(&mut self, entity: Option<Uuid>) {
         self.current_entity = entity;
+    }
+
+    /// Return the currently executing entity identifier, if any.
+    pub fn current_entity_id(&self) -> Option<Uuid> {
+        self.current_entity
     }
 
     /// Clone the async sender handle, if available.
@@ -886,6 +921,60 @@ impl Activation {
         }
     }
 
+    /// Attach a new entity to the current facet within this actor.
+    pub fn attach_entity(
+        &mut self,
+        entity_type: impl Into<String>,
+        config: preserves::IOValue,
+    ) -> AttachedEntityRef {
+        self.attach_entity_to_facet(self.current_facet.clone(), entity_type, config)
+    }
+
+    /// Attach a new entity to a specific facet within this actor.
+    pub fn attach_entity_to_facet(
+        &mut self,
+        facet: FacetId,
+        entity_type: impl Into<String>,
+        config: preserves::IOValue,
+    ) -> AttachedEntityRef {
+        let entity_type = entity_type.into();
+        let entity_id = self.next_attached_entity_id(&facet);
+
+        self.outputs.push(TurnOutput::EntityAttached {
+            actor: self.actor_id.clone(),
+            facet: facet.clone(),
+            entity_id,
+            entity_type: entity_type.clone(),
+            config: config.clone(),
+        });
+
+        AttachedEntityRef { facet, entity_id }
+    }
+
+    /// Register a pattern on behalf of another entity/facet and emit a turn output.
+    pub fn register_pattern_for_entity(
+        &mut self,
+        entity_id: Uuid,
+        facet: FacetId,
+        pattern_expr: preserves::IOValue,
+    ) -> Uuid {
+        let pattern_id = Uuid::new_v4();
+        let pattern = Pattern {
+            id: pattern_id,
+            pattern: pattern_expr,
+            facet,
+        };
+
+        self.outputs.push(TurnOutput::PatternRegistered {
+            entity_id,
+            pattern: pattern.clone(),
+        });
+
+        self.pending_patterns.push(pattern);
+
+        pattern_id
+    }
+
     fn next_spawn_ids(&mut self) -> (ActorId, FacetId, Uuid) {
         let sequence = self.spawn_counter;
         self.spawn_counter += 1;
@@ -912,6 +1001,18 @@ impl Activation {
         ]);
 
         (child_actor, child_root, entity_uuid)
+    }
+
+    fn next_attached_entity_id(&mut self, facet: &FacetId) -> Uuid {
+        let sequence = self.spawn_counter;
+        self.spawn_counter += 1;
+
+        spawn_uuid(&[
+            self.actor_id.0.as_bytes(),
+            facet.0.as_bytes(),
+            &sequence.to_le_bytes(),
+            b":attached",
+        ])
     }
 
     /// Revoke a capability by identifier

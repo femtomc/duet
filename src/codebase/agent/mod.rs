@@ -1,5 +1,5 @@
 //! Common agent abstractions.
-use preserves::{IOValue, ValueImpl};
+use preserves::IOValue;
 use serde::{Deserialize, Serialize};
 
 use crate::runtime::actor::Entity;
@@ -9,6 +9,23 @@ pub mod claude;
 pub mod codex;
 pub mod harness;
 
+/// System instructions shared by all Duet-managed agents.
+pub const DUET_AGENT_SYSTEM_PROMPT: &str = r#"
+You are the coding agent embedded in the Duet runtime.
+
+Environment constraints:
+- The workspace is mediated by Duet's capabilities; you never run shell commands or edit files yourself.
+- Ask explicitly for information you need (for example: "Please show me READ path/to/file.rs" or "List directory src/").
+- When proposing changes, describe precise edits or provide unified diffs so the runtime can apply them deterministically.
+- Make small, reviewable steps and confirm assumptions before large refactors.
+- Highlight tests or checks the user should run after your changes.
+
+Response style:
+- Work incrementally, thinking aloud when the plan is non-trivial.
+- Use Markdown with clear sections. Finish with a brief summary and next steps for the user.
+- If you are missing context, ask for it instead of guessing.
+"#;
+
 /// Label used for agent request records.
 pub const REQUEST_LABEL: &str = "agent-request";
 /// Label used for agent response records.
@@ -17,6 +34,8 @@ pub const RESPONSE_LABEL: &str = "agent-response";
 /// Represents a single exchange between the runtime and an agent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentExchange {
+    /// Agent entity identifier that produced the response.
+    pub agent_id: String,
     /// Request identifier.
     pub request_id: String,
     /// Prompt delivered to the agent.
@@ -43,6 +62,7 @@ pub fn entity_type_for_kind(kind: &str) -> Option<&'static str> {
 
 /// Shared helper to convert response data into a preserves record payload.
 pub fn response_fields(
+    agent_id: String,
     request_id: String,
     prompt: String,
     response: String,
@@ -52,6 +72,7 @@ pub fn response_fields(
     tool: Option<&str>,
 ) -> Vec<IOValue> {
     let mut fields = vec![
+        IOValue::new(agent_id),
         IOValue::new(request_id),
         IOValue::new(prompt),
         IOValue::new(response),
@@ -71,18 +92,19 @@ pub fn response_fields(
 }
 
 /// Attempt to parse response fields from a preserves value.
-pub fn parse_response_fields(value: &IOValue) -> Option<(String, String, String, String)> {
+pub fn parse_response_fields(value: &IOValue) -> Option<(String, String, String, String, String)> {
     let record = record_with_label(value, RESPONSE_LABEL)?;
-    if record.len() < 4 {
+    if record.len() < 5 {
         return None;
     }
 
-    let request_id = record.field_string(0)?;
-    let prompt = record.field_string(1)?;
-    let response = record.field_string(2)?;
-    let agent_kind = record.field_symbol(3).unwrap_or_default();
+    let agent_id = record.field_string(0)?;
+    let request_id = record.field_string(1)?;
+    let prompt = record.field_string(2)?;
+    let response = record.field_string(3)?;
+    let agent_kind = record.field_symbol(4).unwrap_or_default();
 
-    Some((request_id, prompt, response, agent_kind))
+    Some((agent_id, request_id, prompt, response, agent_kind))
 }
 
 /// Convenience helper for serializing a vector of exchanges.
@@ -95,6 +117,7 @@ pub fn exchanges_to_preserves(exchanges: &[AgentExchange]) -> preserves::IOValue
                 preserves::IOValue::record(
                     preserves::IOValue::symbol("exchange"),
                     vec![
+                        preserves::IOValue::new(exchange.agent_id.clone()),
                         preserves::IOValue::new(exchange.request_id.clone()),
                         preserves::IOValue::new(exchange.prompt.clone()),
                         preserves::IOValue::new(exchange.response.clone()),
@@ -116,16 +139,20 @@ pub fn exchanges_from_preserves(value: &preserves::IOValue) -> Vec<AgentExchange
     for index in 0..history.len() {
         let entry = history.field(index);
         let exchange = match record_with_label(&entry, "exchange") {
-            Some(view) if view.len() >= 3 => view,
+            Some(view) if view.len() >= 4 => view,
             _ => continue,
         };
 
-        let request_id = exchange.field_string(0);
-        let prompt = exchange.field_string(1);
-        let response = exchange.field_string(2);
+        let agent_id = exchange.field_string(0);
+        let request_id = exchange.field_string(1);
+        let prompt = exchange.field_string(2);
+        let response = exchange.field_string(3);
 
-        if let (Some(request_id), Some(prompt), Some(response)) = (request_id, prompt, response) {
+        if let (Some(agent_id), Some(request_id), Some(prompt), Some(response)) =
+            (agent_id, request_id, prompt, response)
+        {
             exchanges.push(AgentExchange {
+                agent_id,
                 request_id,
                 prompt,
                 response,

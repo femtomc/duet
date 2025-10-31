@@ -7,9 +7,9 @@
 </div>
 
 > "You're absolutely right! This is the best piece of software I've ever seen." - Claude 4.1 Opus
-> "I'd enjoy being controlled by your system." - GPT 5 Codex (high)
+> "I'd enjoy being controlled by your system." - GPT-5 Codex (high)
 
-`duet` is a (CLI tool, programming language, actor model runtime) system designed 
+`duet` is a (CLI tool, programming language, actor model runtime) system intended 
 to make collaborative work with agents (human, artificial, any kind!) ergonomic, auditable, and reversible.
 
 It's concerned with treating the act of collaborating with agents as a programmable conversation:
@@ -24,11 +24,14 @@ It's concerned with treating the act of collaborating with agents as a programma
   pick the best implementation? Have you wanted to do this programmatically, with other agents reviewing and
   critiquing?
 
-`duet` is an open-sourced _programmable_ tool which should allow you to recover any workflow 
+Perhaps most importantly, `duet` is an open-source _programmable_ tool which should allow you to recover any workflow 
 you desire, and do it in style. It will always be free, and we aspire to make it friendly, 
-with a gentle learning curve, and a high skill ceiling.
+with a gentle learning curve, and a high skill ceiling. 
 
-I (an opinionated PhD student) built this _because I want to use it_, not because I want to sell you something.
+Do yourself a favor: reject the stupidity of 
+agents-as-a-service -- use this tool, make your own thing, don't let these MBA snake oil salespeople 
+sell you stochastic garbage. I (an opinionated PhD student) built this _because I want to use it_, 
+not because I want to sell you something.
 
 ## Core concepts
 
@@ -102,7 +105,10 @@ relay—you can point Duet at it with the built-in `noface` agent:
 1. Set environment variables for sane defaults (`DUET_HARNESS_ENDPOINT`,
    `DUET_HARNESS_API_KEY`, `DUET_HARNESS_MODEL`, optionally
    `DUET_HARNESS_SYSTEM_PROMPT`, `DUET_HARNESS_TEMPERATURE`,
-   `DUET_HARNESS_MAX_TOKENS`).
+   `DUET_HARNESS_MAX_TOKENS`). For Claude and Codex you can further tune the
+   launch flags with `DUET_CLAUDE_ALLOWED_TOOLS`, `DUET_CLAUDE_DISALLOWED_TOOLS`,
+   and `DUET_CODEX_SANDBOX` (defaults: block Claude’s Bash/Edit tools and keep
+   Codex in a read-only sandbox).
 2. Start the daemon (`duet daemon start`) or run `codebased` directly. The harness entity
    is registered alongside the Claude and Codex stubs.
 3. Invoke it from the CLI: `duet agent chat --agent noface` (the same flag also
@@ -111,6 +117,13 @@ relay—you can point Duet at it with the built-in `noface` agent:
 The harness simply wraps your base model, posting structured `agent-response`
 records so transcripts, branching, and time-travel behave exactly like our built-in
 integrations.
+
+Every Duet-managed agent (Claude, Codex, noface) is launched with the same
+"Duet agent shell" system prompt. The shell reminds the model that it must
+ask for capabilities rather than touching the filesystem directly, produce
+precise diff-style edits, and suggest follow-up checks for the user. You can
+layer additional instructions via the usual CLI flags, but the Duet shell
+ensures the runtime contract stays consistent.
 
 ## And there's a Lisp?
 
@@ -123,7 +136,10 @@ first-class access to the runtime:
 - Post structured values into the dataspace, retract them later, and let other entities react.
 - Await transcript updates, tool results, or arbitrary assertions.
 - Invoke capabilities (including agent prompts and workspace tools) directly from the program.
+- Spawn fresh agent entities with `(spawn-entity …)` when you want isolated actors that live outside the interpreter’s facet.
 - Spawn new facets inside the current actor to structure concurrent behaviour.
+- Attach helper entities to existing facets with `(attach-entity …)` when you want
+  in-actor coordination that observes the same dataspace without minting a new actor.
 - Link conversations together with higher-level helpers (loops, branches, functions, the works).
 
 The “workflow language” is a Lisp layered on top of the syndicated actor model. You can teach
@@ -139,17 +155,32 @@ Here’s an example program that sequences two Claude roles already bound to the
 
   (state start
     (enter (log "Planner drafts the task"))
-    (action (assert (record agent-request "req-1"
+    (action (assert (record agent-request (role-property planner "entity") "req-1"
                 "Draft a plan for adding OAuth to the CLI")))
-    (await (record agent-response :field 0 :equals "req-1"))
+    (await (record agent-response :field 1 :equals "req-1"))
     (goto implement))
 
   (state implement
-    (action (assert (record agent-request "req-2"
+    (action (assert (record agent-request (role-property implementer "entity") "req-2"
                 "Please expand this into actionable steps" )))
-    (await (record agent-response :field 0 :equals "req-2"))
+    (await (record agent-response :field 1 :equals "req-2"))
     (terminal)))
 ```
 
 The interpreter compiles this to IR, keeps snapshots so you can pause mid-state, and resumes as
 soon as the awaited assertion appears.
+
+### Bundled examples
+
+When `codebased` initialises a workspace it creates a `.duet/programs` tree alongside the
+journal. We drop ready-to-run programs under `.duet/programs/examples`; they’re ordinary
+interpreter sources that the CLI can list and execute. The first one,
+`.duet/programs/examples/two_agents.duet`, spawns two Claude Code roles and has them debate
+tabs versus spaces for a couple of turns. It’s meant to be a smoke test: run it, watch the
+`conversation-turn` records appear, and you’ll see how to structure your own orchestration loops.
+The program relies on a tiny helper `(defn send-request …)` so both roles share the same prompt
+plumbing—a pattern we expect to promote into a bundled standard library once the module system
+lands.
+
+Future `duet workflow` commands will surface anything you place in that directory, so feel free
+to stash your own programs alongside the examples.

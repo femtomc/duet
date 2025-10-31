@@ -186,6 +186,12 @@ fn append_instruction_literal(
             }
             return Ok(());
         }
+        if let Some(Expr::Symbol(name)) = list.first() {
+            if prototypes.contains_key(name) {
+                target.push(parse_call_literal(list, prototypes)?);
+                return Ok(());
+            }
+        }
     }
     target.push(parse_instruction_literal(expr, prototypes)?);
     Ok(())
@@ -218,8 +224,10 @@ fn parse_instruction_literal(
             }
             return Ok(Instruction::Transition(expect_symbol(&list[1])?));
         }
-        if matches_symbol(list.first(), "call") {
-            return parse_call_literal(list, prototypes);
+        if let Some(Expr::Symbol(name)) = list.first() {
+            if prototypes.contains_key(name) {
+                return parse_call_literal(list, prototypes);
+            }
         }
     }
     Ok(Instruction::Action(parse_action_literal(expr)?))
@@ -269,19 +277,20 @@ fn parse_call_literal(
     list: &[Expr],
     prototypes: &HashMap<String, FunctionPrototype>,
 ) -> Result<Instruction> {
-    if list.len() < 2 {
-        return Err(validation("call expects a function name"));
+    if list.is_empty() {
+        return Err(validation("function call requires a name"));
     }
-    let func_name = expect_symbol(&list[1])?;
+    let func_name = expect_symbol(&list[0])?;
     let prototype = prototypes
         .get(&func_name)
         .ok_or_else(|| validation("unknown function"))?;
-    if prototype.params.len() != list.len() - 2 {
+    if prototype.params.len() != list.len() - 1 {
         return Err(validation("call arity mismatch"));
     }
+    let params = HashSet::new();
     let mut args = Vec::new();
-    for expr in &list[2..] {
-        args.push(parse_value_literal(expr)?);
+    for expr in &list[1..] {
+        args.push(parse_value_expr(expr, &params)?);
     }
     Ok(Instruction::Call {
         function: prototype.index,
@@ -452,6 +461,75 @@ fn parse_action_literal(expr: &Expr) -> Result<Action> {
                 config,
             })
         }
+        "attach-entity" => {
+            let mut role = None;
+            let mut facet = None;
+            let mut entity_type = None;
+            let mut agent_kind = None;
+            let mut config = None;
+            let mut idx = 1;
+            while idx < list.len() {
+                let key = expect_keyword(&list[idx])?;
+                idx += 1;
+                match key.as_str() {
+                    "role" => {
+                        role = Some(expect_symbol(&list[idx])?);
+                        idx += 1;
+                    }
+                    "facet" => {
+                        facet = Some(expect_string(&list[idx])?);
+                        idx += 1;
+                    }
+                    "entity-type" | "type" => {
+                        entity_type = Some(expect_string(&list[idx])?);
+                        idx += 1;
+                    }
+                    "agent-kind" => {
+                        agent_kind = Some(expect_string(&list[idx])?);
+                        idx += 1;
+                    }
+                    "config" => {
+                        config = Some(parse_value_literal(&list[idx])?);
+                        idx += 1;
+                    }
+                    _ => return Err(validation("unknown attach-entity argument")),
+                }
+            }
+
+            Ok(Action::AttachEntity {
+                role: role.ok_or_else(|| validation("attach-entity requires :role"))?,
+                facet,
+                entity_type,
+                agent_kind,
+                config,
+            })
+        }
+        "generate-request-id" => {
+            let mut role = None;
+            let mut property = None;
+            let mut idx = 1;
+            while idx < list.len() {
+                let key = expect_keyword(&list[idx])?;
+                idx += 1;
+                match key.as_str() {
+                    "role" => {
+                        role = Some(expect_symbol(&list[idx])?);
+                        idx += 1;
+                    }
+                    "store" | "property" => {
+                        property = Some(expect_string(&list[idx])?);
+                        idx += 1;
+                    }
+                    _ => return Err(validation("unknown generate-request-id argument")),
+                }
+            }
+
+            Ok(Action::GenerateRequestId {
+                role: role.ok_or_else(|| validation("generate-request-id requires :role"))?,
+                property: property
+                    .ok_or_else(|| validation("generate-request-id requires :store"))?,
+            })
+        }
         "stop" | "stop-facet" => {
             if list.len() != 3 {
                 return Err(validation("stop expects :facet <uuid>"));
@@ -507,6 +585,12 @@ fn append_instruction_template(
             }
             return Ok(());
         }
+        if let Some(Expr::Symbol(name)) = list.first() {
+            if prototypes.contains_key(name) {
+                target.push(parse_call_template(list, prototypes, params)?);
+                return Ok(());
+            }
+        }
     }
     target.push(parse_instruction_template(expr, prototypes, params)?);
     Ok(())
@@ -542,8 +626,10 @@ fn parse_instruction_template(
             }
             return Ok(InstructionTemplate::Transition(expect_symbol(&list[1])?));
         }
-        if matches_symbol(list.first(), "call") {
-            return parse_call_template(list, prototypes, params);
+        if let Some(Expr::Symbol(name)) = list.first() {
+            if prototypes.contains_key(name) {
+                return parse_call_template(list, prototypes, params);
+            }
         }
     }
     Ok(InstructionTemplate::Action(parse_action_template(
@@ -597,19 +683,19 @@ fn parse_call_template(
     prototypes: &HashMap<String, FunctionPrototype>,
     params: &HashSet<String>,
 ) -> Result<InstructionTemplate> {
-    if list.len() < 2 {
-        return Err(validation("call expects a function name"));
+    if list.is_empty() {
+        return Err(validation("function call requires a name"));
     }
-    let func_name = expect_symbol(&list[1])?;
+    let func_name = expect_symbol(&list[0])?;
     let prototype = prototypes
         .get(&func_name)
         .ok_or_else(|| validation("unknown function"))?;
-    if prototype.params.len() != list.len() - 2 {
+    if prototype.params.len() != list.len() - 1 {
         return Err(validation("call arity mismatch"));
     }
 
     let mut args = Vec::new();
-    for expr in &list[2..] {
+    for expr in &list[1..] {
         args.push(parse_value_expr(expr, params)?);
     }
 
@@ -691,11 +777,11 @@ fn parse_action_template(expr: &Expr, params: &HashSet<String>) -> Result<Action
                 idx += 1;
                 match key.as_str() {
                     "actor" => {
-                        actor = Some(expect_string(&list[idx])?);
+                        actor = Some(parse_value_expr(&list[idx], params)?);
                         idx += 1;
                     }
                     "facet" => {
-                        facet = Some(expect_string(&list[idx])?);
+                        facet = Some(parse_value_expr(&list[idx], params)?);
                         idx += 1;
                     }
                     "value" => {
@@ -780,6 +866,75 @@ fn parse_action_template(expr: &Expr, params: &HashSet<String>) -> Result<Action
                 entity_type,
                 agent_kind,
                 config,
+            })
+        }
+        "attach-entity" => {
+            let mut role = None;
+            let mut facet = None;
+            let mut entity_type = None;
+            let mut agent_kind = None;
+            let mut config = None;
+            let mut idx = 1;
+            while idx < list.len() {
+                let key = expect_keyword(&list[idx])?;
+                idx += 1;
+                match key.as_str() {
+                    "role" => {
+                        role = Some(expect_symbol(&list[idx])?);
+                        idx += 1;
+                    }
+                    "facet" => {
+                        facet = Some(parse_value_expr(&list[idx], params)?);
+                        idx += 1;
+                    }
+                    "entity-type" | "type" => {
+                        entity_type = Some(expect_string(&list[idx])?);
+                        idx += 1;
+                    }
+                    "agent-kind" => {
+                        agent_kind = Some(expect_string(&list[idx])?);
+                        idx += 1;
+                    }
+                    "config" => {
+                        config = Some(parse_value_expr(&list[idx], params)?);
+                        idx += 1;
+                    }
+                    _ => return Err(validation("unknown attach-entity argument")),
+                }
+            }
+
+            Ok(ActionTemplate::AttachEntity {
+                role: role.ok_or_else(|| validation("attach-entity requires :role"))?,
+                facet,
+                entity_type,
+                agent_kind,
+                config,
+            })
+        }
+        "generate-request-id" => {
+            let mut role = None;
+            let mut property = None;
+            let mut idx = 1;
+            while idx < list.len() {
+                let key = expect_keyword(&list[idx])?;
+                idx += 1;
+                match key.as_str() {
+                    "role" => {
+                        role = Some(expect_symbol(&list[idx])?);
+                        idx += 1;
+                    }
+                    "store" | "property" => {
+                        property = Some(expect_string(&list[idx])?);
+                        idx += 1;
+                    }
+                    _ => return Err(validation("unknown generate-request-id argument")),
+                }
+            }
+
+            Ok(ActionTemplate::GenerateRequestId {
+                role: role.ok_or_else(|| validation("generate-request-id requires :role"))?,
+                property: property
+                    .ok_or_else(|| validation("generate-request-id requires :store"))?,
             })
         }
         "stop" | "stop-facet" => {
@@ -1067,7 +1222,7 @@ mod tests {
         let src = "
             (workflow demo)
             (state plan
-              (loop (await (record agent-response :field 0 :equals \"req\")))
+              (loop (await (record agent-response :field 1 :equals \"req\")))
               (branch
                 (when (signal review/done) (goto complete))
                 (otherwise
@@ -1228,8 +1383,8 @@ mod tests {
             (defn greet (person)
               (action (assert (record greeting person))))
             (state start
-              (call greet \"Alice\")
-              (call greet \"Bob\")
+              (greet \"Alice\")
+              (greet \"Bob\")
               (terminal))
         ";
         let ir = build(src);

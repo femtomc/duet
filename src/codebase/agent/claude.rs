@@ -127,32 +127,59 @@ impl ClaudeCodeAgent {
         Ok(response.trim().to_string())
     }
 
-    fn parse_response(value: &preserves::IOValue) -> ActorResult<(String, String, String, String)> {
-        parse_response_fields(value).ok_or_else(|| {
-            ActorError::InvalidActivation("agent response must use agent-response label and include request, prompt, response, and agent kind".into())
-        })
+    fn parse_response(
+        activation: &Activation,
+        value: &preserves::IOValue,
+    ) -> ActorResult<Option<(String, String, String, String)>> {
+        let Some((agent_id, request_id, prompt, response, agent_kind)) =
+            parse_response_fields(value)
+        else {
+            return Err(ActorError::InvalidActivation(
+                "agent response must use agent-response label and include agent id, request, prompt, response, and agent kind".into(),
+            ));
+        };
+
+        if let Some(current) = activation.current_entity_id() {
+            if agent_id != current.to_string() {
+                return Ok(None);
+            }
+        }
+
+        Ok(Some((request_id, prompt, response, agent_kind)))
     }
 
-    fn parse_request(value: &preserves::IOValue) -> ActorResult<(String, String)> {
+    fn parse_request(
+        activation: &Activation,
+        value: &preserves::IOValue,
+    ) -> ActorResult<Option<(String, String)>> {
         let record = record_with_label(value, REQUEST_LABEL).ok_or_else(|| {
             ActorError::InvalidActivation("agent request must use agent-request label".into())
         })?;
 
-        if record.len() < 2 {
+        if record.len() < 3 {
             return Err(ActorError::InvalidActivation(
-                "agent request requires id and prompt".into(),
+                "agent request requires agent id, request id, and prompt".into(),
             ));
         }
 
-        let request_id = record.field_string(0).ok_or_else(|| {
+        let agent_id = record.field_string(0).ok_or_else(|| {
+            ActorError::InvalidActivation("agent request agent id must be string".into())
+        })?;
+        let request_id = record.field_string(1).ok_or_else(|| {
             ActorError::InvalidActivation("agent request id must be string".into())
         })?;
 
         let prompt = record
-            .field_string(1)
+            .field_string(2)
             .ok_or_else(|| ActorError::InvalidActivation("agent prompt must be string".into()))?;
 
-        Ok((request_id, prompt))
+        if let Some(current) = activation.current_entity_id() {
+            if agent_id != current.to_string() {
+                return Ok(None);
+            }
+        }
+
+        Ok(Some((request_id, prompt)))
     }
 
     fn schedule_request(
@@ -166,12 +193,18 @@ impl ClaudeCodeAgent {
         let request_uuid = Uuid::new_v4();
         let settings = self.settings.clone();
         let async_sender = activation.async_sender();
+        let agent_entity_id = activation
+            .current_entity_id()
+            .map(|id| id.to_string())
+            .unwrap_or_default();
+
         activation.outputs.push(TurnOutput::ExternalRequest {
             request_id: request_uuid,
             service: "claude-code".to_string(),
             request: preserves::IOValue::record(
                 preserves::IOValue::symbol(REQUEST_LABEL),
                 vec![
+                    preserves::IOValue::new(agent_entity_id.clone()),
                     preserves::IOValue::new(request_id.clone()),
                     preserves::IOValue::new(prompt.clone()),
                 ],
@@ -183,6 +216,7 @@ impl ClaudeCodeAgent {
         let settings_clone = settings.clone();
 
         if let Some(async_sender) = async_sender {
+            let agent_id_for_response = agent_entity_id.clone();
             std::thread::spawn(move || {
                 let response = match Self::execute_prompt(&settings_clone, &prompt) {
                     Ok(value) => value,
@@ -193,6 +227,7 @@ impl ClaudeCodeAgent {
                 let response_record = preserves::IOValue::record(
                     preserves::IOValue::symbol(RESPONSE_LABEL),
                     response_fields(
+                        agent_id_for_response,
                         request_id,
                         prompt,
                         response,
@@ -232,7 +267,13 @@ impl ClaudeCodeAgent {
             return Ok(());
         }
 
+        let agent_id = activation
+            .current_entity_id()
+            .map(|id| id.to_string())
+            .unwrap_or_default();
+
         exchanges.push(AgentExchange {
+            agent_id,
             request_id: request_id.clone(),
             prompt: prompt.clone(),
             response: response.clone(),
@@ -241,9 +282,15 @@ impl ClaudeCodeAgent {
 
         let timestamp = Utc::now().to_rfc3339();
 
+        let agent_id = activation
+            .current_entity_id()
+            .map(|id| id.to_string())
+            .unwrap_or_default();
+
         let response_record = preserves::IOValue::record(
             preserves::IOValue::symbol(RESPONSE_LABEL),
             response_fields(
+                agent_id,
                 request_id,
                 prompt,
                 response,
@@ -276,14 +323,18 @@ impl Entity for ClaudeCodeAgent {
             .as_symbol()
             .map(|sym| sym.as_ref() == REQUEST_LABEL)
         {
-            Some(true) => match Self::parse_request(payload) {
-                Ok((request_id, prompt)) => self.schedule_request(activation, request_id, prompt),
+            Some(true) => match Self::parse_request(activation, payload) {
+                Ok(Some((request_id, prompt))) => {
+                    self.schedule_request(activation, request_id, prompt)
+                }
+                Ok(None) => Ok(()),
                 Err(_) => Ok(()),
             },
-            _ => match Self::parse_response(payload) {
-                Ok((request_id, prompt, response, agent)) => {
+            _ => match Self::parse_response(activation, payload) {
+                Ok(Some((request_id, prompt, response, agent))) => {
                     self.record_response(activation, request_id, prompt, response, agent)
                 }
+                Ok(None) => Ok(()),
                 Err(_) => Ok(()),
             },
         }
@@ -295,7 +346,7 @@ impl Entity for ClaudeCodeAgent {
         _handle: &Handle,
         value: &preserves::IOValue,
     ) -> ActorResult<()> {
-        if let Ok((request_id, prompt)) = Self::parse_request(value) {
+        if let Ok(Some((request_id, prompt))) = Self::parse_request(activation, value) {
             self.schedule_request(activation, request_id, prompt)?;
         }
         Ok(())

@@ -7,7 +7,7 @@ use duet::runtime::error::{ActorError, ActorResult, RuntimeError};
 use duet::runtime::pattern::Pattern;
 use duet::runtime::registry::{EntityCatalog, EntityMetadata};
 use duet::runtime::state::CapabilityTarget;
-use duet::runtime::turn::{ActorId, FacetId, Handle};
+use duet::runtime::turn::{ActorId, FacetId, Handle, TurnId};
 use duet::runtime::{Control, RuntimeConfig};
 use once_cell::sync::Lazy;
 use std::convert::TryFrom;
@@ -86,6 +86,36 @@ impl Entity for FlowControlEntity {
     }
 }
 
+struct AttachEntity;
+
+impl Entity for AttachEntity {
+    fn on_message(
+        &self,
+        activation: &mut Activation,
+        payload: &preserves::IOValue,
+    ) -> ActorResult<()> {
+        if let Some(symbol) = payload.as_symbol() {
+            if symbol.as_ref() == "attach" {
+                activation
+                    .attach_entity("test-local", preserves::IOValue::symbol("attached-config"));
+            }
+        }
+        Ok(())
+    }
+}
+
+struct LocalEntity;
+
+impl Entity for LocalEntity {
+    fn on_message(
+        &self,
+        _activation: &mut Activation,
+        _payload: &preserves::IOValue,
+    ) -> ActorResult<()> {
+        Ok(())
+    }
+}
+
 const PRODUCER_HANDLE_UUID: Uuid = Uuid::from_u128(0xfeedfacefeedcafe1234567890abcdef);
 
 static PATTERN_ASSERT_COUNT: Lazy<Arc<AtomicUsize>> = Lazy::new(|| Arc::new(AtomicUsize::new(0)));
@@ -98,6 +128,12 @@ static REGISTER_PATTERN_FIXTURE: Lazy<()> = Lazy::new(|| {
             on_assert: Arc::clone(&PATTERN_ASSERT_COUNT),
         }))
     });
+});
+
+static REGISTER_ATTACH_FIXTURE: Lazy<()> = Lazy::new(|| {
+    let catalog = EntityCatalog::global();
+    catalog.register("test-attacher", |_config| Ok(Box::new(AttachEntity)));
+    catalog.register("test-local", |_config| Ok(Box::new(LocalEntity)));
 });
 
 struct PatternProducer;
@@ -815,5 +851,91 @@ fn test_flow_control_account_balance_and_time_travel() {
         let mut control = Control::new(config.clone()).unwrap();
         control.back(1).unwrap();
         assert_eq!(control.runtime().scheduler().account_balance(&actor_id), 0);
+    }
+}
+
+#[test]
+fn test_attach_entity_persists_and_rewinds() {
+    once_cell::sync::Lazy::force(&REGISTER_ATTACH_FIXTURE);
+
+    let temp = TempDir::new().unwrap();
+    let config = RuntimeConfig {
+        root: temp.path().to_path_buf(),
+        snapshot_interval: 5,
+        flow_control_limit: 100,
+        debug: false,
+    };
+
+    let actor_id = ActorId::new();
+    let facet_id = FacetId::new();
+
+    let (attached_metadata, before_turn): (EntityMetadata, TurnId) = {
+        let mut control = Control::init(config.clone()).unwrap();
+        control
+            .register_entity(
+                actor_id.clone(),
+                facet_id.clone(),
+                "test-attacher".to_string(),
+                preserves::IOValue::symbol("attacher-config"),
+            )
+            .unwrap();
+
+        let before_turn = control
+            .runtime()
+            .branch_manager()
+            .head(&control.runtime().current_branch())
+            .cloned()
+            .expect("initial turn head");
+
+        control
+            .send_message(
+                actor_id.clone(),
+                facet_id.clone(),
+                preserves::IOValue::symbol("attach"),
+            )
+            .unwrap();
+        control.step(5).unwrap();
+
+        let metadata: Vec<_> = control
+            .runtime()
+            .entity_manager()
+            .list()
+            .into_iter()
+            .cloned()
+            .collect();
+        assert_eq!(metadata.len(), 2, "attached entity should be registered");
+        let attached = metadata
+            .iter()
+            .find(|meta| meta.entity_type == "test-local")
+            .expect("attached entity metadata");
+        assert_eq!(attached.actor, actor_id);
+        assert!(!attached.is_root_facet);
+        (attached.clone(), before_turn)
+    };
+
+    // Restart runtime and confirm attached entity persists.
+    {
+        let control = Control::new(config.clone()).unwrap();
+        let restored = control
+            .runtime()
+            .entity_manager()
+            .get(&attached_metadata.id)
+            .cloned()
+            .expect("restored attached entity");
+        assert_eq!(restored.actor, attached_metadata.actor);
+        assert_eq!(restored.facet, attached_metadata.facet);
+    }
+
+    // Re-open control and rewind to the recorded turn (current implementation keeps metadata).
+    {
+        let mut control = Control::new(config).unwrap();
+        control.goto(before_turn).unwrap();
+        assert!(
+            control
+                .runtime()
+                .entity_manager()
+                .get(&attached_metadata.id)
+                .is_some()
+        );
     }
 }

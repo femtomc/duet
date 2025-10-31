@@ -21,7 +21,9 @@ use preserves::IOValue;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::io::{self, BufRead, Write};
+use std::path::Path;
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -169,7 +171,6 @@ impl<'a, W: Write> Session<'a, W> {
             "send_message" => self.cmd_send_message(params),
             "fork" => self.cmd_fork(params),
             "merge" => self.cmd_merge(params),
-            "register_entity" => self.cmd_register_entity(params),
             "list_entities" => self.cmd_list_entities(params),
             "list_capabilities" => self.cmd_list_capabilities(params),
             "workspace_entries" => self.cmd_workspace_entries(),
@@ -304,6 +305,82 @@ impl<'a, W: Write> Session<'a, W> {
         instance_list.sort_by(|a, b| a.instance_id.cmp(&b.instance_id));
 
         (definition_list, instance_list)
+    }
+
+    fn discover_example_programs(&self) -> Vec<Value> {
+        let mut examples = Vec::new();
+        let root = self.control.runtime().config().root.clone();
+        let programs_dir = root.join("programs");
+
+        if programs_dir.exists() {
+            self.collect_program_files(&programs_dir, &programs_dir, &mut examples);
+            examples.sort_by(|a, b| {
+                let a_path = a.get("path").and_then(Value::as_str).unwrap_or("");
+                let b_path = b.get("path").and_then(Value::as_str).unwrap_or("");
+                a_path.cmp(b_path)
+            });
+        }
+
+        examples
+    }
+
+    fn collect_program_files(&self, base: &Path, dir: &Path, out: &mut Vec<Value>) {
+        let entries = match fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(_) => return,
+        };
+
+        for entry in entries {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            let path = entry.path();
+            if path.is_dir() {
+                self.collect_program_files(base, &path, out);
+            } else if path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .map(|ext| ext.eq_ignore_ascii_case("duet"))
+                .unwrap_or(false)
+            {
+                let relative = path
+                    .strip_prefix(base)
+                    .unwrap_or_else(|_| path.as_path())
+                    .to_path_buf();
+                let relative_str = relative.to_string_lossy().replace('\\', "/");
+                let mut item = json!({
+                    "path": relative_str,
+                    "absolute_path": path.to_string_lossy(),
+                });
+                if let Some(desc) = Self::read_program_description(&path) {
+                    item.as_object_mut()
+                        .unwrap()
+                        .insert("description".into(), json!(desc));
+                }
+                out.push(item);
+            }
+        }
+    }
+
+    fn read_program_description(path: &Path) -> Option<String> {
+        let contents = fs::read_to_string(path).ok()?;
+        for line in contents.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("(\"description\"") {
+                let mut parts = trimmed.split('"');
+                let _ = parts.next()?;
+                let key = parts.next()?;
+                if key != "description" {
+                    continue;
+                }
+                let _ = parts.next();
+                if let Some(desc) = parts.next() {
+                    return Some(desc.trim().to_string());
+                }
+            }
+        }
+        None
     }
 
     fn interpreter_instance_ids(&mut self, binding: &InterpreterBinding) -> HashSet<String> {
@@ -467,37 +544,6 @@ impl<'a, W: Write> Session<'a, W> {
             .map_err(ServiceError::from)?;
 
         Ok(serde_json::to_value(report).unwrap_or_default())
-    }
-
-    fn cmd_register_entity(&mut self, params: &Value) -> Result<Value, ServiceError> {
-        self.ensure_handshake()?;
-
-        let actor = params
-            .get("actor")
-            .and_then(Value::as_str)
-            .ok_or_else(|| ServiceError::invalid_param("actor"))?;
-        let facet = params
-            .get("facet")
-            .and_then(Value::as_str)
-            .ok_or_else(|| ServiceError::invalid_param("facet"))?;
-        let entity_type = params
-            .get("entity_type")
-            .and_then(Value::as_str)
-            .ok_or_else(|| ServiceError::invalid_param("entity_type"))?;
-        let config_value = params
-            .get("config")
-            .ok_or_else(|| ServiceError::invalid_param("config"))?;
-
-        let actor_id = ActorId::from_uuid(parse_uuid(actor)?);
-        let facet_id = FacetId::from_uuid(parse_uuid(facet)?);
-        let config = parse_preserves(config_value)?;
-
-        let id = self
-            .control
-            .register_entity(actor_id, facet_id, entity_type.to_string(), config)
-            .map_err(ServiceError::from)?;
-
-        Ok(json!({ "entity_id": id }))
     }
 
     fn cmd_list_entities(&mut self, params: &Value) -> Result<Value, ServiceError> {
@@ -903,14 +949,17 @@ impl<'a, W: Write> Session<'a, W> {
     fn cmd_workflow_list(&mut self, _params: &Value) -> Result<Value, ServiceError> {
         self.ensure_handshake()?;
         let binding = self.ensure_interpreter_binding()?;
+        self.control.drain_pending().map_err(ServiceError::from)?;
         let (definitions, instances) = self.collect_interpreter_state(&binding);
 
         let definitions_json: Vec<Value> = definitions.iter().map(serialize_definition).collect();
         let instances_json: Vec<Value> = instances.iter().map(serialize_instance).collect();
+        let examples_json = self.discover_example_programs();
 
         Ok(json!({
             "definitions": definitions_json,
             "instances": instances_json,
+            "examples": examples_json,
         }))
     }
 
@@ -933,6 +982,8 @@ impl<'a, W: Write> Session<'a, W> {
             .control
             .send_message(binding.actor.clone(), binding.facet.clone(), payload)
             .map_err(ServiceError::from)?;
+
+        self.control.drain_pending().map_err(ServiceError::from)?;
 
         let (_, instances_after) = self.collect_interpreter_state(&binding);
         let new_instance = instances_after
@@ -1341,6 +1392,7 @@ impl<'a, W: Write> Session<'a, W> {
 
                     if let Some(agent_response) = codebase::parse_agent_response(value) {
                         let codebase::AgentResponse {
+                            agent_id,
                             request_id,
                             prompt,
                             response,
@@ -1355,6 +1407,7 @@ impl<'a, W: Write> Session<'a, W> {
                         transcript.insert("prompt".to_string(), Value::String(prompt));
                         transcript.insert("response".to_string(), Value::String(response));
                         transcript.insert("agent".to_string(), Value::String(agent));
+                        transcript.insert("agent_id".to_string(), Value::String(agent_id));
                         if let Some(ts) = timestamp {
                             transcript.insert(
                                 "response_timestamp".to_string(),
@@ -1451,7 +1504,7 @@ fn assertion_matches_request_id(value: &IOValue, request_id: &str) -> bool {
             return false;
         }
         record
-            .field_string(0)
+            .field_string(1)
             .map(|s| s == request_id)
             .unwrap_or(false)
     } else {

@@ -3,6 +3,7 @@
 //! This module provides the main `Runtime` struct that coordinates all subsystems
 //! and exposes the public interface for embedding or controlling the runtime.
 
+use crate::runtime::pattern::Pattern;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -555,8 +556,81 @@ impl Runtime {
                         *issuer_entity,
                     );
                 }
+                TurnOutput::PatternRegistered { entity_id, pattern } => {
+                    if let Err(err) = self.register_pattern_for_entity(*entity_id, pattern.clone())
+                    {
+                        warn!(
+                            "failed to register pattern {:?} for entity {}: {}",
+                            pattern.id, entity_id, err
+                        );
+                    }
+                }
+                TurnOutput::EntityAttached {
+                    actor,
+                    facet,
+                    entity_id,
+                    entity_type,
+                    config,
+                } => {
+                    self.handle_entity_attach(actor, facet, entity_id, entity_type, config);
+                }
                 _ => {}
             }
+        }
+    }
+
+    fn handle_entity_attach(
+        &mut self,
+        actor_id: &ActorId,
+        facet: &FacetId,
+        entity_id: &Uuid,
+        entity_type: &String,
+        config: &EntityConfig,
+    ) {
+        let actor_entry = match self.actors.get(actor_id) {
+            Some(actor) => actor,
+            None => {
+                warn!(
+                    "entity attach requested for unknown actor {:?}; ignoring",
+                    actor_id
+                );
+                return;
+            }
+        };
+
+        if !actor_entry.facets.read().facets.contains_key(facet) {
+            warn!(
+                "entity attach requested for missing facet {:?} on actor {:?}",
+                facet, actor_id
+            );
+        }
+
+        let entity = match self.entity_registry().create(entity_type, config) {
+            Ok(entity) => entity,
+            Err(err) => {
+                warn!(
+                    "failed to instantiate entity type '{}' during attach: {}",
+                    entity_type, err
+                );
+                return;
+            }
+        };
+
+        actor_entry.attach_entity(*entity_id, entity_type.to_string(), facet.clone(), entity);
+
+        let metadata = EntityMetadata {
+            id: *entity_id,
+            actor: actor_id.clone(),
+            facet: facet.clone(),
+            entity_type: entity_type.to_string(),
+            config: config.clone(),
+            is_root_facet: false,
+            patterns: vec![],
+        };
+        self.entity_manager_mut().register(metadata);
+
+        if let Err(err) = self.persist_entities() {
+            warn!("failed to persist entity metadata after attach: {}", err);
         }
     }
 
@@ -658,6 +732,51 @@ impl Runtime {
                 parent_actor, parent_facet, child_actor
             );
         }
+    }
+
+    pub(crate) fn register_pattern_for_entity(
+        &mut self,
+        entity_id: Uuid,
+        pattern: Pattern,
+    ) -> error::Result<()> {
+        let (actor_id, expected_facet) = match self.entity_manager().get(&entity_id) {
+            Some(meta) => (meta.actor.clone(), meta.facet.clone()),
+            None => {
+                return Err(error::RuntimeError::Actor(error::ActorError::NotFound(
+                    format!("Entity {} not found for pattern registration", entity_id),
+                )));
+            }
+        };
+
+        if expected_facet != pattern.facet {
+            return Err(error::RuntimeError::Actor(
+                error::ActorError::InvalidActivation(format!(
+                    "Pattern facet {} does not match entity facet {}",
+                    pattern.facet.0, expected_facet.0
+                )),
+            ));
+        }
+
+        let actor = self
+            .actors
+            .entry(actor_id.clone())
+            .or_insert_with(|| Actor::new(actor_id));
+
+        actor.register_pattern(pattern.clone());
+
+        if let Some(meta) = self.entity_manager_mut().get_mut(&entity_id) {
+            meta.patterns.retain(|existing| existing.id != pattern.id);
+            meta.patterns.push(pattern);
+        }
+
+        if let Err(err) = self.persist_entities() {
+            warn!(
+                "failed to persist entity metadata after pattern registration: {}",
+                err
+            );
+        }
+
+        Ok(())
     }
 
     fn handle_capability_invoke(
@@ -1136,10 +1255,7 @@ impl Runtime {
         while let Some(result) = iter.next() {
             let record = result.map_err(|e| error::RuntimeError::Journal(e))?;
 
-            // Stop when we reach the target turn
-            // Skip turns before the snapshot
             if (!start_turn_id.as_str().eq("turn_00000000")) && record.turn_id <= start_turn_id {
-                // Even if this is the target turn, we shouldn't apply it yet.
                 if record.turn_id == target_turn {
                     break;
                 }

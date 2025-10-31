@@ -6,6 +6,7 @@ use crate::interpreter::protocol::{
     OBSERVER_RECORD_LABEL, TOOL_REQUEST_RECORD_LABEL, TOOL_RESULT_RECORD_LABEL, WaitRecord,
     runtime_snapshot_from_value, runtime_snapshot_to_value, wait_record_to_value,
 };
+use crate::interpreter::value::ValueContext;
 use crate::interpreter::{
     Action, Condition, DEFINE_MESSAGE_LABEL, DefinitionRecord, InstanceProgress, InstanceRecord,
     InstanceStatus, InterpreterHost, InterpreterRuntime, LOG_RECORD_LABEL, NOTIFY_MESSAGE_LABEL,
@@ -56,6 +57,7 @@ struct WaitingInstance {
     assertions: Vec<RecordedAssertion>,
     facets: Vec<FacetId>,
     resume_pending: bool,
+    matched_value: Option<IOValue>,
 }
 
 #[derive(Clone)]
@@ -363,6 +365,7 @@ impl InterpreterEntity {
             for (instance_id, entry) in waiting_guard.iter_mut() {
                 if wait_matches(&entry.wait, Some(instance_id), value) && !entry.resume_pending {
                     entry.resume_pending = true;
+                    entry.matched_value = Some(value.clone());
                     matches.push((instance_id.clone(), entry.clone()));
                 }
             }
@@ -383,7 +386,14 @@ impl InterpreterEntity {
             for (instance_id, entry) in matches {
                 let resume_payload = IOValue::record(
                     IOValue::symbol(RESUME_MESSAGE_LABEL),
-                    vec![IOValue::new(instance_id.clone()), entry.wait.as_value()],
+                    vec![
+                        IOValue::new(instance_id.clone()),
+                        entry.wait.as_value(),
+                        entry
+                            .matched_value
+                            .clone()
+                            .unwrap_or_else(|| IOValue::symbol("none")),
+                    ],
                 );
 
                 activation.send_message(target_actor.clone(), entry.facet.clone(), resume_payload);
@@ -436,28 +446,45 @@ impl InterpreterEntity {
             ));
         }
 
-        let mut ready_conditions = Vec::new();
-        match &wait_status {
+        let resume_value = if record.len() > 2 {
+            let value = record.field(2);
+            if value
+                .as_symbol()
+                .map(|sym| sym.as_ref() == "none")
+                .unwrap_or(false)
+            {
+                None
+            } else {
+                Some(value)
+            }
+        } else {
+            None
+        };
+
+        let matched_value = resume_value
+            .clone()
+            .or_else(|| waiting_entry.matched_value.clone());
+
+        let mut ready_waits = Vec::new();
+        let ready_condition = match &wait_status {
             WaitStatus::RecordFieldEq {
                 label,
                 field,
                 value,
-            } => {
-                ready_conditions.push(WaitCondition::RecordFieldEq {
-                    label: label.clone(),
-                    field: *field,
-                    value: value.clone(),
-                });
-            }
-            WaitStatus::Signal { label } => {
-                ready_conditions.push(WaitCondition::Signal {
-                    label: label.clone(),
-                });
-            }
-            WaitStatus::ToolResult { tag } => {
-                ready_conditions.push(WaitCondition::ToolResult { tag: tag.clone() });
-            }
-        }
+            } => WaitCondition::RecordFieldEq {
+                label: label.clone(),
+                field: *field,
+                value: value.clone(),
+            },
+            WaitStatus::Signal { label } => WaitCondition::Signal {
+                label: label.clone(),
+            },
+            WaitStatus::ToolResult { tag } => WaitCondition::ToolResult { tag: tag.clone() },
+        };
+        ready_waits.push(ReadyWait {
+            condition: ready_condition,
+            value: matched_value.clone(),
+        });
 
         let program_ref = waiting_entry.program_ref.clone();
         let program = waiting_entry.program.clone();
@@ -487,7 +514,7 @@ impl InterpreterEntity {
             activation,
             instance_id.clone(),
             &program.roles,
-            ready_conditions,
+            ready_waits,
             stored_assertions,
             stored_facets,
         );
@@ -589,7 +616,7 @@ impl InterpreterEntity {
             pending_wait_snapshot,
             pending_wait_handle,
         ) {
-            let facet = activation.current_facet.clone();
+            let facet = runtime.host().current_facet();
             let wait_record = wait_record_to_value(&WaitRecord {
                 instance_id: instance_id.clone(),
                 facet: facet.clone(),
@@ -609,6 +636,7 @@ impl InterpreterEntity {
                 assertions,
                 facets,
                 resume_pending: false,
+                matched_value: None,
             });
         }
 
@@ -766,6 +794,10 @@ impl HydratableEntity for InterpreterEntity {
                         } else {
                             "false"
                         }),
+                        entry
+                            .matched_value
+                            .clone()
+                            .unwrap_or_else(|| IOValue::symbol("none")),
                     ],
                 )
             })
@@ -941,6 +973,21 @@ impl HydratableEntity for InterpreterEntity {
                                     false
                                 };
 
+                                let matched_value = if wait_view.len() > 10 {
+                                    let value = wait_view.field(10);
+                                    if value
+                                        .as_symbol()
+                                        .map(|sym| sym.as_ref() == "none")
+                                        .unwrap_or(false)
+                                    {
+                                        None
+                                    } else {
+                                        Some(value)
+                                    }
+                                } else {
+                                    None
+                                };
+
                                 reconstructed_waiting.push((
                                     instance_id,
                                     WaitingInstance {
@@ -954,6 +1001,7 @@ impl HydratableEntity for InterpreterEntity {
                                         assertions,
                                         facets,
                                         resume_pending,
+                                        matched_value,
                                     },
                                 ));
                             }
@@ -1178,6 +1226,7 @@ impl InterpreterEntity {
         let mut pending_wait_handle: Option<Handle> = None;
         let mut pending_wait_assertions: Option<Vec<RecordedAssertion>> = None;
         let mut pending_wait_facets: Option<Vec<FacetId>> = None;
+        let mut wait_assertion: Option<(Handle, IOValue)> = None;
 
         let running_record = InstanceRecord {
             instance_id: instance_id.clone(),
@@ -1283,22 +1332,19 @@ impl InterpreterEntity {
         program_clone.roles = updated_roles.clone();
 
         let observer_specs = runtime.host_mut().drain_observers();
-        for spec in observer_specs {
-            self.register_observer(activation, spec)?;
-        }
 
         if let (Some(wait_status), Some(snapshot), Some(wait_handle)) = (
             pending_wait_status,
             pending_wait_snapshot,
             pending_wait_handle,
         ) {
-            let facet = activation.current_facet.clone();
+            let facet = runtime.host().current_facet();
             let wait_record = wait_record_to_value(&WaitRecord {
                 instance_id: instance_id.clone(),
                 facet: facet.clone(),
                 wait_status: wait_status.clone(),
             });
-            activation.assert(wait_handle.clone(), wait_record);
+            wait_assertion = Some((wait_handle.clone(), wait_record));
             let assertions = pending_wait_assertions.take().unwrap_or_default();
             let facets = pending_wait_facets.take().unwrap_or_default();
             waiting_entry = Some(WaitingInstance {
@@ -1312,6 +1358,7 @@ impl InterpreterEntity {
                 assertions,
                 facets,
                 resume_pending: false,
+                matched_value: None,
             });
         }
 
@@ -1325,14 +1372,43 @@ impl InterpreterEntity {
             roles: program_clone.roles.clone(),
         };
 
-        if let Some(entry) = waiting_entry {
-            let mut waiting_guard = self.waiting.lock().unwrap();
-            waiting_guard.insert(instance_id.clone(), entry);
+        let cleanup_facets = if waiting_entry.is_some() {
+            Vec::new()
         } else {
-            self.waiting.lock().unwrap().remove(&instance_id);
+            runtime.host_mut().drain_tracked_facets()
+        };
+        let final_record_value = final_record.to_value();
+
+        drop(runtime);
+
+        for spec in observer_specs {
+            self.register_observer(activation, spec)?;
         }
 
-        activation.assert(status_handle, final_record.to_value());
+        if let Some((handle, value)) = wait_assertion {
+            activation.assert(handle, value);
+        }
+
+        let is_waiting = waiting_entry.is_some();
+        {
+            let mut waiting_guard = self.waiting.lock().unwrap();
+            if let Some(entry) = waiting_entry.take() {
+                waiting_guard.insert(instance_id.clone(), entry);
+            } else {
+                waiting_guard.remove(&instance_id);
+            }
+        }
+
+        if !is_waiting {
+            for (facet, handles) in cleanup_facets {
+                activation.terminate_facet(facet.clone());
+                for handle in handles {
+                    activation.retract(handle);
+                }
+            }
+        }
+
+        activation.assert(status_handle, final_record_value);
 
         if let Some(err) = result_error {
             Err(err)
@@ -1344,12 +1420,13 @@ impl InterpreterEntity {
 
 struct ActivationHost<'a> {
     activation: &'a mut Activation,
-    satisfied: Vec<WaitCondition>,
+    satisfied: Vec<ReadyWait>,
     assertions: HashMap<IOValue, Vec<Handle>>,
     facets: Vec<FacetId>,
     observers: Vec<ObserverSpec>,
     instance_id: String,
     roles: HashMap<String, RoleBinding>,
+    last_ready_value: Option<IOValue>,
 }
 
 #[derive(Clone)]
@@ -1357,6 +1434,12 @@ struct ObserverSpec {
     condition: WaitCondition,
     handler: ProgramRef,
     facet: FacetId,
+}
+
+#[derive(Clone)]
+struct ReadyWait {
+    condition: WaitCondition,
+    value: Option<IOValue>,
 }
 
 #[derive(Clone)]
@@ -1455,6 +1538,7 @@ impl<'a> ActivationHost<'a> {
             observers: Vec::new(),
             instance_id,
             roles: role_map,
+            last_ready_value: None,
         }
     }
 
@@ -1462,7 +1546,7 @@ impl<'a> ActivationHost<'a> {
         activation: &'a mut Activation,
         instance_id: String,
         roles: &[RoleBinding],
-        satisfied: Vec<WaitCondition>,
+        satisfied: Vec<ReadyWait>,
         assertions: Vec<RecordedAssertion>,
         facets: Vec<FacetId>,
     ) -> Self {
@@ -1520,6 +1604,58 @@ impl<'a> ActivationHost<'a> {
 
     fn restore_facets(&mut self, facets: &[FacetId]) {
         self.facets = facets.to_vec();
+    }
+
+    fn track_facet(&mut self, facet: FacetId) {
+        if !self.facets.iter().any(|existing| existing == &facet) {
+            self.facets.push(facet);
+        }
+    }
+
+    fn current_facet(&self) -> FacetId {
+        self.activation.current_facet.clone()
+    }
+
+    fn assert_facet_record(&mut self, facet: &FacetId) {
+        let record = IOValue::record(
+            IOValue::symbol("interpreter-facet"),
+            vec![IOValue::new(facet.0.to_string())],
+        );
+        let handle = Handle::new();
+        self.activation.assert(handle.clone(), record.clone());
+        self.assertions.entry(record).or_default().push(handle);
+    }
+
+    fn retract_facet_assertion(&mut self, facet: &FacetId) {
+        let record = IOValue::record(
+            IOValue::symbol("interpreter-facet"),
+            vec![IOValue::new(facet.0.to_string())],
+        );
+        if let Some(handles) = self.assertions.get_mut(&record) {
+            if let Some(handle) = handles.pop() {
+                self.activation.retract(handle.clone());
+            }
+            if handles.is_empty() {
+                self.assertions.remove(&record);
+            }
+        }
+    }
+
+    fn drain_tracked_facets(&mut self) -> Vec<(FacetId, Vec<Handle>)> {
+        let root = self.activation.root_facet.clone();
+        let facets = std::mem::take(&mut self.facets);
+        facets
+            .into_iter()
+            .filter(|facet| facet != &root)
+            .map(|facet| {
+                let record = IOValue::record(
+                    IOValue::symbol("interpreter-facet"),
+                    vec![IOValue::new(facet.0.to_string())],
+                );
+                let handles = self.assertions.remove(&record).unwrap_or_default();
+                (facet, handles)
+            })
+            .collect()
     }
 
     fn drain_observers(&mut self) -> Vec<ObserverSpec> {
@@ -1638,6 +1774,29 @@ impl<'a> ActivationHost<'a> {
         Some(IOValue::record(IOValue::symbol("role-properties"), entries))
     }
 
+    fn generate_request_id(&mut self, role: &str, property: &str) -> Result<String, ActorError> {
+        let instance_id = self.instance_id.clone();
+        let binding = self.role_binding_mut(role)?;
+        let counter_key = format!("counter::{property}");
+        let next_value = binding
+            .properties
+            .get(&counter_key)
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0)
+            .saturating_add(1);
+
+        binding
+            .properties
+            .insert(counter_key, next_value.to_string());
+
+        let request_id = format!("{}:{}:{}", instance_id, role, next_value);
+        binding
+            .properties
+            .insert(property.to_string(), request_id.clone());
+
+        Ok(request_id)
+    }
+
     fn resolve_spawn_target(
         &self,
         role: &str,
@@ -1669,6 +1828,14 @@ impl<'a> ActivationHost<'a> {
         })?;
 
         Ok((entity_type.to_string(), Some(kind)))
+    }
+}
+
+impl<'a> ValueContext for ActivationHost<'a> {
+    fn role_property(&self, role: &str, key: &str) -> Option<String> {
+        self.roles
+            .get(role)
+            .and_then(|binding| binding.properties.get(key).cloned())
     }
 }
 
@@ -1766,15 +1933,12 @@ impl<'a> InterpreterHost for ActivationHost<'a> {
                 };
 
                 let new_facet = self.activation.spawn_facet(parent_facet);
-                self.facets.push(new_facet.clone());
-
-                let record = IOValue::record(
-                    IOValue::symbol("interpreter-facet"),
-                    vec![IOValue::new(new_facet.0.to_string())],
-                );
-                let handle = Handle::new();
-                self.activation.assert(handle.clone(), record.clone());
-                self.assertions.entry(record).or_default().push(handle);
+                self.track_facet(new_facet.clone());
+                self.assert_facet_record(&new_facet);
+                Ok(())
+            }
+            Action::GenerateRequestId { role, property } => {
+                self.generate_request_id(role, property)?;
                 Ok(())
             }
             Action::Stop { facet } => {
@@ -1786,19 +1950,7 @@ impl<'a> InterpreterHost for ActivationHost<'a> {
                 let facet_id = FacetId::from_uuid(uuid);
                 self.activation.terminate_facet(facet_id.clone());
                 self.facets.retain(|id| id != &facet_id);
-
-                let record = IOValue::record(
-                    IOValue::symbol("interpreter-facet"),
-                    vec![IOValue::new(facet.to_string())],
-                );
-                if let Some(handles) = self.assertions.get_mut(&record) {
-                    if let Some(handle) = handles.pop() {
-                        self.activation.retract(handle.clone());
-                    }
-                    if handles.is_empty() {
-                        self.assertions.remove(&record);
-                    }
-                }
+                self.retract_facet_assertion(&facet_id);
                 Ok(())
             }
             Action::SpawnEntity {
@@ -1819,24 +1971,54 @@ impl<'a> InterpreterHost for ActivationHost<'a> {
                     .activation
                     .spawn_entity(resolved_entity_type.clone(), config_value);
 
-                let binding = self.role_binding_mut(role)?;
-                binding
-                    .properties
-                    .insert("actor".into(), spawned.actor.0.to_string());
-                binding
-                    .properties
-                    .insert("facet".into(), spawned.root_facet.0.to_string());
-                binding
-                    .properties
-                    .insert("entity".into(), spawned.entity_id.to_string());
-                binding
-                    .properties
-                    .insert("entity-type".into(), resolved_entity_type.clone());
-                if let Some(kind) = resolved_kind.clone() {
-                    binding.properties.insert("agent-kind".into(), kind);
+                {
+                    let binding = self.role_binding_mut(role)?;
+                    binding
+                        .properties
+                        .insert("actor".into(), spawned.actor.0.to_string());
+                    binding
+                        .properties
+                        .insert("facet".into(), spawned.root_facet.0.to_string());
+                    binding
+                        .properties
+                        .insert("entity".into(), spawned.entity_id.to_string());
+                    binding
+                        .properties
+                        .insert("entity-type".into(), resolved_entity_type.clone());
+                    if let Some(kind) = resolved_kind.clone() {
+                        binding.properties.insert("agent-kind".into(), kind);
+                    }
                 }
 
-                let role_properties_value = Self::encode_role_properties(binding);
+                let pattern_id = if resolved_kind.is_some() {
+                    let request_pattern = IOValue::record(
+                        IOValue::symbol("agent-request"),
+                        vec![
+                            IOValue::new(spawned.entity_id.to_string()),
+                            IOValue::symbol("<_>"),
+                            IOValue::symbol("<_>"),
+                        ],
+                    );
+                    Some(self.activation.register_pattern_for_entity(
+                        spawned.entity_id,
+                        spawned.root_facet.clone(),
+                        request_pattern,
+                    ))
+                } else {
+                    None
+                };
+
+                if let Some(id) = pattern_id {
+                    let binding = self.role_binding_mut(role)?;
+                    binding
+                        .properties
+                        .insert("agent-request-pattern".into(), id.to_string());
+                }
+
+                let role_properties_value = {
+                    let binding = self.role_binding(role)?;
+                    Self::encode_role_properties(binding)
+                };
 
                 let mut fields = vec![
                     IOValue::new(self.instance_id.clone()),
@@ -1844,6 +2026,116 @@ impl<'a> InterpreterHost for ActivationHost<'a> {
                     IOValue::new(spawned.actor.0.to_string()),
                     IOValue::new(spawned.root_facet.0.to_string()),
                     IOValue::new(spawned.entity_id.to_string()),
+                    IOValue::new(resolved_entity_type.clone()),
+                ];
+
+                if let Some(kind) = resolved_kind {
+                    fields.push(IOValue::new(kind));
+                }
+
+                if let Some(props) = role_properties_value {
+                    fields.push(props);
+                }
+
+                let record = IOValue::record(IOValue::symbol("interpreter-entity"), fields);
+                let handle = Handle::new();
+                self.activation.assert(handle.clone(), record.clone());
+                self.assertions.entry(record).or_default().push(handle);
+                Ok(())
+            }
+            Action::AttachEntity {
+                role,
+                facet,
+                entity_type,
+                agent_kind,
+                config,
+            } => {
+                let target_facet = if let Some(facet_str) = facet {
+                    let uuid = Uuid::parse_str(facet_str).map_err(|_| {
+                        ActorError::InvalidActivation(format!(
+                            "attach-entity requires :facet to be a UUID, got {facet_str}"
+                        ))
+                    })?;
+                    FacetId::from_uuid(uuid)
+                } else {
+                    let new_facet = self
+                        .activation
+                        .spawn_facet(Some(self.activation.current_facet.clone()));
+                    self.track_facet(new_facet.clone());
+                    self.assert_facet_record(&new_facet);
+                    new_facet
+                };
+
+                let (resolved_entity_type, resolved_kind) =
+                    self.resolve_spawn_target(role, entity_type.as_ref(), agent_kind.as_ref())?;
+
+                let config_value = config
+                    .as_ref()
+                    .map(|value| value.to_io_value())
+                    .unwrap_or_else(|| IOValue::symbol("nil"));
+
+                let attached = self.activation.attach_entity_to_facet(
+                    target_facet.clone(),
+                    resolved_entity_type.clone(),
+                    config_value,
+                );
+
+                let actor_id_str = self.activation.actor_id.0.to_string();
+                {
+                    let binding = self.role_binding_mut(role)?;
+                    binding
+                        .properties
+                        .insert("actor".into(), actor_id_str.clone());
+                    binding
+                        .properties
+                        .insert("facet".into(), attached.facet.0.to_string());
+                    binding
+                        .properties
+                        .insert("entity".into(), attached.entity_id.to_string());
+                    binding
+                        .properties
+                        .insert("entity-type".into(), resolved_entity_type.clone());
+                    if let Some(kind) = resolved_kind.clone() {
+                        binding.properties.insert("agent-kind".into(), kind);
+                    }
+                }
+
+                let pattern_id = if resolved_kind.is_some() {
+                    let request_pattern = IOValue::record(
+                        IOValue::symbol("agent-request"),
+                        vec![
+                            IOValue::new(attached.entity_id.to_string()),
+                            IOValue::symbol("<_>"),
+                            IOValue::symbol("<_>"),
+                        ],
+                    );
+                    Some(self.activation.register_pattern_for_entity(
+                        attached.entity_id,
+                        attached.facet.clone(),
+                        request_pattern,
+                    ))
+                } else {
+                    None
+                };
+
+                if let Some(id) = pattern_id {
+                    let binding = self.role_binding_mut(role)?;
+                    binding
+                        .properties
+                        .insert("agent-request-pattern".into(), id.to_string());
+                }
+
+                let role_properties_value = {
+                    let binding = self.role_binding(role)?;
+                    Self::encode_role_properties(binding)
+                };
+
+                let mut fields = vec![
+                    IOValue::new(self.instance_id.clone()),
+                    IOValue::new(role.clone()),
+                    IOValue::new(actor_id_str.clone()),
+                    IOValue::new(attached.facet.0.to_string()),
+                    IOValue::new(attached.entity_id.to_string()),
                     IOValue::new(resolved_entity_type.clone()),
                 ];
 
@@ -1873,7 +2165,7 @@ impl<'a> InterpreterHost for ActivationHost<'a> {
     fn check_condition(&mut self, condition: &Condition) -> std::result::Result<bool, Self::Error> {
         match condition {
             Condition::Signal { label } => Ok(self.satisfied.iter().any(
-                |cond| matches!(cond, WaitCondition::Signal { label: ready } if ready == label),
+                |entry| matches!(entry.condition, WaitCondition::Signal { label: ref ready } if ready == label),
             )),
         }
     }
@@ -1882,13 +2174,18 @@ impl<'a> InterpreterHost for ActivationHost<'a> {
         if let Some(index) = self
             .satisfied
             .iter()
-            .position(|cond| Self::condition_matches(cond, wait))
+            .position(|entry| Self::condition_matches(&entry.condition, wait))
         {
-            self.satisfied.remove(index);
+            let ready = self.satisfied.remove(index);
+            self.last_ready_value = ready.value;
             Ok(true)
         } else {
             Ok(false)
         }
+    }
+
+    fn take_ready_value(&mut self) -> Option<IOValue> {
+        self.last_ready_value.take()
     }
 }
 
@@ -1922,7 +2219,7 @@ mod tests {
         let mut activation = activation_for(&actor);
 
         let program = "(workflow demo)
-               (state start (action (assert (record agent-request \"planner\" \"hello\")) (log \"hello\")) (terminal))";
+               (state start (action (assert (record agent-request \"agent-1\" \"planner\" \"hello\")) (log \"hello\")) (terminal))";
         let payload = IOValue::record(
             IOValue::symbol(RUN_MESSAGE_LABEL),
             vec![IOValue::new(program)],
@@ -2183,18 +2480,24 @@ mod tests {
 
         entity.on_message(&mut activation, &payload).unwrap();
 
-        let spawn_output = activation.outputs.iter().find_map(|output| {
-            if let TurnOutput::EntitySpawned { entity_type, .. } = output {
-                Some(entity_type.clone())
-            } else {
-                None
-            }
-        });
-        assert_eq!(
-            spawn_output.as_deref(),
-            Some("agent-claude-code"),
-            "spawn-entity should emit EntitySpawned output"
-        );
+        let (spawn_entity_type, spawned_entity_id, spawned_root_facet) = activation
+            .outputs
+            .iter()
+            .find_map(|output| {
+                if let TurnOutput::EntitySpawned {
+                    entity_id,
+                    entity_type,
+                    child_root_facet,
+                    ..
+                } = output
+                {
+                    Some((entity_type.clone(), *entity_id, child_root_facet.clone()))
+                } else {
+                    None
+                }
+            })
+            .expect("spawn-entity should emit EntitySpawned output");
+        assert_eq!(spawn_entity_type, "agent-claude-code");
 
         let capability_granted = activation.outputs.iter().any(|output| {
             matches!(
@@ -2206,6 +2509,36 @@ mod tests {
         assert!(
             capability_granted,
             "interpreter should mint the entity/spawn capability automatically"
+        );
+
+        let registered_pattern = activation
+            .outputs
+            .iter()
+            .find_map(|output| match output {
+                TurnOutput::PatternRegistered { entity_id, pattern }
+                    if entity_id == &spawned_entity_id =>
+                {
+                    Some(pattern.clone())
+                }
+                _ => None,
+            })
+            .expect("spawn-entity should register agent-request pattern");
+        assert_eq!(
+            registered_pattern.facet, spawned_root_facet,
+            "pattern should target spawned root facet"
+        );
+        let pattern_view = record_with_label(&registered_pattern.pattern, agent::REQUEST_LABEL)
+            .expect("pattern should match agent-request label");
+        assert_eq!(
+            pattern_view.len(),
+            3,
+            "agent-request pattern matches agent id, request id, and prompt"
+        );
+        let expected_entity_id = spawned_entity_id.to_string();
+        assert_eq!(
+            pattern_view.field_string(0).as_deref(),
+            Some(expected_entity_id.as_str()),
+            "agent-request pattern should target spawned entity id"
         );
 
         let entity_record = activation
