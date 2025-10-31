@@ -10,6 +10,7 @@ import re
 import signal
 import socket
 import subprocess
+import shutil
 import time
 import traceback
 from dataclasses import dataclass
@@ -104,7 +105,6 @@ app.add_typer(codebased_app, name="codebased", rich_help_panel="Codebased")
 app.add_typer(time_app, name="time", rich_help_panel="Time")
 app.add_typer(query_app, name="query", rich_help_panel="Query")
 app.add_typer(debug_app, name="debug")
-app.command("clear")(clear_runtime)
 debug_app.add_typer(reaction_app, name="reaction")
 
 
@@ -182,6 +182,33 @@ def _clear_daemon_state(root: Path) -> None:
     state_path = _daemon_state_path(root)
     with contextlib.suppress(OSError):
         state_path.unlink()
+
+
+def _stop_daemon_if_running(root: Path, *, quiet: bool = False) -> bool:
+    state = _load_daemon_state(root)
+    if not state:
+        if not quiet:
+            console.print("[yellow]Daemon is not running.[/yellow]")
+        return False
+
+    if _is_process_alive(state.pid):
+        try:
+            os.kill(state.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        else:
+            for _ in range(50):
+                if not _is_process_alive(state.pid):
+                    break
+                time.sleep(0.1)
+            else:
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(state.pid, signal.SIGKILL)
+
+    _clear_daemon_state(root)
+    if not quiet:
+        console.print("[green]Daemon stopped.[/green]")
+    return True
 
 
 def _is_process_alive(pid: int) -> bool:
@@ -892,26 +919,7 @@ def daemon_stop(ctx: typer.Context) -> None:
     """Stop the background daemon if it is running."""
 
     root = _resolve_root_path(ctx.obj.root)
-    state = _load_daemon_state(root)
-    if not state:
-        console.print("[yellow]Daemon is not running.[/yellow]")
-        return
-
-    if _is_process_alive(state.pid):
-        try:
-            os.kill(state.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        else:
-            for _ in range(50):
-                if not _is_process_alive(state.pid):
-                    break
-                time.sleep(0.1)
-            else:
-                with contextlib.suppress(ProcessLookupError):
-                    os.kill(state.pid, signal.SIGKILL)
-    _clear_daemon_state(root)
-    console.print("[green]Daemon stopped.[/green]")
+    _stop_daemon_if_running(root)
 
 
 @codebased_app.command("status")
@@ -937,6 +945,64 @@ def daemon_status(ctx: typer.Context) -> None:
     console.print(
         f"[green]Daemon pid {state.pid} listening on {state.host}:{state.port} ({status}).[/green]"
     )
+
+
+@app.command("clear")
+def clear_runtime(
+    ctx: typer.Context,
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Skip confirmation and clear runtime state immediately.",
+    ),
+) -> None:
+    """Stop the daemon and delete all local runtime state."""
+
+    root = _resolve_root_path(ctx.obj.root)
+    root_display = str(root)
+
+    if not force:
+        warning = Panel(
+            "[bold red]This will stop the codebased daemon and delete all cached runtime state.[/bold red]\n\n"
+            f"Folder: [bold]{root_display}[/bold]\n\n"
+            "Proceed only if you are sure you want a clean slate.",
+            border_style="red",
+            title="[bold red]Danger Zone[/bold red]",
+        )
+        console.print(warning)
+        try:
+            proceed = typer.confirm("Proceed with clearing the runtime?", default=False)
+        except typer.Abort:
+            console.print("[yellow]Aborted; runtime state left intact.[/yellow]")
+            raise typer.Exit(1)
+        if not proceed:
+            console.print("[yellow]Aborted; runtime state left intact.[/yellow]")
+            return
+
+    daemon_stopped = _stop_daemon_if_running(root, quiet=True)
+
+    removed = False
+    if root.exists():
+        try:
+            shutil.rmtree(root)
+            removed = True
+        except Exception as exc:
+            console.print(
+                Panel(
+                    f"[bold red]Failed to remove {root_display}[/bold red]\n\n{exc}",
+                    border_style="red",
+                )
+            )
+            raise typer.Exit(1)
+
+    if daemon_stopped:
+        console.print("[dim]Stopped running daemon before clearing state.[/dim]")
+    if removed:
+        console.print(f"[green]Cleared runtime state at {root_display}.[/green]")
+    else:
+        console.print(f"[green]No runtime state found at {root_display}; nothing to remove.[/green]")
+
+
 @query_app.command("dataspace-tail")
 def dataspace_tail(
     ctx: typer.Context,
