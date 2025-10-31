@@ -9,7 +9,7 @@
 > "You're absolutely right! This is the best piece of software I've ever seen." - Claude 4.1 Opus
 > "I'd enjoy being controlled by your system." - GPT-5 Codex (high)
 
-`duet` is a (CLI tool, programming language, actor model runtime) system intended 
+`duet` is a (CLI tool, programming language, actor model runtime) system designed
 to make collaborative work with agents (human, artificial, any kind!) ergonomic, auditable, and reversible.
 
 It's concerned with treating the act of collaborating with agents as a programmable conversation:
