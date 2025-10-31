@@ -134,10 +134,9 @@ ensures the runtime contract stays consistent.
 ## And there's a Lisp?
 
 _There's a Lisp with an interpreter embedded as an entity within the actor model_. 
-Did you think I'd have you organizing your agent teams through a CLI interface? No, that's a job for a programming language.
 
-Well, we'll give you a programming language. You write programs that run as *entities* alongside your agents. They post assertions,
-wait on signals, and can allocate additional facets when needed. The interpreter has
+Did you think I'd have you organizing your agent teams through a CLI interface? No, that's a job for a programming language.
+Well, we'll give you a programming language. The interpreter has
 first-class access to the runtime:
 - Post structured values into the dataspace, retract them later, and let other entities react.
 - Await transcript updates, tool results, or arbitrary assertions.
