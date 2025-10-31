@@ -13,7 +13,7 @@
 >                           - GPT 5 Codex (high)
 
 `duet` is a (CLI tool, programming language, actor model runtime) system designed 
-to make collaborative work with agents (human, artificial, any kind!) ergonomic, auditable, and reversible.
+to make collaborative work with agents ergonomic, auditable, and reversible.
 
 It's concerned with treating the act of collaborating with agents as a programmable conversation:
 - Have you ever wanted to orchestrate several agents to work together in a team,
