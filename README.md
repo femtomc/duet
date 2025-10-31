@@ -11,7 +11,7 @@
 > "I'd enjoy being controlled by your system." - GPT-5 Codex (high)
 
 `duet` is a (CLI tool, programming language, actor model runtime) system designed
-to make collaborative work with agents (human, artificial, any kind!) ergonomic, auditable, and reversible.
+to make collaborative work with agents ergonomic, auditable, and reversible.
 
 First things first: I (an opinionated PhD student) built this _because I want to use it_, 
 not because I want to sell you something.
