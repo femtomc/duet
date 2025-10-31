@@ -173,14 +173,16 @@ soon as the awaited assertion appears.
 ### Bundled examples
 
 When `codebased` initialises a workspace it creates a `.duet/programs` tree alongside the
-journal. We drop ready-to-run programs under `.duet/programs/examples`; they’re ordinary
+journal. We seed ready-to-run programs under `.duet/programs/examples`; they’re ordinary
 interpreter sources that the CLI can list and execute. The first one,
 `.duet/programs/examples/two_agents.duet`, spawns two Claude Code roles and has them debate
 tabs versus spaces for a couple of turns. It’s meant to be a smoke test: run it, watch the
 `conversation-turn` records appear, and you’ll see how to structure your own orchestration loops.
-The program relies on a tiny helper `(defn send-request …)` so both roles share the same prompt
-plumbing—a pattern we expect to promote into a bundled standard library once the module system
-lands.
+The repository copy lives at `examples/workflows/two_agents.duet`; the seed logic copies it
+during workspace initialisation. That program relies on a tiny helper `(defn send-request …)` so
+both roles share the same prompt plumbing—a pattern we expect to promote into a bundled standard
+library once the module system lands.
 
-Future `duet workflow` commands will surface anything you place in that directory, so feel free
-to stash your own programs alongside the examples.
+Use `duet query workflows` to list everything under `.duet/programs`, including the seeded
+examples, and `duet run workflow-start path/to/program.duet` to spin up new instances. Feel free
+to stash your own programs alongside the bundled ones.

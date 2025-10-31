@@ -10,9 +10,11 @@ use super::error::{CapabilityError, RuntimeError};
 use super::turn::{ActorId, BranchId, FacetId, TurnId};
 use crate::PROTOCOL_VERSION;
 use crate::codebase::{self, transcript};
+use crate::interpreter::Value as InterpreterValue;
 use crate::interpreter::protocol::{
-    DefinitionRecord, InstanceProgress, InstanceRecord, InstanceStatus, ProgramRef,
-    RUN_MESSAGE_LABEL, WaitStatus,
+    DefinitionRecord, InputRequestRecord, InputResponseRecord, InstanceProgress, InstanceRecord,
+    InstanceStatus, ProgramRef, RUN_MESSAGE_LABEL, WaitStatus, input_request_from_value,
+    input_response_to_value,
 };
 use crate::runtime::pattern::Pattern;
 use crate::runtime::reaction::{ReactionDefinition, ReactionEffect, ReactionValue};
@@ -183,6 +185,8 @@ impl<'a, W: Write> Session<'a, W> {
             "transcript_tail" => self.cmd_transcript_tail(params),
             "workflow_list" => self.cmd_workflow_list(params),
             "workflow_start" => self.cmd_workflow_start(params),
+            "workflow_follow" => self.cmd_workflow_follow(params),
+            "workflow_input" => self.cmd_workflow_input(params),
             "reaction_register" => self.cmd_reaction_register(params),
             "reaction_unregister" => self.cmd_reaction_unregister(params),
             "reaction_list" => self.cmd_reaction_list(),
@@ -281,11 +285,16 @@ impl<'a, W: Write> Session<'a, W> {
     fn collect_interpreter_state(
         &mut self,
         binding: &InterpreterBinding,
-    ) -> (Vec<DefinitionRecord>, Vec<InstanceRecord>) {
+    ) -> (
+        Vec<DefinitionRecord>,
+        Vec<InstanceRecord>,
+        Vec<InputRequestRecord>,
+    ) {
         let assertions = self.control.list_assertions_for_actor(&binding.actor);
 
         let mut definitions: HashMap<String, DefinitionRecord> = HashMap::new();
         let mut instances: HashMap<String, InstanceRecord> = HashMap::new();
+        let mut prompts: Vec<InputRequestRecord> = Vec::new();
 
         for (_, value) in assertions {
             if let Some(definition) = DefinitionRecord::parse(&value) {
@@ -295,6 +304,11 @@ impl<'a, W: Write> Session<'a, W> {
 
             if let Some(instance) = InstanceRecord::parse(&value) {
                 instances.insert(instance.instance_id.clone(), instance);
+                continue;
+            }
+
+            if let Some(prompt) = input_request_from_value(&value) {
+                prompts.push(prompt);
             }
         }
 
@@ -304,7 +318,9 @@ impl<'a, W: Write> Session<'a, W> {
         let mut instance_list: Vec<_> = instances.into_values().collect();
         instance_list.sort_by(|a, b| a.instance_id.cmp(&b.instance_id));
 
-        (definition_list, instance_list)
+        prompts.sort_by(|a, b| a.request_id.cmp(&b.request_id));
+
+        (definition_list, instance_list, prompts)
     }
 
     fn discover_example_programs(&self) -> Vec<Value> {
@@ -363,23 +379,7 @@ impl<'a, W: Write> Session<'a, W> {
         }
     }
 
-    fn read_program_description(path: &Path) -> Option<String> {
-        let contents = fs::read_to_string(path).ok()?;
-        for line in contents.lines() {
-            let trimmed = line.trim();
-            if trimmed.starts_with("(\"description\"") {
-                let mut parts = trimmed.split('"');
-                let _ = parts.next()?;
-                let key = parts.next()?;
-                if key != "description" {
-                    continue;
-                }
-                let _ = parts.next();
-                if let Some(desc) = parts.next() {
-                    return Some(desc.trim().to_string());
-                }
-            }
-        }
+    fn read_program_description(_path: &Path) -> Option<String> {
         None
     }
 
@@ -950,7 +950,7 @@ impl<'a, W: Write> Session<'a, W> {
         self.ensure_handshake()?;
         let binding = self.ensure_interpreter_binding()?;
         self.control.drain_pending().map_err(ServiceError::from)?;
-        let (definitions, instances) = self.collect_interpreter_state(&binding);
+        let (definitions, instances, _prompts) = self.collect_interpreter_state(&binding);
 
         let definitions_json: Vec<Value> = definitions.iter().map(serialize_definition).collect();
         let instances_json: Vec<Value> = instances.iter().map(serialize_instance).collect();
@@ -985,7 +985,7 @@ impl<'a, W: Write> Session<'a, W> {
 
         self.control.drain_pending().map_err(ServiceError::from)?;
 
-        let (_, instances_after) = self.collect_interpreter_state(&binding);
+        let (_, instances_after, _) = self.collect_interpreter_state(&binding);
         let new_instance = instances_after
             .into_iter()
             .find(|instance| !before_ids.contains(&instance.instance_id));
@@ -1017,6 +1017,108 @@ impl<'a, W: Write> Session<'a, W> {
         }
 
         Ok(response)
+    }
+
+    fn cmd_workflow_follow(&mut self, params: &Value) -> Result<Value, ServiceError> {
+        self.ensure_handshake()?;
+        let instance_id = params
+            .get("instance_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ServiceError::invalid_param("instance_id"))?;
+
+        let binding = self.ensure_interpreter_binding()?;
+        self.control.drain_pending().map_err(ServiceError::from)?;
+        let (_, instances, prompts) = self.collect_interpreter_state(&binding);
+
+        let instance = instances
+            .into_iter()
+            .find(|entry| entry.instance_id == instance_id)
+            .ok_or_else(|| ServiceError::invalid_param("instance_id"))?;
+
+        let prompt_values: Vec<Value> = prompts
+            .iter()
+            .filter(|prompt| prompt.instance_id == instance.instance_id)
+            .map(serialize_prompt)
+            .collect();
+
+        Ok(json!({
+            "instance": serialize_instance(&instance),
+            "prompts": prompt_values,
+        }))
+    }
+
+    fn cmd_workflow_input(&mut self, params: &Value) -> Result<Value, ServiceError> {
+        self.ensure_handshake()?;
+
+        let instance_id = params
+            .get("instance_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ServiceError::invalid_param("instance_id"))?;
+        let request_id = params
+            .get("request_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ServiceError::invalid_param("request_id"))?;
+        let response_text = params
+            .get("response")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ServiceError::invalid_param("response"))?;
+
+        let binding = self.ensure_interpreter_binding()?;
+        self.control.drain_pending().map_err(ServiceError::from)?;
+        let (_, instances, _) = self.collect_interpreter_state(&binding);
+
+        let instance = instances
+            .into_iter()
+            .find(|entry| entry.instance_id == instance_id)
+            .ok_or_else(|| ServiceError::invalid_param("instance_id"))?;
+
+        let wait_status = match &instance.status {
+            InstanceStatus::Waiting(wait) => wait,
+            _ => {
+                return Err(ServiceError::Protocol(
+                    "workflow is not waiting for input".into(),
+                ));
+            }
+        };
+
+        let (expected_request, tag) = match wait_status {
+            WaitStatus::UserInput {
+                request_id, tag, ..
+            } => (request_id, tag),
+            _ => {
+                return Err(ServiceError::Protocol(
+                    "workflow is not waiting for user input".into(),
+                ));
+            }
+        };
+
+        if request_id != expected_request {
+            return Err(ServiceError::Protocol(
+                "request_id does not match pending prompt".into(),
+            ));
+        }
+
+        let response_record = InputResponseRecord {
+            instance_id: instance.instance_id.clone(),
+            request_id: request_id.to_string(),
+            tag: tag.clone(),
+            response: InterpreterValue::String(response_text.to_string()),
+        };
+
+        let turn = self
+            .control
+            .assert_value(
+                binding.actor.clone(),
+                input_response_to_value(&response_record),
+            )
+            .map_err(ServiceError::from)?;
+
+        self.control.drain_pending().map_err(ServiceError::from)?;
+
+        Ok(json!({
+            "status": "ok",
+            "turn": turn.to_string(),
+        }))
     }
 
     fn cmd_reaction_register(&mut self, params: &Value) -> Result<Value, ServiceError> {
@@ -1643,6 +1745,17 @@ fn serialize_instance(instance: &InstanceRecord) -> Value {
     value
 }
 
+fn serialize_prompt(prompt: &InputRequestRecord) -> Value {
+    let prompt_value = prompt.prompt.to_io_value();
+    json!({
+        "instance_id": prompt.instance_id,
+        "request_id": prompt.request_id,
+        "tag": prompt.tag,
+        "prompt": io_value_to_json(&prompt_value),
+        "summary": io_value_summary(&prompt_value, 80),
+    })
+}
+
 fn serialize_program_ref(program: &ProgramRef) -> Value {
     match program {
         ProgramRef::Definition(id) => json!({
@@ -1691,6 +1804,20 @@ fn serialize_wait_status(wait: &WaitStatus) -> Value {
             "type": "tool-result",
             "tag": tag,
         }),
+        WaitStatus::UserInput {
+            request_id,
+            tag,
+            prompt,
+        } => {
+            let prompt_value = prompt.to_io_value();
+            json!({
+                "type": "user-input",
+                "request_id": request_id,
+                "tag": tag,
+                "prompt": io_value_to_json(&prompt_value),
+                "summary": io_value_summary(&prompt_value, 80),
+            })
+        }
     }
 }
 

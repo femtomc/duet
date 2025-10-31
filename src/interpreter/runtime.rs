@@ -53,6 +53,10 @@ pub trait InterpreterHost: ValueContext {
     fn execute_action(&mut self, action: &Action) -> std::result::Result<(), Self::Error>;
     /// Evaluate a branch condition.
     fn check_condition(&mut self, condition: &Condition) -> std::result::Result<bool, Self::Error>;
+    /// Prepare a wait condition before it is evaluated (assign identifiers, emit side effects).
+    fn prepare_wait(&mut self, _wait: &mut WaitCondition) -> std::result::Result<(), Self::Error> {
+        Ok(())
+    }
     /// Poll whether a wait condition has been satisfied.
     fn poll_wait(&mut self, wait: &WaitCondition) -> std::result::Result<bool, Self::Error>;
     /// Obtain the value associated with the most recently satisfied wait, if any.
@@ -207,7 +211,11 @@ impl<H: InterpreterHost> InterpreterRuntime<H> {
                     frame.index += 1;
                     return Ok(RuntimeEvent::Progress);
                 }
-                Instruction::Await(wait) => {
+                Instruction::Await(mut wait) => {
+                    self.host
+                        .prepare_wait(&mut wait)
+                        .map_err(RuntimeError::Host)?;
+                    frame.instructions[frame.index] = Instruction::Await(wait.clone());
                     if self.host.poll_wait(&wait).map_err(RuntimeError::Host)? {
                         self.waiting = None;
                         if let Some(value) = self.host.take_ready_value() {
@@ -590,7 +598,8 @@ impl<H: InterpreterHost> InterpreterRuntime<H> {
             }),
             ActionTemplate::Log(message) => Ok(Action::Log(message.clone())),
             ActionTemplate::Assert(value_expr) => {
-                Ok(Action::Assert(self.resolve_expr(value_expr, bindings)?))
+                let resolved = self.resolve_expr(value_expr, bindings)?;
+                Ok(Action::Assert(resolved))
             }
             ActionTemplate::Retract(value_expr) => {
                 Ok(Action::Retract(self.resolve_expr(value_expr, bindings)?))
@@ -623,6 +632,23 @@ impl<H: InterpreterHost> InterpreterRuntime<H> {
                     .ok_or_else(|| "tool-result wait :tag must resolve to a string".to_string())?;
                 Ok(WaitCondition::ToolResult {
                     tag: tag_str.to_string(),
+                })
+            }
+            WaitConditionTemplate::UserInput { prompt, tag } => {
+                let prompt_value = self.resolve_expr(prompt, bindings)?;
+                let resolved_tag = if let Some(expr) = tag {
+                    let value = self.resolve_expr(expr, bindings)?;
+                    let tag_str = value.as_str().ok_or_else(|| {
+                        "user-input wait :tag must resolve to a string".to_string()
+                    })?;
+                    Some(tag_str.to_string())
+                } else {
+                    None
+                };
+                Ok(WaitCondition::UserInput {
+                    prompt: prompt_value,
+                    tag: resolved_tag,
+                    request_id: None,
                 })
             }
         }
@@ -972,7 +998,9 @@ mod tests {
                             function: 0,
                             args: vec![
                                 ValueExpr::RoleProperty {
-                                    role: "planner".into(),
+                                    role: Box::new(ValueExpr::Literal(Value::String(
+                                        "planner".into(),
+                                    ))),
                                     key: "label".into(),
                                 },
                                 ValueExpr::LastWaitField { index: 2 },

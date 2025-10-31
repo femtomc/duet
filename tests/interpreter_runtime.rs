@@ -452,3 +452,76 @@ fn interpreter_attach_entity_observes_local_assertions() {
 
     assert!(handled, "attached entity should observe local assertions");
 }
+
+#[test]
+fn assert_record_resolves_role_property() {
+    ensure_entities_registered();
+
+    let temp_dir = TempDir::new().unwrap();
+    let config = RuntimeConfig {
+        root: temp_dir.path().to_path_buf(),
+        snapshot_interval: 5,
+        flow_control_limit: 100,
+        debug: false,
+    };
+
+    let mut control = Control::init(config).unwrap();
+
+    let interpreter_actor = ActorId::new();
+    let interpreter_facet = FacetId::new();
+
+    control
+        .register_entity(
+            interpreter_actor.clone(),
+            interpreter_facet.clone(),
+            "interpreter".to_string(),
+            IOValue::symbol("unused"),
+        )
+        .unwrap();
+
+    let program = r#"(workflow role-prop-assert)
+(roles (helper :entity-type "test-local"))
+(state start
+  (attach-entity :role helper :entity-type "test-local")
+  (action (assert (record mock-request
+                          (role-property helper "entity")
+                          "req-1")))
+  (await (record mock-response :field 1 :equals "req-1"))
+  (terminal))"#;
+
+    let run_payload = IOValue::record(
+        IOValue::symbol(RUN_MESSAGE_LABEL),
+        vec![IOValue::new(program.to_string())],
+    );
+
+    {
+        let runtime = control.runtime_mut();
+        runtime.send_message(
+            interpreter_actor.clone(),
+            interpreter_facet.clone(),
+            run_payload,
+        );
+        runtime.step().unwrap();
+    }
+
+    control.drain_pending().unwrap();
+
+    let assertions = control
+        .runtime()
+        .assertions_for_actor(&interpreter_actor)
+        .expect("interpreter assertions available");
+
+    let request = assertions
+        .iter()
+        .find_map(|(_, value)| record_with_label(value, "mock-request"))
+        .expect("mock-request asserted");
+
+    let entity_id = request
+        .field_string(0)
+        .expect("first field should be resolved entity id");
+    assert!(
+        Uuid::parse_str(&entity_id).is_ok(),
+        "entity id should be a UUID, got {}",
+        entity_id
+    );
+}

@@ -177,7 +177,9 @@ pub enum InstructionTemplate {
     Await(WaitConditionTemplate),
     /// Branch with templated bodies.
     Branch {
+        /// Conditional arms evaluated during instantiation.
         arms: Vec<BranchArmTemplate>,
+        /// Optional fallback body instantiated when no conditions match.
         otherwise: Option<Vec<InstructionTemplate>>,
     },
     /// Loop with templated body.
@@ -186,7 +188,9 @@ pub enum InstructionTemplate {
     Transition(String),
     /// Nested function call awaiting instantiation.
     Call {
+        /// Target function index inside the program definition list.
         function: usize,
+        /// Templated arguments resolved when the function is invoked.
         args: Vec<ValueExpr>,
     },
 }
@@ -203,46 +207,79 @@ pub struct BranchArmTemplate {
 /// Action template capable of referencing parameters.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ActionTemplate {
+    /// Invoke a capability exposed by another entity using templated inputs.
     InvokeTool {
+        /// Role responsible for the invocation (typically bound to an entity).
         role: String,
+        /// Capability identifier resolved at build time.
         capability: String,
+        /// Structured payload expression evaluated at runtime.
         payload: Option<ValueExpr>,
+        /// Optional correlation tag to associate with results.
         tag: Option<String>,
     },
+    /// Send a message to another actor/facet with templated addressing.
     Send {
+        /// Target actor expression.
         actor: ValueExpr,
+        /// Target facet expression.
         facet: ValueExpr,
+        /// Payload expression evaluated at runtime.
         payload: ValueExpr,
     },
+    /// Observe a dataspace signal and run a handler program.
     Observe {
+        /// Signal label to watch for.
         label: String,
+        /// Handler program reference to execute.
         handler: ProgramRef,
     },
+    /// Spawn a child facet using the provided parent expression.
     Spawn {
+        /// Optional parent facet identifier captured at build time.
         parent: Option<String>,
     },
+    /// Spawn a new entity/actor and bind it to a role with templated config.
     SpawnEntity {
+        /// Role whose properties will receive the spawned identifiers.
         role: String,
+        /// Optional explicit entity type identifier.
         entity_type: Option<String>,
+        /// Agent kind identifier used to infer the entity type.
         agent_kind: Option<String>,
+        /// Configuration payload expression evaluated at runtime.
         config: Option<ValueExpr>,
     },
+    /// Attach an entity to an existing facet with templated fields.
     AttachEntity {
+        /// Role whose properties will be updated with attached identifiers.
         role: String,
+        /// Optional facet expression selecting the attachment target.
         facet: Option<ValueExpr>,
+        /// Optional explicit entity type identifier.
         entity_type: Option<String>,
+        /// Agent kind identifier used when deriving the entity type.
         agent_kind: Option<String>,
+        /// Configuration payload expression evaluated at runtime.
         config: Option<ValueExpr>,
     },
+    /// Generate a request identifier for a role property.
     GenerateRequestId {
+        /// Role whose request counter should be incremented.
         role: String,
+        /// Property name that receives the generated identifier.
         property: String,
     },
+    /// Terminate a facet selected via an expression.
     Stop {
+        /// Facet identifier captured at build time.
         facet: String,
     },
+    /// Write a diagnostic log string.
     Log(String),
+    /// Assert a structured value into the dataspace.
     Assert(ValueExpr),
+    /// Retract a structured value from the dataspace.
     Retract(ValueExpr),
 }
 
@@ -268,6 +305,13 @@ pub enum WaitConditionTemplate {
         /// Tag expression evaluated at instantiation time.
         tag: ValueExpr,
     },
+    /// Wait for interactive user input surfaced via the CLI.
+    UserInput {
+        /// Prompt payload presented to the user.
+        prompt: ValueExpr,
+        /// Optional tag used to correlate the response.
+        tag: Option<ValueExpr>,
+    },
 }
 
 /// Conditions that may be awaited.
@@ -291,6 +335,15 @@ pub enum WaitCondition {
     ToolResult {
         /// Tag that identifies the awaited result.
         tag: String,
+    },
+    /// Wait for interactive user input surfaced via the CLI.
+    UserInput {
+        /// Prompt payload presented to the user.
+        prompt: Value,
+        /// Optional correlation tag associated with the request.
+        tag: Option<String>,
+        /// Deterministic request identifier assigned at runtime.
+        request_id: Option<String>,
     },
 }
 

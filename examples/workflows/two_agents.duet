@@ -1,0 +1,55 @@
+(workflow two-agent-debate)
+
+(metadata
+  (label "Two-Agent Tabs vs Spaces Demo")
+  (summary "Spawn two Claude Code agents that debate indentation styles."))
+
+(roles
+  (tabs-advocate :agent-kind "claude-code")
+  (spaces-advocate :agent-kind "claude-code"))
+
+(defn send-request (role request-id prompt)
+  (action
+    (assert (record agent-request
+                    (role-property role "entity")
+                    request-id
+                    prompt))))
+
+(state boot
+  (action (attach-entity :role tabs-advocate :agent-kind "claude-code"))
+  (action (attach-entity :role spaces-advocate :agent-kind "claude-code"))
+  (goto opening))
+
+(state opening
+  (send-request tabs-advocate "opening-1"
+    "You are the tabs advocate in a friendly debate about indentation. Offer a concise opening statement praising tabs.")
+  (await (record agent-response :field 1 :equals "opening-1"))
+  (goto spaces-turn))
+
+(state spaces-turn
+  (send-request spaces-advocate "counter-1"
+    (string-append
+      "The tabs advocate just said:\n\n"
+      (last-wait-field 3)
+      "\n\nRespond from the spaces perspective with clear arguments."))
+  (await (record agent-response :field 1 :equals "counter-1"))
+  (goto rebuttal))
+
+(state rebuttal
+  (send-request tabs-advocate "rebuttal-1"
+    (string-append
+      "The spaces advocate replied with:\n\n"
+      (last-wait-field 3)
+      "\n\nProvide a short rebuttal defending tabs again."))
+  (await (record agent-response :field 1 :equals "rebuttal-1"))
+  (goto closing))
+
+(state closing
+  (send-request spaces-advocate "closing-1"
+    (string-append
+      "Close the debate by acknowledging the tabs advocate's rebuttal:\n\n"
+      (last-wait-field 3)
+      "\n\nShare a balanced wrap-up that highlights both sides."))
+  (await (record agent-response :field 1 :equals "closing-1"))
+  (action (log "Two-agent debate completed"))
+  (terminal))

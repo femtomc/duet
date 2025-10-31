@@ -11,6 +11,7 @@ import signal
 import socket
 import subprocess
 import shutil
+from collections import Counter
 import time
 import traceback
 from dataclasses import dataclass
@@ -22,6 +23,7 @@ import rich_click as click  # Must be imported before typer to patch Click
 import typer
 from rich import box
 from rich.console import Console, Group
+from rich.live import Live
 from rich.json import JSON
 from rich.panel import Panel
 from rich.markdown import Markdown
@@ -88,6 +90,11 @@ query_app = typer.Typer(
     add_completion=True,
     rich_markup_mode="rich",
 )
+actors_app = typer.Typer(
+    help="Inspect active actors, their entities, and dataspace activity.",
+    add_completion=True,
+    rich_markup_mode="rich",
+)
 reaction_app = typer.Typer(
     help="Manage reactive automations attached to the runtime.",
     add_completion=True,
@@ -105,6 +112,7 @@ app.add_typer(codebased_app, name="codebased", rich_help_panel="Codebased")
 app.add_typer(time_app, name="time", rich_help_panel="Time")
 app.add_typer(query_app, name="query", rich_help_panel="Query")
 app.add_typer(debug_app, name="debug")
+query_app.add_typer(actors_app, name="actors", rich_help_panel="Actors")
 debug_app.add_typer(reaction_app, name="reaction")
 
 
@@ -689,6 +697,7 @@ def query_group(ctx: typer.Context) -> None:
         _show_group_help(
             ctx,
             examples=[
+                "duet query actors",
                 "duet query responses --request-id <uuid>",
                 "duet query transcript-tail --request-id <uuid>",
                 "duet query workflows",
@@ -700,6 +709,40 @@ def query_group(ctx: typer.Context) -> None:
 def reaction_group(ctx: typer.Context) -> None:
     if ctx.invoked_subcommand is None:
         _show_group_help(ctx)
+
+
+@actors_app.callback(invoke_without_command=True)
+def actors_root(
+    ctx: typer.Context,
+    actor: Optional[str] = typer.Option(
+        None,
+        help="Filter to a specific actor identifier (UUID).",
+    ),
+    include_assertions: bool = typer.Option(
+        False,
+        "--include-assertions",
+        help="Fetch dataspace assertions for each actor.",
+    ),
+    assertions_limit: int = typer.Option(
+        5,
+        "--assertions-limit",
+        min=0,
+        help="Maximum assertions to display per actor when including assertions (0 shows all returned).",
+    ),
+) -> None:
+    """Show active actors along with their entities and faceted dataspace activity."""
+
+    if ctx.invoked_subcommand:
+        return
+
+    _run(
+        _run_query_actors(
+            ctx.obj,
+            actor.strip() if actor else None,
+            include_assertions,
+            assertions_limit,
+        )
+    )
 
 
 @reaction_app.command("register")
@@ -1091,6 +1134,205 @@ async def _run_call(state: CLIState, rpc_command: str, params: Dict[str, Any], p
         await client.close()
 
 
+async def _workflow_start_command(
+    state: CLIState, params: Dict[str, Any], interactive: bool
+) -> None:
+    client = await _connect_client(state)
+    try:
+        result = await client.call("workflow_start", params)
+        if not interactive:
+            _print_workflow_start(result)
+            return
+
+        if not isinstance(result, dict):
+            _print_workflow_start(result)
+            console.print(
+                "[red]Interactive mode requires definition metadata; falling back to batch output.[/red]"
+            )
+            return
+
+        instance = result.get("instance")
+        if not isinstance(instance, dict):
+            _print_workflow_start(result)
+            console.print(
+                "[red]Workflow start response did not include instance details; cannot enter interactive mode.[/red]"
+            )
+            return
+
+        instance_id = instance.get("id")
+        if not isinstance(instance_id, str):
+            _print_workflow_start(result)
+            console.print(
+                "[red]Workflow start response missing instance id; cannot enter interactive mode.[/red]"
+            )
+            return
+
+        console.print(
+            Panel(
+                f"Interactive session attached to workflow [bold]{instance_id}[/bold]. Press Ctrl+C to exit.",
+                border_style="cyan",
+            )
+        )
+
+        await _workflow_interactive_loop(client, instance_id)
+    finally:
+        await client.close()
+
+
+async def _workflow_interactive_loop(client: ControlClient, instance_id: str) -> None:
+    refresh_interval = 0.5
+
+    last_instance: Dict[str, Any] = {}
+
+    try:
+        with Live(refresh_per_second=4, console=console) as live:
+            while True:
+                result = await client.call("workflow_follow", {"instance_id": instance_id})
+                if not isinstance(result, dict):
+                    live.stop()
+                    _print_result(result, "workflow:follow")
+                    break
+
+                instance = result.get("instance") or {}
+                last_instance = instance
+                prompts = result.get("prompts") or []
+
+                live.update(_render_workflow_view(instance, prompts))
+
+                status = (instance.get("status") or {}).get("state")
+                if status in {"completed", "failed"}:
+                    break
+
+                if status == "waiting":
+                    wait_info = (instance.get("status") or {}).get("wait") or {}
+                    if wait_info.get("type") == "user-input":
+                        prompt_entry = prompts[0] if prompts else wait_info
+                        live.stop()
+                        response = await _prompt_for_input(prompt_entry)
+                        if response is None:
+                            console.print("[yellow]Interactive session aborted by user.[/yellow]")
+                            break
+
+                        request_id = prompt_entry.get("request_id")
+                        if not request_id:
+                            console.print(
+                                "[red]Prompt is missing a request id; cannot submit response.[/red]"
+                            )
+                            break
+
+                        await client.call(
+                            "workflow_input",
+                            {
+                                "instance_id": instance_id,
+                                "request_id": request_id,
+                                "response": response,
+                            },
+                        )
+
+                        live.start()
+                        continue
+
+                await asyncio.sleep(refresh_interval)
+    except KeyboardInterrupt:
+        console.print("[yellow]Interactive session interrupted by user.[/yellow]")
+        return
+
+    if last_instance:
+        status = (last_instance.get("status") or {}).get("state", "-")
+        console.print(
+            Panel(
+                f"Workflow [bold]{instance_id}[/bold] finished with status [bold]{status}[/bold].",
+                border_style="cyan",
+            )
+        )
+
+
+async def _prompt_for_input(prompt_entry: Dict[str, Any]) -> Optional[str]:
+    header = f"Prompt {prompt_entry.get('request_id', '?')}"
+    tag = prompt_entry.get("tag")
+    if tag:
+        header += f" ({tag})"
+
+    prompt_json = prompt_entry.get("prompt")
+    if prompt_json is not None:
+        body = JSON.from_data(prompt_json)
+    else:
+        body = Text(prompt_entry.get("summary") or "(no details)")
+
+    console.print(Panel(body, title=header, border_style="cyan"))
+    console.print("[dim]Leave empty to cancel.[/dim]")
+
+    loop = asyncio.get_event_loop()
+
+    def _read_input() -> Optional[str]:
+        try:
+            return console.input("[bold green]Response> [/bold green]")
+        except (KeyboardInterrupt, EOFError):
+            return None
+
+    response = await loop.run_in_executor(None, _read_input)
+    if response is None:
+        return None
+
+    response = response.strip()
+    if not response:
+        return None
+
+    if response.lower() in {":q", ":quit", ":exit"}:
+        return None
+
+    return response
+
+
+def _render_workflow_view(instance: Dict[str, Any], prompts: List[Dict[str, Any]]) -> Group:
+    status_panel = _render_instance_panel(instance)
+    prompt_panel = _render_prompt_panel(prompts)
+    return Group(status_panel, prompt_panel)
+
+
+def _render_instance_panel(instance: Dict[str, Any]) -> Panel:
+    table = Table.grid(padding=(0, 1))
+    table.add_row("Program", instance.get("program_name", "-"))
+    table.add_row("Instance", instance.get("id", "-"))
+
+    status = instance.get("status") or {}
+    status_text = status.get("state", "-")
+    wait_info = status.get("wait") or {}
+    if status_text == "waiting" and wait_info.get("type") == "user-input":
+        summary = wait_info.get("summary") or wait_info.get("label") or "user input"
+        status_text = f"waiting ({summary})"
+    table.add_row("Status", status_text)
+
+    if instance.get("state"):
+        table.add_row("State", instance["state"])
+
+    progress = instance.get("progress") or {}
+    if progress:
+        pending = "yes" if progress.get("entry_pending") else "no"
+        table.add_row("Entry Pending", pending)
+        table.add_row("Frame Depth", str(progress.get("frame_depth", 0)))
+
+    return Panel(table, title="Workflow", border_style="cyan")
+
+
+def _render_prompt_panel(prompts: List[Dict[str, Any]]) -> Panel:
+    if not prompts:
+        return Panel("[dim]No pending prompts[/dim]", title="Prompts", border_style="cyan")
+
+    rows = []
+    for prompt in prompts:
+        request_id = prompt.get("request_id", "?")
+        tag = prompt.get("tag")
+        summary = prompt.get("summary") or "(no summary)"
+        label = f"{request_id}"
+        if tag:
+            label += f" [{tag}]"
+        rows.append(f"• [bold]{label}[/bold]\n  {summary}")
+
+    body = Text("\n".join(rows))
+    return Panel(body, title="Prompts", border_style="cyan")
+
+
 async def _run_agent_chat(
     state: CLIState,
     prompt: str,
@@ -1152,6 +1394,104 @@ async def _run_agent_chat(
             params["wait_ms"] = int(extra_wait * 1000)
             follow_up = await client.call("agent_responses", params)
             _print_result(follow_up, "agent:responses")
+    finally:
+        await client.close()
+
+
+async def _run_query_actors(
+    state: CLIState,
+    actor_filter: Optional[str],
+    include_assertions: bool,
+    assertions_limit: int,
+) -> None:
+    client = await _connect_client(state)
+    try:
+        params: Dict[str, Any] = {}
+        if actor_filter:
+            params["actor"] = actor_filter
+
+        entities_result = await client.call("list_entities", params)
+        if not isinstance(entities_result, dict):
+            console.print(JSON.from_data(entities_result))
+            return
+
+        raw_entities = entities_result.get("entities") or []
+        summaries: Dict[str, Dict[str, Any]] = {}
+
+        def ensure_summary(actor_id: str) -> Dict[str, Any]:
+            summary = summaries.get(actor_id)
+            if summary is None:
+                summary = {
+                    "entities": [],
+                    "entity_types": Counter(),
+                    "facets": set(),
+                    "assertions": [],
+                }
+                summaries[actor_id] = summary
+            return summary
+
+        for entry in raw_entities:
+            if not isinstance(entry, dict):
+                continue
+            actor_id = str(entry.get("actor") or "").strip()
+            if not actor_id:
+                continue
+            summary = ensure_summary(actor_id)
+            summary["entities"].append(entry)
+            entity_type = str(entry.get("entity_type") or "").strip()
+            if entity_type:
+                summary["entity_types"][entity_type] += 1
+            facet = str(entry.get("facet") or "").strip()
+            if facet:
+                summary["facets"].add(facet)
+
+        if actor_filter and actor_filter not in summaries:
+            ensure_summary(actor_filter)
+
+        if include_assertions:
+            limit_param = None if assertions_limit == 0 else assertions_limit
+            target_actor_ids = [actor_filter] if actor_filter else list(summaries.keys())
+
+            if not target_actor_ids and not actor_filter:
+                fetch_params: Dict[str, Any] = {}
+                if limit_param:
+                    fetch_params["limit"] = limit_param
+                assertions_result = await client.call("dataspace_assertions", fetch_params)
+                if isinstance(assertions_result, dict):
+                    for assertion in assertions_result.get("assertions") or []:
+                        if not isinstance(assertion, dict):
+                            continue
+                        actor_id = str(assertion.get("actor") or "").strip()
+                        if not actor_id:
+                            continue
+                        summary = ensure_summary(actor_id)
+                        summary["assertions"].append(assertion)
+                target_actor_ids = list(summaries.keys())
+
+            for actor_id in target_actor_ids:
+                if not actor_id:
+                    continue
+                assertion_params: Dict[str, Any] = {"actor": actor_id}
+                if limit_param:
+                    assertion_params["limit"] = limit_param
+                assertions_result = await client.call("dataspace_assertions", assertion_params)
+                if isinstance(assertions_result, dict):
+                    assertions = [
+                        item
+                        for item in assertions_result.get("assertions") or []
+                        if isinstance(item, dict)
+                    ]
+                    ensure_summary(actor_id)["assertions"] = assertions
+
+        if not summaries:
+            console.print("[yellow]No actors found.[/yellow]")
+            return
+
+        panels = [
+            _render_actor_summary(actor_id, summary, include_assertions, assertions_limit)
+            for actor_id, summary in sorted(summaries.items(), key=lambda item: item[0])
+        ]
+        console.print(Group(*panels) if len(panels) > 1 else panels[0])
     finally:
         await client.close()
 
@@ -1908,6 +2248,108 @@ def _print_workspace_read(result: Any) -> None:
             border_style="green",
         )
     )
+
+
+def _format_counter_summary(counter: Counter, max_items: int = 4) -> str:
+    if not counter:
+        return "—"
+    items = counter.most_common()
+    display = [f"{name} ({count})" for name, count in items[:max_items]]
+    if len(items) > max_items:
+        display.append(f"+{len(items) - max_items} more")
+    return ", ".join(display)
+
+
+def _format_compact_list(items: Iterable[str], max_items: int = 3) -> str:
+    unique = [item for item in dict.fromkeys(items) if item]
+    if not unique:
+        return "—"
+    display = [(_short_id(value) or value) for value in unique[:max_items]]
+    if len(unique) > max_items:
+        display.append(f"+{len(unique) - max_items} more")
+    return ", ".join(display)
+
+
+def _extract_assertion_label(entry: Dict[str, Any]) -> Optional[str]:
+    if not isinstance(entry, dict):
+        return None
+    structured = entry.get("value_structured")
+    if isinstance(structured, dict):
+        label = structured.get("label")
+        if isinstance(label, str) and label.strip():
+            return label
+    summary = entry.get("summary")
+    if isinstance(summary, str) and summary.strip():
+        return summary
+    return None
+
+
+def _render_actor_summary(
+    actor_id: str,
+    summary: Dict[str, Any],
+    include_assertions: bool,
+    assertions_limit: int,
+) -> Panel:
+    entities: List[Dict[str, Any]] = summary.get("entities", [])
+    entity_types: Counter = summary.get("entity_types", Counter())
+    facets = sorted(str(facet) for facet in summary.get("facets", set()))
+
+    metadata_pairs = [
+        ("Actor", _short_id(actor_id) or actor_id),
+        ("Entities", str(len(entities))),
+        ("Facets", str(len(facets))),
+        ("Entity Types", _format_counter_summary(entity_types)),
+    ]
+    if len(actor_id) > 12:
+        metadata_pairs.append(("Full Actor ID", actor_id))
+
+    body_parts: List[Any] = []
+    metadata = _metadata_block(metadata_pairs)
+    if metadata is not None:
+        body_parts.append(metadata)
+
+    if entities:
+        entity_table = Table(title="Entities", box=box.SIMPLE, show_header=True)
+        entity_table.add_column("Type", style="cyan", no_wrap=True)
+        entity_table.add_column("Count", style="white", justify="right")
+        entity_table.add_column("Facets", style="dim")
+        for type_name, count in sorted(entity_types.items(), key=lambda item: (-item[1], item[0])):
+            facets_for_type = [
+                str(item.get("facet") or "")
+                for item in entities
+                if item.get("entity_type") == type_name
+            ]
+            entity_table.add_row(type_name or "?", str(count), _format_compact_list(facets_for_type))
+        body_parts.append(entity_table)
+    else:
+        body_parts.append(Text("No entities registered.", style="dim"))
+
+    if include_assertions:
+        assertions = summary.get("assertions") or []
+        if assertions:
+            assertion_table = Table(title="Assertions", box=box.SIMPLE, show_header=True)
+            assertion_table.add_column("Handle", style="dim", no_wrap=True)
+            assertion_table.add_column("Label", style="cyan", no_wrap=True)
+            assertion_table.add_column("Summary", style="white")
+            for entry in assertions:
+                handle = entry.get("handle") if isinstance(entry, dict) else None
+                handle_display = _short_id(handle) or str(handle) if handle else "-"
+                label = _extract_assertion_label(entry) or "-"
+                summary_text = entry.get("summary") if isinstance(entry, dict) else None
+                if not isinstance(summary_text, str) or not summary_text:
+                    value = entry.get("value") if isinstance(entry, dict) else None
+                    summary_text = _summarize_value(value, max_length=80)
+                assertion_table.add_row(handle_display, label, summary_text)
+            if assertions_limit > 0:
+                assertion_table.caption = f"Showing up to {assertions_limit} assertions."
+            body_parts.append(assertion_table)
+        else:
+            body_parts.append(Text("No assertions for this actor.", style="dim"))
+
+    body = Group(*body_parts) if len(body_parts) > 1 else body_parts[0]
+    title = f"Actor {_short_id(actor_id) or actor_id}"
+    subtitle = f"{len(entities)} entities · {len(facets)} facets"
+    return Panel(body, title=title, subtitle=subtitle, border_style="cyan", box=box.ROUNDED)
 
 
 def _print_chat_ack(result: Dict[str, Any], agent: str, *, show_hint: bool = True) -> None:
@@ -3115,6 +3557,11 @@ def workflow_start(
         "--label",
         help="Optional label for the workflow instance.",
     ),
+    interactive: bool = typer.Option(
+        False,
+        "--interactive",
+        help="Follow the workflow in an interactive TUI and provide user input when prompted.",
+    ),
 ) -> None:
     """Start a workflow using the provided definition file."""
     definition_text = definition.read_text(encoding="utf-8")
@@ -3124,7 +3571,7 @@ def workflow_start(
     }
     if label:
         params["label"] = label
-    _run(_run_call(ctx.obj, "workflow_start", params, "workflow:start"))
+    _run(_workflow_start_command(ctx.obj, params, interactive))
 
 
 def main_entrypoint() -> None:

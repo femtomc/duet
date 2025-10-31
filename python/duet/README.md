@@ -23,7 +23,8 @@ complete overview. Frequently used entry points include:
   - `duet agent responses --select`
 - `duet transcript show|tail`
 - `duet dataspace tail`
-- `duet workflow start|list`
+- `duet query workflows`
+- `duet run workflow-start --interactive examples/workflows/...`
 - `duet daemon start|status|stop` (local daemon lifecycle)
 
 When you need the full identifiers behind the truncated request ids, run

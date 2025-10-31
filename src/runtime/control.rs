@@ -72,6 +72,19 @@ impl Control {
         }
     }
 
+    /// Assert a value directly into an actor's dataspace and execute resulting turns.
+    pub fn assert_value(&mut self, actor: ActorId, value: preserves::IOValue) -> Result<TurnId> {
+        self.runtime.assert_value(actor.clone(), value);
+
+        if let Some(record) = self.runtime.step()? {
+            Ok(record.turn_id)
+        } else {
+            Err(super::error::RuntimeError::Init(
+                "No turn executed after asserting value".into(),
+            ))
+        }
+    }
+
     /// Step forward by N turns
     pub fn step(&mut self, count: usize) -> Result<Vec<TurnSummary>> {
         let records = self.runtime.step_n(count)?;

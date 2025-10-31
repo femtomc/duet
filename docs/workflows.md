@@ -206,7 +206,8 @@ patterns continue to function deterministically.
 ### Building Helper Functions
 
 Reusable orchestration logic belongs in ordinary functions. For example, the
-two-agent demo defines a single helper that addresses any role:
+two-agent demo (`examples/workflows/two_agents.duet`, mirrored automatically into
+`.duet/programs/examples/two_agents.duet`) defines a single helper that addresses any role:
 
 ```
 (defn send-request (role request-id prompt)
@@ -258,18 +259,25 @@ An AOT compiler could eventually translate workflows into a set of actors/facets
 without a runtime interpreter, but the first milestone is an interpreter entity
 that consumes the AST.
 
-## CLI Integration Targets
+## CLI Touchpoints
 
-* `duet workflow define file.lisp` – posts `(workflow-definition …)` to the dataspace.
-* `duet workflow start file.lisp --label feature-42` – creates an instance.
-* `duet workflow watch feature-42` – tails `workflow/state` and related transcripts.
-* `duet workflow list` – lists definitions + running instances (using the new service scaffolding).
+The CLI exposes the interpreter through existing command groups:
+
+* `duet query workflows` – lists interpreter definitions, active instances, and example programs
+  discovered under `.duet/programs`.
+* `duet run workflow-start path/to/program.duet [--label feature-42]` – starts a workflow using the
+  supplied source.
+* `duet run workflow-start --interactive path/to/program.duet` – launches the Rich TUI to follow
+  execution and satisfy prompts in place.
+
+Additional management commands (pause/resume, definition registration from dataspace, richer
+inspection) will land under the existing `run` / `query` namespaces instead of a dedicated
+`workflow` subgroup.
 
 ## Next Steps
 
 1. Extend the parser/IR builder with macro/templating support as needed.
-2. Implement the interpreter runtime in `src/interpreter/runtime.rs` so programs
-   emit real actor VM actions.
-3. Extend service RPCs to enumerate definitions/instances and start programs (currently stubs).
-4. Flesh out CLI commands (`duet workflow define/start/watch/list`).
-5. Provide template definitions for common orchestrations (planner/worker, self-review, etc.).
+2. Implement additional service RPCs for pausing, resuming, and enumerating historical instances.
+3. Flesh out CLI affordances (selecting instances, interactive resume) on top of the `run` / `query`
+   groups.
+4. Provide template definitions for common orchestrations (planner/worker, self-review, etc.).

@@ -17,8 +17,12 @@ pub fn build_ir(program: &Program) -> Result<ProgramIr> {
     let mut roles = Vec::new();
     let mut state_forms: Vec<Vec<Expr>> = Vec::new();
     let mut function_forms: Vec<Vec<Expr>> = Vec::new();
+    let mut top_level_heads: Vec<String> = Vec::new();
+    let mut nested_state_parent: Option<String> = None;
 
     for form in &program.forms {
+        let head_symbol = form_head(form);
+        top_level_heads.push(head_symbol.clone());
         match form {
             Expr::List(items) if matches_symbol(items.first(), "metadata") => {
                 for entry in &items[1..] {
@@ -50,7 +54,13 @@ pub fn build_ir(program: &Program) -> Result<ProgramIr> {
                 // name already inferred
                 continue;
             }
-            _ => {}
+            _ => {
+                if nested_state_parent.is_none() {
+                    if let Some(parent) = find_nested_state(form) {
+                        nested_state_parent = Some(parent);
+                    }
+                }
+            }
         }
     }
 
@@ -85,7 +95,21 @@ pub fn build_ir(program: &Program) -> Result<ProgramIr> {
     }
 
     if states.is_empty() {
-        return Err(validation("program must declare at least one state"));
+        let mut message = format!(
+            "program '{}' must declare at least one top-level (state ...) form.",
+            program.name
+        );
+        if !top_level_heads.is_empty() {
+            let list = top_level_heads.join(", ");
+            message.push_str(&format!(" Top-level forms present: {}.", list));
+        }
+        if let Some(parent) = nested_state_parent {
+            message.push_str(&format!(
+                " Hint: found a (state ...) nested inside a ({}) form; move state declarations to the top level.",
+                parent
+            ));
+        }
+        return Err(validation(&message));
     }
 
     Ok(ProgramIr {
@@ -152,6 +176,45 @@ fn parse_state(items: &[Expr], prototypes: &HashMap<String, FunctionPrototype>) 
         body,
         terminal,
     })
+}
+
+fn form_head(expr: &Expr) -> String {
+    if let Expr::List(items) = expr {
+        if let Some(Expr::Symbol(sym)) = items.first() {
+            return sym.clone();
+        }
+        "(list)".to_string()
+    } else {
+        "(atom)".to_string()
+    }
+}
+
+fn find_nested_state(expr: &Expr) -> Option<String> {
+    fn walk(expr: &Expr, parent: Option<&str>) -> Option<String> {
+        if let Expr::List(items) = expr {
+            if let Some(Expr::Symbol(head)) = items.first() {
+                if head == "state" {
+                    if let Some(parent_head) = parent {
+                        return Some(parent_head.to_string());
+                    }
+                }
+                for item in &items[1..] {
+                    if let Some(found) = walk(item, Some(head)) {
+                        return Some(found);
+                    }
+                }
+            } else {
+                for item in items {
+                    if let Some(found) = walk(item, parent) {
+                        return Some(found);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    walk(expr, None)
 }
 
 fn parse_program_ref_expr(expr: &Expr) -> Result<ProgramRef> {
@@ -1027,6 +1090,38 @@ fn parse_wait(expr: &Expr) -> Result<WaitCondition> {
             let tag = tag.ok_or_else(|| validation("tool-result wait requires :tag"))?;
             Ok(WaitCondition::ToolResult { tag })
         }
+        "user-input" => {
+            let mut prompt = None;
+            let mut tag = None;
+            if list.len() == 2 && !matches!(list[1], Expr::Keyword(_)) {
+                prompt = Some(parse_value_literal(&list[1])?);
+            } else {
+                let mut idx = 1;
+                while idx < list.len() {
+                    let key = expect_keyword(&list[idx])?;
+                    idx += 1;
+                    match key.as_str() {
+                        "prompt" => {
+                            prompt = Some(parse_value_literal(&list[idx])?);
+                            idx += 1;
+                        }
+                        "tag" => {
+                            tag = Some(expect_string(&list[idx])?);
+                            idx += 1;
+                        }
+                        _ => return Err(validation("unknown user-input wait argument")),
+                    }
+                }
+            }
+
+            let prompt =
+                prompt.ok_or_else(|| validation("user-input wait requires a :prompt value"))?;
+            Ok(WaitCondition::UserInput {
+                prompt,
+                tag,
+                request_id: None,
+            })
+        }
         _ => Err(validation("unknown wait condition")),
     }
 }
@@ -1105,6 +1200,34 @@ fn parse_wait_template(expr: &Expr, params: &HashSet<String>) -> Result<WaitCond
 
             let tag = tag.ok_or_else(|| validation("tool-result wait requires :tag"))?;
             Ok(WaitConditionTemplate::ToolResult { tag })
+        }
+        "user-input" => {
+            let mut prompt = None;
+            let mut tag = None;
+            if list.len() == 2 && !matches!(list[1], Expr::Keyword(_)) {
+                prompt = Some(parse_value_expr(&list[1], params)?);
+            } else {
+                let mut idx = 1;
+                while idx < list.len() {
+                    let key = expect_keyword(&list[idx])?;
+                    idx += 1;
+                    match key.as_str() {
+                        "prompt" => {
+                            prompt = Some(parse_value_expr(&list[idx], params)?);
+                            idx += 1;
+                        }
+                        "tag" => {
+                            tag = Some(parse_value_expr(&list[idx], params)?);
+                            idx += 1;
+                        }
+                        _ => return Err(validation("unknown user-input wait argument")),
+                    }
+                }
+            }
+
+            let prompt =
+                prompt.ok_or_else(|| validation("user-input wait requires a :prompt value"))?;
+            Ok(WaitConditionTemplate::UserInput { prompt, tag })
         }
         _ => Err(validation("unknown wait condition")),
     }

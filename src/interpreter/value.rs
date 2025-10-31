@@ -31,6 +31,13 @@ pub enum Value {
         /// Positional field values.
         fields: Vec<Value>,
     },
+    /// Placeholder that resolves a role property at runtime for literal contexts.
+    RoleProperty {
+        /// Role whose property should be fetched.
+        role: Box<Value>,
+        /// Property key to read from the role binding.
+        key: String,
+    },
 }
 
 impl Value {
@@ -51,6 +58,9 @@ impl Value {
                 let field_values: Vec<IOValue> =
                     fields.iter().map(|field| field.to_io_value()).collect();
                 IOValue::record(IOValue::symbol(label.clone()), field_values)
+            }
+            Value::RoleProperty { .. } => {
+                panic!("role-property must be resolved before conversion to IOValue")
             }
         }
     }
@@ -125,15 +135,25 @@ pub enum ValueExpr {
     List(Vec<ValueExpr>),
     /// Record whose fields may reference parameters.
     Record {
+        /// Record label encoded as a preserves symbol.
         label: String,
+        /// Field expressions evaluated at runtime.
         fields: Vec<ValueExpr>,
     },
     /// Property value currently bound to a role.
-    RoleProperty { role: String, key: String },
+    RoleProperty {
+        /// Expression producing the role name.
+        role: Box<ValueExpr>,
+        /// Property key to read from the role.
+        key: String,
+    },
     /// Entire value associated with the most recently satisfied wait.
     LastWait,
     /// Field extracted from the most recent wait result.
-    LastWaitField { index: usize },
+    LastWaitField {
+        /// Field index to extract from the prior wait result.
+        index: usize,
+    },
     /// Concatenate string fragments resolved from expressions.
     StringConcat(Vec<ValueExpr>),
 }
@@ -177,10 +197,22 @@ impl ValueExpr {
                 })
             }
             ValueExpr::RoleProperty { role, key } => {
-                let value = context.role_property(role, key).ok_or_else(|| {
+                let role_value = role
+                    .resolve(bindings, last_wait, context)?;
+                let role_name = match role_value {
+                    Value::String(ref text) => text.clone(),
+                    Value::Symbol(ref sym) => sym.clone(),
+                    other => {
+                        return Err(validation_error(&format!(
+                            "role-property expected role name as string, found {:?}",
+                            other
+                        )))
+                    }
+                };
+                let value = context.role_property(&role_name, key).ok_or_else(|| {
                     validation_error(&format!(
                         "role '{}' does not define property '{}'",
-                        role, key
+                        role_name, key
                     ))
                 })?;
                 Ok(Value::String(value))
@@ -228,6 +260,27 @@ pub fn parse_value_literal(expr: &Expr) -> Result<Value, WorkflowError> {
             if let Some(Expr::Symbol(head)) = items.first() {
                 if head == "record" {
                     return parse_record_literal(items);
+                } else if head == "role-property" {
+                    if items.len() != 3 {
+                        return Err(validation_error(
+                            "role-property expects role symbol and property string",
+                        ));
+                    }
+                    let role = parse_value_literal(&items[1])?;
+                    let key = match &items[2] {
+                        Expr::String(text) => text.clone(),
+                        Expr::Symbol(sym) => sym.clone(),
+                        other => {
+                            return Err(validation_error(&format!(
+                                "role-property name must be string or symbol, found {:?}",
+                                other
+                            )));
+                        }
+                    };
+                    return Ok(Value::RoleProperty {
+                        role: Box::new(role),
+                        key,
+                    });
                 }
             }
             let values = items
@@ -294,15 +347,7 @@ pub fn parse_value_expr(expr: &Expr, params: &HashSet<String>) -> Result<ValueEx
                             "role-property expects role symbol and property string",
                         ));
                     }
-                    let role = match &items[1] {
-                        Expr::Symbol(sym) => sym.clone(),
-                        other => {
-                            return Err(validation_error(&format!(
-                                "role-property role must be symbol, found {:?}",
-                                other
-                            )));
-                        }
-                    };
+                    let role = Box::new(parse_value_expr(&items[1], params)?);
                     let key = match &items[2] {
                         Expr::String(text) => text.clone(),
                         Expr::Symbol(sym) => sym.clone(),
@@ -396,6 +441,11 @@ fn value_to_string(value: &Value) -> String {
             let rendered: Vec<String> = fields.iter().map(value_to_string).collect();
             format!("<{} {}>", label, rendered.join(" "))
         }
+        Value::RoleProperty { role, key } => format!(
+            "<role-property {} {}>",
+            value_to_string(role),
+            key
+        ),
     }
 }
 

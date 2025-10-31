@@ -3,8 +3,9 @@ use std::sync::Mutex;
 
 use crate::codebase::agent;
 use crate::interpreter::protocol::{
-    OBSERVER_RECORD_LABEL, TOOL_REQUEST_RECORD_LABEL, TOOL_RESULT_RECORD_LABEL, WaitRecord,
-    runtime_snapshot_from_value, runtime_snapshot_to_value, wait_record_to_value,
+    InputRequestRecord, OBSERVER_RECORD_LABEL, TOOL_REQUEST_RECORD_LABEL, TOOL_RESULT_RECORD_LABEL,
+    WaitRecord, input_request_to_value, input_response_from_value, runtime_snapshot_from_value,
+    runtime_snapshot_to_value, wait_record_to_value,
 };
 use crate::interpreter::value::ValueContext;
 use crate::interpreter::{
@@ -56,6 +57,8 @@ struct WaitingInstance {
     facet: FacetId,
     assertions: Vec<RecordedAssertion>,
     facets: Vec<FacetId>,
+    prompt_counter: u64,
+    prompts: Vec<RecordedPrompt>,
     resume_pending: bool,
     matched_value: Option<IOValue>,
 }
@@ -122,6 +125,104 @@ fn facets_from_value(value: &IOValue) -> Vec<FacetId> {
     facets
 }
 
+const PROMPT_SNAPSHOT_RECORD_LABEL: &str = "interpreter-wait-prompt";
+
+#[derive(Clone)]
+struct RecordedPrompt {
+    wait: WaitCondition,
+    request_id: String,
+    tag: String,
+    handle: Handle,
+}
+
+impl RecordedPrompt {
+    fn new(wait: WaitCondition, request_id: String, tag: String, handle: Handle) -> Self {
+        Self {
+            wait,
+            request_id,
+            tag,
+            handle,
+        }
+    }
+}
+
+fn prompt_snapshot_to_value(prompt: &RecordedPrompt) -> IOValue {
+    let wait_status = WaitStatus::from_condition(&prompt.wait);
+    IOValue::record(
+        IOValue::symbol(PROMPT_SNAPSHOT_RECORD_LABEL),
+        vec![
+            wait_status.as_value(),
+            IOValue::new(prompt.handle.0.to_string()),
+        ],
+    )
+}
+
+fn prompt_snapshot_from_value(value: &IOValue) -> Option<RecordedPrompt> {
+    let record = record_with_label(value, PROMPT_SNAPSHOT_RECORD_LABEL)?;
+    if record.len() < 2 {
+        return None;
+    }
+    let wait_value = record.field(0);
+    let wait_status = as_record(&wait_value).and_then(WaitStatus::parse_record)?;
+    let handle_id = record.field_string(1)?;
+    let handle_uuid = Uuid::parse_str(&handle_id).ok()?;
+
+    let (request_id, tag) = match &wait_status {
+        WaitStatus::UserInput {
+            request_id, tag, ..
+        } => (request_id.clone(), tag.clone()),
+        _ => return None,
+    };
+
+    let wait = wait_status.into_condition();
+
+    Some(RecordedPrompt::new(
+        wait,
+        request_id,
+        tag,
+        Handle(handle_uuid),
+    ))
+}
+
+#[derive(Clone)]
+struct PromptRecord {
+    wait: WaitCondition,
+    request_id: String,
+    tag: String,
+    handle: Handle,
+}
+
+impl PromptRecord {
+    fn new(wait: WaitCondition, request_id: String, tag: String, handle: Handle) -> Self {
+        Self {
+            wait,
+            request_id,
+            tag,
+            handle,
+        }
+    }
+
+    fn to_snapshot(&self) -> RecordedPrompt {
+        RecordedPrompt::new(
+            self.wait.clone(),
+            self.request_id.clone(),
+            self.tag.clone(),
+            self.handle.clone(),
+        )
+    }
+}
+
+impl From<RecordedPrompt> for PromptRecord {
+    fn from(prompt: RecordedPrompt) -> Self {
+        Self {
+            wait: prompt.wait,
+            request_id: prompt.request_id,
+            tag: prompt.tag,
+            handle: prompt.handle,
+        }
+    }
+}
+
 fn program_ref_to_value(program_ref: &ProgramRef) -> IOValue {
     match program_ref {
         ProgramRef::Inline(source) => IOValue::record(
@@ -175,6 +276,18 @@ fn wait_condition_to_value(condition: &WaitCondition) -> IOValue {
             IOValue::symbol("tool-result"),
             vec![IOValue::new(tag.clone())],
         ),
+        WaitCondition::UserInput {
+            prompt,
+            tag,
+            request_id,
+        } => IOValue::record(
+            IOValue::symbol("user-input"),
+            vec![
+                prompt.to_io_value(),
+                IOValue::new(tag.clone().unwrap_or_default()),
+                IOValue::new(request_id.clone().unwrap_or_default()),
+            ],
+        ),
     }
 }
 
@@ -202,6 +315,22 @@ fn wait_condition_from_value(value: &IOValue) -> Option<WaitCondition> {
     } else if let Some(tool) = record_with_label(value, "tool-result") {
         let tag = tool.field_string(0)?.to_string();
         Some(WaitCondition::ToolResult { tag })
+    } else if let Some(input) = record_with_label(value, "user-input") {
+        if input.len() < 3 {
+            return None;
+        }
+        let prompt_value = Value::from_io_value(&input.field(0))?;
+        let tag = input.field_string(1)?.to_string();
+        let request_id = input.field_string(2)?.to_string();
+        Some(WaitCondition::UserInput {
+            prompt: prompt_value,
+            tag: if tag.is_empty() { None } else { Some(tag) },
+            request_id: if request_id.is_empty() {
+                None
+            } else {
+                Some(request_id)
+            },
+        })
     } else {
         None
     }
@@ -480,6 +609,15 @@ impl InterpreterEntity {
                 label: label.clone(),
             },
             WaitStatus::ToolResult { tag } => WaitCondition::ToolResult { tag: tag.clone() },
+            WaitStatus::UserInput {
+                prompt,
+                tag,
+                request_id,
+            } => WaitCondition::UserInput {
+                prompt: prompt.clone(),
+                tag: Some(tag.clone()),
+                request_id: Some(request_id.clone()),
+            },
         };
         ready_waits.push(ReadyWait {
             condition: ready_condition,
@@ -493,6 +631,7 @@ impl InterpreterEntity {
         let status_handle = waiting_entry.handle.clone();
         let stored_assertions = waiting_entry.assertions.clone();
         let stored_facets = waiting_entry.facets.clone();
+        let stored_prompts = waiting_entry.prompts.clone();
 
         let mut progress = InstanceProgress {
             state: program.states.first().map(|state| state.name.clone()),
@@ -501,6 +640,7 @@ impl InterpreterEntity {
             frame_depth: 0,
         };
 
+        #[allow(unused_assignments)]
         let mut status = InstanceStatus::Running;
         let mut next_wait: Option<WaitingInstance> = None;
         let mut result_error: Option<ActorError> = None;
@@ -509,6 +649,8 @@ impl InterpreterEntity {
         let mut pending_wait_handle: Option<Handle> = None;
         let mut pending_wait_assertions: Option<Vec<RecordedAssertion>> = None;
         let mut pending_wait_facets: Option<Vec<FacetId>> = None;
+        let mut pending_wait_prompts: Option<Vec<RecordedPrompt>> = None;
+        let mut wait_assertion: Option<(Handle, IOValue)> = None;
 
         let host = ActivationHost::with_ready(
             activation,
@@ -517,6 +659,8 @@ impl InterpreterEntity {
             ready_waits,
             stored_assertions,
             stored_facets,
+            stored_prompts,
+            waiting_entry.prompt_counter,
         );
         let mut runtime = InterpreterRuntime::from_snapshot(host, program.clone(), snapshot);
 
@@ -553,6 +697,7 @@ impl InterpreterEntity {
                     pending_wait_handle = Some(wait_handle);
                     pending_wait_assertions = Some(runtime.host().snapshot_assertions());
                     pending_wait_facets = Some(runtime.host().snapshot_facets());
+                    pending_wait_prompts = Some(runtime.host().snapshot_prompts());
                     break;
                 }
                 Ok(RuntimeEvent::Completed) => {
@@ -622,9 +767,10 @@ impl InterpreterEntity {
                 facet: facet.clone(),
                 wait_status: wait_status.clone(),
             });
-            activation.assert(wait_handle.clone(), wait_record);
+            wait_assertion = Some((wait_handle.clone(), wait_record));
             let assertions = pending_wait_assertions.take().unwrap_or_default();
             let facets = pending_wait_facets.take().unwrap_or_default();
+            let prompts = pending_wait_prompts.take().unwrap_or_default();
             next_wait = Some(WaitingInstance {
                 program_ref: program_ref.clone(),
                 program: program_clone.clone(),
@@ -635,13 +781,21 @@ impl InterpreterEntity {
                 facet,
                 assertions,
                 facets,
+                prompt_counter: runtime.host().prompt_counter_value(),
+                prompts,
                 resume_pending: false,
                 matched_value: None,
             });
         }
 
+        drop(runtime);
+
         for spec in observer_specs {
             self.register_observer(activation, spec)?;
+        }
+
+        if let Some((handle, value)) = wait_assertion.take() {
+            activation.assert(handle, value);
         }
 
         activation.retract(waiting_entry.wait_handle.clone());
@@ -722,6 +876,18 @@ fn wait_matches(wait: &WaitStatus, instance_id: Option<&str>, value: &IOValue) -
                 false
             }
         }
+        WaitStatus::UserInput {
+            request_id, tag, ..
+        } => {
+            if let Some(response) = input_response_from_value(value) {
+                let matches_instance = instance_id
+                    .map(|id| response.instance_id == id)
+                    .unwrap_or(true);
+                matches_instance && response.request_id == *request_id && response.tag == *tag
+            } else {
+                false
+            }
+        }
     }
 }
 
@@ -777,6 +943,11 @@ impl HydratableEntity for InterpreterEntity {
                     .iter()
                     .map(|facet| facet_to_value(facet))
                     .collect();
+                let prompt_values: Vec<_> = entry
+                    .prompts
+                    .iter()
+                    .map(|prompt| prompt_snapshot_to_value(prompt))
+                    .collect();
                 IOValue::record(
                     IOValue::symbol("waiting-instance"),
                     vec![
@@ -789,6 +960,8 @@ impl HydratableEntity for InterpreterEntity {
                         IOValue::new(entry.facet.0.to_string()),
                         IOValue::record(IOValue::symbol("assertions"), assertion_values),
                         IOValue::record(IOValue::symbol("facets"), facet_values),
+                        IOValue::record(IOValue::symbol("prompts"), prompt_values),
+                        IOValue::new(entry.prompt_counter as i64),
                         IOValue::symbol(if entry.resume_pending {
                             "true"
                         } else {
@@ -963,9 +1136,42 @@ impl HydratableEntity for InterpreterEntity {
                                     Vec::new()
                                 };
 
-                                let resume_pending = if wait_view.len() > 9 {
+                                let prompts = if wait_view.len() > 9 {
+                                    let prompts_value = wait_view.field(9);
+                                    if let Some(prompts_view) =
+                                        record_with_label(&prompts_value, "prompts")
+                                    {
+                                        let mut collected = Vec::new();
+                                        for prompt_index in 0..prompts_view.len() {
+                                            let prompt_value = prompts_view.field(prompt_index);
+                                            if let Some(parsed) =
+                                                prompt_snapshot_from_value(&prompt_value)
+                                            {
+                                                collected.push(parsed);
+                                            }
+                                        }
+                                        collected
+                                    } else {
+                                        Vec::new()
+                                    }
+                                } else {
+                                    Vec::new()
+                                };
+
+                                let prompt_counter = if wait_view.len() > 10 {
+                                    let value = wait_view.field(10);
+                                    value
+                                        .as_signed_integer()
+                                        .and_then(|num| i64::try_from(num.as_ref()).ok())
+                                        .map(|n| if n < 0 { 0 } else { n as u64 })
+                                        .unwrap_or(0)
+                                } else {
+                                    0
+                                };
+
+                                let resume_pending = if wait_view.len() > 11 {
                                     wait_view
-                                        .field(9)
+                                        .field(11)
                                         .as_symbol()
                                         .map(|sym| sym.as_ref() == "true")
                                         .unwrap_or(false)
@@ -973,8 +1179,8 @@ impl HydratableEntity for InterpreterEntity {
                                     false
                                 };
 
-                                let matched_value = if wait_view.len() > 10 {
-                                    let value = wait_view.field(10);
+                                let matched_value = if wait_view.len() > 12 {
+                                    let value = wait_view.field(12);
                                     if value
                                         .as_symbol()
                                         .map(|sym| sym.as_ref() == "none")
@@ -1000,6 +1206,8 @@ impl HydratableEntity for InterpreterEntity {
                                         facet: FacetId::from_uuid(facet_uuid),
                                         assertions,
                                         facets,
+                                        prompt_counter,
+                                        prompts,
                                         resume_pending,
                                         matched_value,
                                     },
@@ -1226,6 +1434,7 @@ impl InterpreterEntity {
         let mut pending_wait_handle: Option<Handle> = None;
         let mut pending_wait_assertions: Option<Vec<RecordedAssertion>> = None;
         let mut pending_wait_facets: Option<Vec<FacetId>> = None;
+        let mut pending_wait_prompts: Option<Vec<RecordedPrompt>> = None;
         let mut wait_assertion: Option<(Handle, IOValue)> = None;
 
         let running_record = InstanceRecord {
@@ -1275,6 +1484,7 @@ impl InterpreterEntity {
                     pending_wait_handle = Some(wait_handle);
                     pending_wait_assertions = Some(runtime.host().snapshot_assertions());
                     pending_wait_facets = Some(runtime.host().snapshot_facets());
+                    pending_wait_prompts = Some(runtime.host().snapshot_prompts());
                     break;
                 }
                 Ok(RuntimeEvent::Completed) => {
@@ -1347,6 +1557,7 @@ impl InterpreterEntity {
             wait_assertion = Some((wait_handle.clone(), wait_record));
             let assertions = pending_wait_assertions.take().unwrap_or_default();
             let facets = pending_wait_facets.take().unwrap_or_default();
+            let prompts = pending_wait_prompts.take().unwrap_or_default();
             waiting_entry = Some(WaitingInstance {
                 program_ref: program_ref_clone.clone(),
                 program: program_clone.clone(),
@@ -1357,6 +1568,8 @@ impl InterpreterEntity {
                 facet,
                 assertions,
                 facets,
+                prompt_counter: runtime.host().prompt_counter_value(),
+                prompts,
                 resume_pending: false,
                 matched_value: None,
             });
@@ -1424,6 +1637,8 @@ struct ActivationHost<'a> {
     assertions: HashMap<IOValue, Vec<Handle>>,
     facets: Vec<FacetId>,
     observers: Vec<ObserverSpec>,
+    prompts: Vec<PromptRecord>,
+    prompt_counter: u64,
     instance_id: String,
     roles: HashMap<String, RoleBinding>,
     last_ready_value: Option<IOValue>,
@@ -1536,6 +1751,8 @@ impl<'a> ActivationHost<'a> {
             assertions: HashMap::new(),
             facets: Vec::new(),
             observers: Vec::new(),
+            prompts: Vec::new(),
+            prompt_counter: 0,
             instance_id,
             roles: role_map,
             last_ready_value: None,
@@ -1549,11 +1766,15 @@ impl<'a> ActivationHost<'a> {
         satisfied: Vec<ReadyWait>,
         assertions: Vec<RecordedAssertion>,
         facets: Vec<FacetId>,
+        prompts: Vec<RecordedPrompt>,
+        prompt_counter: u64,
     ) -> Self {
         let mut host = Self::new(activation, instance_id, roles);
         host.satisfied = satisfied;
         host.restore_assertions(&assertions);
         host.restore_facets(&facets);
+        host.restore_prompts(&prompts);
+        host.restore_prompt_counter(prompt_counter);
         host
     }
 
@@ -1573,6 +1794,18 @@ impl<'a> ActivationHost<'a> {
             ) => a_label == b_label && a_field == b_field && a_value == b_value,
             (WaitCondition::Signal { label: a }, WaitCondition::Signal { label: b }) => a == b,
             (WaitCondition::ToolResult { tag: a }, WaitCondition::ToolResult { tag: b }) => a == b,
+            (
+                WaitCondition::UserInput {
+                    request_id: a_id,
+                    tag: a_tag,
+                    ..
+                },
+                WaitCondition::UserInput {
+                    request_id: b_id,
+                    tag: b_tag,
+                    ..
+                },
+            ) => a_id == b_id && a_tag == b_tag,
             _ => false,
         }
     }
@@ -1604,6 +1837,48 @@ impl<'a> ActivationHost<'a> {
 
     fn restore_facets(&mut self, facets: &[FacetId]) {
         self.facets = facets.to_vec();
+    }
+
+    fn snapshot_prompts(&self) -> Vec<RecordedPrompt> {
+        let mut entries: Vec<_> = self.prompts.iter().map(PromptRecord::to_snapshot).collect();
+        entries.sort_by(|a, b| a.handle.0.cmp(&b.handle.0));
+        entries
+    }
+
+    fn restore_prompts(&mut self, prompts: &[RecordedPrompt]) {
+        self.prompts.clear();
+        self.prompt_counter = 0;
+        for prompt in prompts {
+            self.bump_prompt_counter_for(&prompt.request_id);
+            self.prompts.push(PromptRecord::from(prompt.clone()));
+        }
+    }
+
+    fn bump_prompt_counter_for(&mut self, request_id: &str) {
+        if let Some(segment) = request_id.rsplit(':').next() {
+            if let Ok(value) = segment.parse::<u64>() {
+                if value > self.prompt_counter {
+                    self.prompt_counter = value;
+                }
+            }
+        }
+    }
+
+    fn next_prompt_request_id(&mut self) -> String {
+        self.prompt_counter = self.prompt_counter.saturating_add(1);
+        format!("{}:input:{}", self.instance_id, self.prompt_counter)
+    }
+
+    fn remove_prompt_by_request(&mut self, request_id: &str) -> Option<PromptRecord> {
+        if let Some(pos) = self
+            .prompts
+            .iter()
+            .position(|prompt| prompt.request_id == request_id)
+        {
+            Some(self.prompts.remove(pos))
+        } else {
+            None
+        }
     }
 
     fn track_facet(&mut self, facet: FacetId) {
@@ -1672,6 +1947,14 @@ impl<'a> ActivationHost<'a> {
         self.roles.values().cloned().collect()
     }
 
+    fn prompt_counter_value(&self) -> u64 {
+        self.prompt_counter
+    }
+
+    fn restore_prompt_counter(&mut self, counter: u64) {
+        self.prompt_counter = counter;
+    }
+
     fn handle_invoke_tool(
         &mut self,
         role: &str,
@@ -1731,6 +2014,50 @@ impl<'a> ActivationHost<'a> {
         self.roles.get(name).ok_or_else(|| {
             ActorError::InvalidActivation(format!("invoke-tool references unknown role '{name}'"))
         })
+    }
+
+    fn resolve_value(&self, value: &Value) -> Result<Value, ActorError> {
+        match value {
+            Value::Record { label, fields } => {
+                let mut resolved_fields = Vec::with_capacity(fields.len());
+                for field in fields {
+                    resolved_fields.push(self.resolve_value(field)?);
+                }
+                Ok(Value::Record {
+                    label: label.clone(),
+                    fields: resolved_fields,
+                })
+            }
+            Value::List(items) => {
+                let mut resolved_items = Vec::with_capacity(items.len());
+                for item in items {
+                    resolved_items.push(self.resolve_value(item)?);
+                }
+                Ok(Value::List(resolved_items))
+            }
+            Value::RoleProperty { role, key } => {
+                let resolved_role = self.resolve_value(role)?;
+                let role_name = match resolved_role {
+                    Value::String(name) => name,
+                    Value::Symbol(name) => name,
+                    other => {
+                        return Err(ActorError::InvalidActivation(format!(
+                            "role-property expected role name as string, found {:?}",
+                            other
+                        )))
+                    }
+                };
+                let binding = self.role_binding(&role_name)?;
+                let value = binding.properties.get(key).cloned().ok_or_else(|| {
+                    ActorError::InvalidActivation(format!(
+                        "role '{}' does not define property '{}'",
+                        role_name, key
+                    ))
+                })?;
+                Ok(Value::String(value))
+            }
+            other => Ok(other.clone()),
+        }
     }
 
     fn resolve_capability_id(
@@ -1853,14 +2180,16 @@ impl<'a> InterpreterHost for ActivationHost<'a> {
                 Ok(())
             }
             Action::Assert(value) => {
-                let coerced = value.to_io_value();
+                let resolved = self.resolve_value(value)?;
+                let coerced = resolved.to_io_value();
                 let handle = Handle::new();
                 self.activation.assert(handle.clone(), coerced.clone());
                 self.assertions.entry(coerced).or_default().push(handle);
                 Ok(())
             }
             Action::Retract(value) => {
-                let target = value.to_io_value();
+                let resolved = self.resolve_value(value)?;
+                let target = resolved.to_io_value();
                 let mut remove_entry = false;
                 let handle = {
                     let handles = self.assertions.get_mut(&target).ok_or_else(|| {
@@ -1962,10 +2291,10 @@ impl<'a> InterpreterHost for ActivationHost<'a> {
                 let (resolved_entity_type, resolved_kind) =
                     self.resolve_spawn_target(role, entity_type.as_ref(), agent_kind.as_ref())?;
 
-                let config_value = config
-                    .as_ref()
-                    .map(|value| value.to_io_value())
-                    .unwrap_or_else(|| IOValue::symbol("nil"));
+                let config_value = match config {
+                    Some(value) => self.resolve_value(value)?.to_io_value(),
+                    None => IOValue::symbol("nil"),
+                };
 
                 let spawned = self
                     .activation
@@ -2069,10 +2398,10 @@ impl<'a> InterpreterHost for ActivationHost<'a> {
                 let (resolved_entity_type, resolved_kind) =
                     self.resolve_spawn_target(role, entity_type.as_ref(), agent_kind.as_ref())?;
 
-                let config_value = config
-                    .as_ref()
-                    .map(|value| value.to_io_value())
-                    .unwrap_or_else(|| IOValue::symbol("nil"));
+                let config_value = match config {
+                    Some(value) => self.resolve_value(value)?.to_io_value(),
+                    None => IOValue::symbol("nil"),
+                };
 
                 let attached = self.activation.attach_entity_to_facet(
                     target_facet.clone(),
@@ -2170,6 +2499,65 @@ impl<'a> InterpreterHost for ActivationHost<'a> {
         }
     }
 
+    fn prepare_wait(&mut self, wait: &mut WaitCondition) -> std::result::Result<(), Self::Error> {
+        if let WaitCondition::RecordFieldEq { value, .. } = wait {
+            let resolved = self.resolve_value(value)?;
+            *value = resolved;
+        }
+
+        if let WaitCondition::UserInput {
+            prompt,
+            tag,
+            request_id,
+        } = wait
+        {
+            let effective_request = request_id.clone().unwrap_or_else(|| {
+                let next = self.next_prompt_request_id();
+                *request_id = Some(next.clone());
+                next
+            });
+
+            self.bump_prompt_counter_for(&effective_request);
+
+            let effective_tag = tag.clone().unwrap_or_else(|| {
+                let derived = effective_request.clone();
+                *tag = Some(derived.clone());
+                derived
+            });
+
+            *request_id = Some(effective_request.clone());
+            *tag = Some(effective_tag.clone());
+
+            if let Some(existing) = self
+                .prompts
+                .iter_mut()
+                .find(|prompt| prompt.request_id == effective_request)
+            {
+                existing.wait = wait.clone();
+                existing.request_id = effective_request.clone();
+                existing.tag = effective_tag.clone();
+            } else {
+                let record = InputRequestRecord {
+                    instance_id: self.instance_id.clone(),
+                    request_id: effective_request.clone(),
+                    tag: effective_tag.clone(),
+                    prompt: prompt.clone(),
+                };
+                let record_value = input_request_to_value(&record);
+                let handle = Handle::new();
+                self.activation.assert(handle.clone(), record_value);
+                self.prompts.push(PromptRecord::new(
+                    wait.clone(),
+                    effective_request.clone(),
+                    effective_tag.clone(),
+                    handle,
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
     fn poll_wait(&mut self, wait: &WaitCondition) -> std::result::Result<bool, Self::Error> {
         if let Some(index) = self
             .satisfied
@@ -2178,6 +2566,13 @@ impl<'a> InterpreterHost for ActivationHost<'a> {
         {
             let ready = self.satisfied.remove(index);
             self.last_ready_value = ready.value;
+            if let WaitCondition::UserInput { request_id, .. } = &ready.condition {
+                if let Some(id) = request_id {
+                    if let Some(prompt) = self.remove_prompt_by_request(id) {
+                        self.activation.retract(prompt.handle);
+                    }
+                }
+            }
             Ok(true)
         } else {
             Ok(false)
@@ -2199,6 +2594,7 @@ impl InterpreterEntity {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::interpreter::protocol::INPUT_REQUEST_RECORD_LABEL;
     use crate::runtime::actor::Actor;
     use crate::runtime::turn::{ActorId, FacetId, TurnOutput};
 
@@ -2293,6 +2689,47 @@ mod tests {
         assert_eq!(message.0, target_actor);
         assert_eq!(message.1, target_facet);
         assert_eq!(message.2, expected_payload);
+    }
+
+    #[test]
+    fn user_input_wait_generates_prompt_request() {
+        let actor = Actor::new(ActorId::new());
+        let mut activation = activation_for(&actor);
+
+        let mut host = ActivationHost::new(&mut activation, "instance".into(), &[]);
+        let mut wait = WaitCondition::UserInput {
+            prompt: Value::String("Enter value".into()),
+            tag: None,
+            request_id: None,
+        };
+
+        host.prepare_wait(&mut wait).expect("prepare wait");
+
+        let (tag, request_id) = match &wait {
+            WaitCondition::UserInput {
+                tag, request_id, ..
+            } => (tag.as_ref().cloned(), request_id.as_ref().cloned()),
+            other => panic!("unexpected wait condition: {other:?}"),
+        };
+
+        assert!(tag.is_some(), "tag should be assigned by prepare_wait");
+        assert!(
+            request_id.is_some(),
+            "request id should be assigned by prepare_wait"
+        );
+
+        let prompts = host.snapshot_prompts();
+        assert_eq!(prompts.len(), 1);
+        let recorded = &prompts[0];
+        assert_eq!(recorded.request_id, request_id.unwrap());
+
+        assert!(activation.assertions_added.iter().any(|(_, value)| {
+            value
+                .label()
+                .as_symbol()
+                .map(|sym| sym.as_ref() == INPUT_REQUEST_RECORD_LABEL)
+                .unwrap_or(false)
+        }));
     }
 
     #[test]

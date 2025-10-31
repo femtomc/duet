@@ -1088,6 +1088,21 @@ impl Runtime {
             .enqueue(target_actor, input, ScheduleCause::External);
     }
 
+    /// Assert a value directly into an actor's dataspace.
+    pub fn assert_value(&mut self, target_actor: turn::ActorId, value: preserves::IOValue) {
+        use scheduler::ScheduleCause;
+
+        let handle = Handle::new();
+        let input = turn::TurnInput::Assert {
+            actor: target_actor.clone(),
+            handle,
+            value,
+        };
+
+        self.scheduler
+            .enqueue(target_actor, input, ScheduleCause::External);
+    }
+
     /// Fork a new branch from the current branch
     pub fn fork(
         &mut self,

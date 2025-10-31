@@ -32,6 +32,10 @@ pub const TOOL_REQUEST_RECORD_LABEL: &str = "interpreter-tool-request";
 pub const TOOL_RESULT_RECORD_LABEL: &str = "interpreter-tool-result";
 /// Dataspace label used for observer registrations.
 pub const OBSERVER_RECORD_LABEL: &str = "interpreter-observer";
+/// Dataspace label used for interactive user input requests.
+pub const INPUT_REQUEST_RECORD_LABEL: &str = "interpreter-input-request";
+/// Dataspace label used for interactive user input responses.
+pub const INPUT_RESPONSE_RECORD_LABEL: &str = "interpreter-input-response";
 
 /// Dataspace label for persisted interpreter definitions.
 pub const DEFINITION_RECORD_LABEL: &str = "interpreter-definition";
@@ -160,6 +164,7 @@ impl DefinitionRecord {
     }
 
     /// Attempt to parse an interpreter definition from a dataspace value.
+    /// Attempt to parse an [`InstanceStatus`] from a preserves value.
     pub fn parse(value: &IOValue) -> Option<Self> {
         let record = record_with_label(value, DEFINITION_RECORD_LABEL)?;
         if record.len() < 3 {
@@ -207,6 +212,7 @@ impl InstanceStatus {
         }
     }
 
+    /// Attempt to parse an [`InstanceStatus`] from a preserves value.
     pub fn parse(value: &IOValue) -> Option<Self> {
         if let Some(sym) = value.as_symbol() {
             return match sym.as_ref() {
@@ -263,9 +269,19 @@ pub enum WaitStatus {
         /// Correlation tag associated with the tool invocation.
         tag: String,
     },
+    /// Waiting for interactive user input.
+    UserInput {
+        /// Deterministic identifier for the pending prompt.
+        request_id: String,
+        /// Correlation tag associated with the prompt.
+        tag: String,
+        /// Prompt payload to present to the user.
+        prompt: Value,
+    },
 }
 
 impl WaitStatus {
+    /// Serialize the wait status into a preserves [`IOValue`].
     pub fn as_value(&self) -> IOValue {
         match self {
             WaitStatus::RecordFieldEq {
@@ -288,9 +304,22 @@ impl WaitStatus {
                 IOValue::symbol("tool-result"),
                 vec![IOValue::new(tag.clone())],
             ),
+            WaitStatus::UserInput {
+                request_id,
+                tag,
+                prompt,
+            } => IOValue::record(
+                IOValue::symbol("user-input"),
+                vec![
+                    IOValue::new(request_id.clone()),
+                    IOValue::new(tag.clone()),
+                    prompt.to_io_value(),
+                ],
+            ),
         }
     }
 
+    /// Parse a [`WaitStatus`] from a preserves record view.
     pub fn parse_record(record: RecordView<'_>) -> Option<Self> {
         if record.has_label("signal") {
             if record.len() == 0 {
@@ -328,6 +357,20 @@ impl WaitStatus {
             });
         }
 
+        if record.has_label("user-input") {
+            if record.len() < 3 {
+                return None;
+            }
+            let request_id = record.field_string(0)?;
+            let tag = record.field_string(1)?;
+            let prompt_value = Value::from_io_value(&record.field(2))?;
+            return Some(WaitStatus::UserInput {
+                request_id,
+                tag,
+                prompt: prompt_value,
+            });
+        }
+
         None
     }
 
@@ -349,6 +392,17 @@ impl WaitStatus {
             crate::interpreter::ir::WaitCondition::ToolResult { tag } => {
                 WaitStatus::ToolResult { tag: tag.clone() }
             }
+            crate::interpreter::ir::WaitCondition::UserInput {
+                prompt,
+                tag,
+                request_id,
+            } => WaitStatus::UserInput {
+                request_id: request_id
+                    .clone()
+                    .unwrap_or_else(|| "<unset-request>".to_string()),
+                tag: tag.clone().unwrap_or_else(|| "<unset-tag>".to_string()),
+                prompt: prompt.clone(),
+            },
         }
     }
 
@@ -368,6 +422,15 @@ impl WaitStatus {
             WaitStatus::ToolResult { tag } => {
                 crate::interpreter::ir::WaitCondition::ToolResult { tag }
             }
+            WaitStatus::UserInput {
+                prompt,
+                tag,
+                request_id,
+            } => crate::interpreter::ir::WaitCondition::UserInput {
+                prompt,
+                tag: Some(tag),
+                request_id: Some(request_id),
+            },
         }
     }
 }
@@ -428,6 +491,7 @@ pub struct InstanceProgress {
 }
 
 impl InstanceProgress {
+    /// Encode the progress snapshot into a preserves [`IOValue`].
     pub fn to_value(&self) -> IOValue {
         let state_value = self
             .state
@@ -456,6 +520,7 @@ impl InstanceProgress {
         )
     }
 
+    /// Parse an [`InstanceProgress`] from a preserves value.
     pub fn parse(value: &IOValue) -> Option<Self> {
         let record = record_with_label(value, "interpreter-progress")?;
         if record.len() < 4 {
@@ -492,6 +557,98 @@ impl InstanceProgress {
             frame_depth,
         })
     }
+}
+
+/// Dataspace record describing a pending user input request.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InputRequestRecord {
+    /// Interpreter instance identifier.
+    pub instance_id: String,
+    /// Deterministic request identifier.
+    pub request_id: String,
+    /// Correlation tag for matching responses.
+    pub tag: String,
+    /// Prompt payload to present to the user.
+    pub prompt: Value,
+}
+
+/// Encode an input request as a preserves value.
+pub fn input_request_to_value(record: &InputRequestRecord) -> IOValue {
+    IOValue::record(
+        IOValue::symbol(INPUT_REQUEST_RECORD_LABEL),
+        vec![
+            IOValue::new(record.instance_id.clone()),
+            IOValue::new(record.request_id.clone()),
+            IOValue::new(record.tag.clone()),
+            record.prompt.to_io_value(),
+        ],
+    )
+}
+
+/// Parse an input request record from a preserves value.
+pub fn input_request_from_value(value: &IOValue) -> Option<InputRequestRecord> {
+    let record = record_with_label(value, INPUT_REQUEST_RECORD_LABEL)?;
+    if record.len() < 4 {
+        return None;
+    }
+
+    let instance_id = record.field_string(0)?;
+    let request_id = record.field_string(1)?;
+    let tag = record.field_string(2)?;
+    let prompt_value = Value::from_io_value(&record.field(3))?;
+
+    Some(InputRequestRecord {
+        instance_id,
+        request_id,
+        tag,
+        prompt: prompt_value,
+    })
+}
+
+/// Dataspace record describing a completed user input response.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InputResponseRecord {
+    /// Interpreter instance identifier.
+    pub instance_id: String,
+    /// Deterministic request identifier.
+    pub request_id: String,
+    /// Correlation tag for the prompt.
+    pub tag: String,
+    /// Structured response provided by the user.
+    pub response: Value,
+}
+
+/// Encode an input response as a preserves value.
+pub fn input_response_to_value(record: &InputResponseRecord) -> IOValue {
+    IOValue::record(
+        IOValue::symbol(INPUT_RESPONSE_RECORD_LABEL),
+        vec![
+            IOValue::new(record.instance_id.clone()),
+            IOValue::new(record.request_id.clone()),
+            IOValue::new(record.tag.clone()),
+            record.response.to_io_value(),
+        ],
+    )
+}
+
+/// Parse an input response record from a preserves value.
+pub fn input_response_from_value(value: &IOValue) -> Option<InputResponseRecord> {
+    let record = record_with_label(value, INPUT_RESPONSE_RECORD_LABEL)?;
+    if record.len() < 4 {
+        return None;
+    }
+
+    let instance_id = record.field_string(0)?;
+    let request_id = record.field_string(1)?;
+    let tag = record.field_string(2)?;
+    let response_value = Value::from_io_value(&record.field(3))?;
+
+    Some(InputResponseRecord {
+        instance_id,
+        request_id,
+        tag,
+        response: response_value,
+    })
 }
 
 /// Dataspace representation of an interpreter instance.
@@ -595,6 +752,7 @@ pub enum ProgramRef {
 }
 
 impl ProgramRef {
+    /// Convert the program reference into a preserves [`IOValue`].
     pub fn to_value(&self) -> IOValue {
         match self {
             ProgramRef::Definition(id) => IOValue::record(
@@ -608,6 +766,7 @@ impl ProgramRef {
         }
     }
 
+    /// Parse a [`ProgramRef`] from a preserves value.
     pub fn parse(value: &IOValue) -> Option<Self> {
         if let Some(view) = record_with_label(value, "definition") {
             if view.len() >= 1 {

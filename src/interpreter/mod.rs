@@ -31,9 +31,11 @@ pub use ir::{
 };
 pub use parser::parse_program;
 pub use protocol::{
-    DEFINE_MESSAGE_LABEL, DEFINITION_RECORD_LABEL, DefinitionRecord, INSTANCE_RECORD_LABEL,
+    DEFINE_MESSAGE_LABEL, DEFINITION_RECORD_LABEL, DefinitionRecord, INPUT_REQUEST_RECORD_LABEL,
+    INPUT_RESPONSE_RECORD_LABEL, INSTANCE_RECORD_LABEL, InputRequestRecord, InputResponseRecord,
     InstanceProgress, InstanceRecord, InstanceStatus, LOG_RECORD_LABEL, NOTIFY_MESSAGE_LABEL,
-    ProgramRef, RESUME_MESSAGE_LABEL, RUN_MESSAGE_LABEL, WaitStatus,
+    ProgramRef, RESUME_MESSAGE_LABEL, RUN_MESSAGE_LABEL, WaitStatus, input_request_from_value,
+    input_request_to_value, input_response_from_value, input_response_to_value,
 };
 pub use runtime::{
     FrameKindSnapshot, FrameSnapshot, InterpreterHost, InterpreterRuntime, RuntimeError,
