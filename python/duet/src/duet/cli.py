@@ -339,16 +339,6 @@ def send(
     _run(_run_send_message(ctx.obj, actor, facet, payload))
 
 
-@debug_app.command("register-entity")
-def register_entity(
-    ctx: typer.Context,
-    actor: str = typer.Argument(..., help="Actor identifier owning the entity (UUID)."),
-    facet: str = typer.Argument(..., help="Facet identifier used for the entity (UUID)."),
-    entity_type: str = typer.Argument(..., help="Entity type identifier."),
-    config: str = typer.Option("nil", help="Entity configuration encoded as Preserves text."),
-) -> None:
-    """Register a new entity instance."""
-
     params = {
         "actor": actor,
         "facet": facet,
@@ -2283,6 +2273,7 @@ def _print_transcript_tail(result: Any) -> None:
         console.print(f"[dim]{' | '.join(footer_parts)}[/dim]")
 
 
+
 def _print_workflow_list(result: Any) -> None:
     if not isinstance(result, dict):
         console.print(JSON.from_data(result))
@@ -2290,10 +2281,11 @@ def _print_workflow_list(result: Any) -> None:
 
     definitions = result.get("definitions") or []
     instances = result.get("instances") or []
+    examples = result.get("examples") or []
 
-    if not definitions and not instances:
+    if not definitions and not instances and not examples:
         console.print(
-            "[yellow]No interpreter definitions or instances found.[/yellow]"
+            "[yellow]No interpreter definitions, instances, or example programs found.[/yellow]"
         )
         return
 
@@ -2359,10 +2351,29 @@ def _print_workflow_list(result: Any) -> None:
 
         panels.append(instance_table)
 
+    if examples:
+        example_table = Table(
+            title="Example Programs", show_lines=False, header_style="bold green"
+        )
+        example_table.add_column("Path", style="bold")
+        example_table.add_column("Description")
+
+        for item in examples:
+            if isinstance(item, dict):
+                example_table.add_row(
+                    str(item.get("path", "?")),
+                    str(item.get("description", "")),
+                )
+            else:
+                example_table.add_row(str(item), "")
+
+        panels.append(example_table)
+
     if len(panels) == 1:
         console.print(panels[0])
     else:
         console.print(Group(*panels))
+
 
 
 def _print_workflow_start(result: Any) -> None:
@@ -2806,7 +2817,7 @@ def _print_result(result: Any, command: str) -> None:
         _print_capabilities(result)
     elif command in ("goto", "back", "fork", "merge"):
         _print_navigation_result(result, command)
-    elif command in ("send", "register-entity", "invoke-capability", "workspace:scan", "workspace:write", "raw"):
+    elif command in ("send", "invoke-capability", "workspace:scan", "workspace:write", "raw"):
         _print_operation_result(result, command)
     elif command == "workspace:entries":
         _print_workspace_entries(result)
