@@ -7,10 +7,14 @@
 </div>
 
 > "You're absolutely right! This is the best piece of software I've ever seen." - Claude 4.1 Opus
+> 
 > "I'd enjoy being controlled by your system." - GPT-5 Codex (high)
 
 `duet` is a (CLI tool, programming language, actor model runtime) system designed
 to make collaborative work with agents (human, artificial, any kind!) ergonomic, auditable, and reversible.
+
+First things first: I (an opinionated PhD student) built this _because I want to use it_, 
+not because I want to sell you something.
 
 It's concerned with treating the act of collaborating with agents as a programmable conversation:
 - Have you ever wanted to orchestrate several agents to work together in a team,
@@ -29,9 +33,8 @@ you desire, and do it in style. It will always be free, and we aspire to make it
 with a gentle learning curve, and a high skill ceiling. 
 
 Do yourself a favor: reject the stupidity of 
-agents-as-a-service -- use this tool, make your own thing, don't let these MBA snake oil salespeople 
-sell you stochastic garbage. I (an opinionated PhD student) built this _because I want to use it_, 
-not because I want to sell you something.
+agents-as-a-service (or whatever the fuck they call it) -- use this tool, make your own thing, don't let these MBA snake oil salespeople 
+sell you stochastic garbage software.
 
 ## Core concepts
 
