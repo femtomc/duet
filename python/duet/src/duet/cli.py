@@ -62,38 +62,33 @@ app = typer.Typer(
     help="Interact with the Duet runtime through its NDJSON control protocol.",
     rich_markup_mode="rich",
 )
-workspace_app = typer.Typer(
-    help="Inspect and update workspace files and metadata.",
+chat_app = typer.Typer(
+    help="Fire-and-forget chats with code agents.",
     add_completion=True,
     rich_markup_mode="rich",
 )
-agent_app = typer.Typer(
-    help="Queue prompts and inspect responses from code agents.",
+run_app = typer.Typer(
+    help="Execute workflows and other runtime actions.",
+    add_completion=True,
+    rich_markup_mode="rich",
+)
+codebased_app = typer.Typer(
+    help="Manage the local codebased daemon.",
+    add_completion=True,
+    rich_markup_mode="rich",
+)
+time_app = typer.Typer(
+    help="Navigate runtime time-travel features.",
+    add_completion=True,
+    rich_markup_mode="rich",
+)
+query_app = typer.Typer(
+    help="Inspect runtime state, transcripts, and assertions.",
     add_completion=True,
     rich_markup_mode="rich",
 )
 reaction_app = typer.Typer(
     help="Manage reactive automations attached to the runtime.",
-    add_completion=True,
-    rich_markup_mode="rich",
-)
-workflow_app = typer.Typer(
-    help="Launch and monitor programmable workflows.",
-    add_completion=True,
-    rich_markup_mode="rich",
-)
-transcript_app = typer.Typer(
-    help="Browse stored agent transcripts.",
-    add_completion=True,
-    rich_markup_mode="rich",
-)
-dataspace_app = typer.Typer(
-    help="Inspect dataspace assertions and event streams.",
-    add_completion=True,
-    rich_markup_mode="rich",
-)
-daemon_app = typer.Typer(
-    help="Start and observe the local codebased daemon.",
     add_completion=True,
     rich_markup_mode="rich",
 )
@@ -103,13 +98,13 @@ debug_app = typer.Typer(
     rich_markup_mode="rich",
     hidden=True,
 )
-app.add_typer(workspace_app, name="workspace", rich_help_panel="Workspace")
-app.add_typer(agent_app, name="agent", rich_help_panel="Agents")
-app.add_typer(transcript_app, name="transcript", rich_help_panel="Agents")
-app.add_typer(dataspace_app, name="dataspace", rich_help_panel="Dataspace")
-app.add_typer(daemon_app, name="daemon", rich_help_panel="Daemon")
-app.add_typer(workflow_app, name="workflow", rich_help_panel="Workflows")
+app.add_typer(chat_app, name="chat", rich_help_panel="Chat")
+app.add_typer(run_app, name="run", rich_help_panel="Run")
+app.add_typer(codebased_app, name="codebased", rich_help_panel="Codebased")
+app.add_typer(time_app, name="time", rich_help_panel="Time")
+app.add_typer(query_app, name="query", rich_help_panel="Query")
 app.add_typer(debug_app, name="debug")
+app.command("clear")(clear_runtime)
 debug_app.add_typer(reaction_app, name="reaction")
 
 
@@ -229,10 +224,14 @@ class CLIState:
     daemon_port: Optional[int]
 
 
-def _show_group_help(ctx: typer.Context) -> NoReturn:
-    """Display help text for a command group and exit."""
+def _show_group_help(ctx: typer.Context, examples: Optional[List[str]] = None) -> NoReturn:
+    """Display help text (optionally with examples) and exit."""
 
     typer.echo(ctx.get_help())
+    if examples:
+        console.print("\nExamples:", style="bold")
+        for example in examples:
+            console.print(f"  [dim]{example}[/dim]")
     raise typer.Exit()
 
 
@@ -301,7 +300,7 @@ def main(
         _show_group_help(ctx)
 
 
-@app.command(rich_help_panel="Runtime")
+@time_app.command("status")
 def status(
     ctx: typer.Context,
     branch: Optional[str] = typer.Option(  # noqa: B008
@@ -314,7 +313,7 @@ def status(
     _run(_run_status(ctx.obj, branch))
 
 
-@debug_app.command("history")
+@time_app.command("history")
 def history(
     ctx: typer.Context,
     branch: str = typer.Option("main", help="Branch name to inspect."),
@@ -367,7 +366,7 @@ def list_capabilities(
     _run(_run_call(ctx.obj, "list_capabilities", params, "list-capabilities"))
 
 
-@debug_app.command("goto")
+@time_app.command("goto")
 def goto(
     ctx: typer.Context,
     turn_id: str = typer.Argument(..., help="Turn identifier to activate."),
@@ -381,7 +380,7 @@ def goto(
     _run(_run_call(ctx.obj, "goto", params, "goto"))
 
 
-@debug_app.command("back")
+@time_app.command("back")
 def back(
     ctx: typer.Context,
     count: int = typer.Option(1, help="Number of turns to rewind."),
@@ -395,7 +394,7 @@ def back(
     _run(_run_call(ctx.obj, "back", params, "back"))
 
 
-@debug_app.command("fork")
+@time_app.command("fork")
 def fork(
     ctx: typer.Context,
     source: str = typer.Option("main", help="Source branch name."),
@@ -410,7 +409,7 @@ def fork(
     _run(_run_call(ctx.obj, "fork", params, "fork"))
 
 
-@debug_app.command("merge")
+@time_app.command("merge")
 def merge(
     ctx: typer.Context,
     source: str = typer.Option(..., help="Name of the branch to merge from."),
@@ -454,47 +453,6 @@ def workspace_entries(ctx: typer.Context) -> None:
     _run(_run_call(ctx.obj, "workspace_entries", {}, "workspace:entries"))
 
 
-@workspace_app.callback(invoke_without_command=True)
-def workspace_group(ctx: typer.Context) -> None:
-    if ctx.invoked_subcommand is None:
-        _show_group_help(ctx)
-
-
-@workspace_app.command("scan")
-def workspace_scan(ctx: typer.Context) -> None:
-    """Trigger a workspace rescan."""
-
-    _run(_run_call(ctx.obj, "workspace_rescan", {}, "workspace:scan"))
-
-
-@workspace_app.command("read")
-def workspace_read(
-    ctx: typer.Context,
-    path: str = typer.Argument(..., help="Workspace-relative file path to read."),
-) -> None:
-    """Read a file from the workspace."""
-
-    _run(_run_call(ctx.obj, "workspace_read", {"path": path}, "workspace:read"))
-
-
-@workspace_app.command("write")
-def workspace_write(
-    ctx: typer.Context,
-    path: str = typer.Argument(..., help="Workspace-relative file path to write."),
-    content: str = typer.Option(..., "--content", "-c", help="File contents to write."),
-) -> None:
-    """Write content to a workspace file."""
-
-    params = {"path": path, "content": content}
-    _run(_run_call(ctx.obj, "workspace_write", params, "workspace:write"))
-
-
-@agent_app.callback(invoke_without_command=True)
-def agent_group(ctx: typer.Context) -> None:
-    if ctx.invoked_subcommand is None:
-        _show_group_help(ctx)
-
-
 @debug_app.command("agent-invoke")
 def agent_invoke(
     ctx: typer.Context,
@@ -512,7 +470,7 @@ def agent_invoke(
     _run(_run_call(ctx.obj, "agent_invoke", params, "agent:invoke"))
 
 
-@agent_app.command("responses")
+@query_app.command("responses")
 def agent_responses(
     ctx: typer.Context,
     request_id: Optional[str] = typer.Option(None, help="Only include responses for this request identifier."),
@@ -553,8 +511,8 @@ def agent_responses(
     _run(_run_call(ctx.obj, "agent_responses", params, "agent:responses"))
 
 
-@agent_app.command("chat")
-def agent_chat(
+@chat_app.callback(invoke_without_command=True)
+def chat(
     ctx: typer.Context,
     prompt: Optional[str] = typer.Argument(None, help="Prompt text to send to the agent."),
     wait_for_response: bool = typer.Option(
@@ -595,8 +553,26 @@ def agent_chat(
         help="Agent kind to use (e.g., 'claude-code', 'codex', 'noface').",
         show_default=True,
     ),
+    inspect: bool = typer.Option(
+        False,
+        "--inspect",
+        help="Show full invocation metadata before returning.",
+    ),
 ) -> None:
     """Send a prompt to the agent. Combine with --wait-for-response to block for results."""
+
+    if ctx.invoked_subcommand:
+        return
+
+    if prompt is None:
+        _show_group_help(
+            ctx,
+            examples=[
+                "duet chat \"Outline the deployment plan\"",
+                "duet chat --agent codex \"Summarise src/lib.rs\"",
+                "duet chat --wait-for-response \"What failed in CI?\"",
+            ],
+        )
 
     if not agent.strip():
         raise typer.BadParameter("--agent cannot be empty")
@@ -637,8 +613,60 @@ def agent_chat(
             resume_id,
             history_limit,
             agent,
+            inspect,
         )
     )
+
+
+@run_app.callback(invoke_without_command=True)
+def run_group(ctx: typer.Context) -> None:
+    if ctx.invoked_subcommand is None:
+        _show_group_help(
+            ctx,
+            examples=[
+                "duet run workflow-start pipelines/deploy.yaml",
+                "duet run workflow-start pipelines/deploy.yaml --label staged",
+            ],
+        )
+
+
+@codebased_app.callback(invoke_without_command=True)
+def codebased_group(ctx: typer.Context) -> None:
+    if ctx.invoked_subcommand is None:
+        _show_group_help(
+            ctx,
+            examples=[
+                "duet codebased start --host 127.0.0.1",
+                "duet codebased status",
+                "duet codebased stop",
+            ],
+        )
+
+
+@time_app.callback(invoke_without_command=True)
+def time_group(ctx: typer.Context) -> None:
+    if ctx.invoked_subcommand is None:
+        _show_group_help(
+            ctx,
+            examples=[
+                "duet time status",
+                "duet time history --branch feature/login",
+                "duet time goto turn_abcd1234 --branch main",
+            ],
+        )
+
+
+@query_app.callback(invoke_without_command=True)
+def query_group(ctx: typer.Context) -> None:
+    if ctx.invoked_subcommand is None:
+        _show_group_help(
+            ctx,
+            examples=[
+                "duet query responses --request-id <uuid>",
+                "duet query transcript-tail --request-id <uuid>",
+                "duet query workflows",
+            ],
+        )
 
 
 @reaction_app.callback(invoke_without_command=True)
@@ -785,12 +813,6 @@ def reaction_list(ctx: typer.Context) -> None:
     _run(_run_call(ctx.obj, "reaction_list", {}, "reaction:list"))
 
 
-@dataspace_app.callback(invoke_without_command=True)
-def dataspace_group(ctx: typer.Context) -> None:
-    if ctx.invoked_subcommand is None:
-        _show_group_help(ctx)
-
-
 @debug_app.command("dataspace-assertions")
 def dataspace_assertions(
     ctx: typer.Context,
@@ -816,20 +838,14 @@ def dataspace_assertions(
     _run(_run_call(ctx.obj, "dataspace_assertions", params, "dataspace:assertions"))
 
 
-@daemon_app.callback(invoke_without_command=True)
-def daemon_group(ctx: typer.Context) -> None:
-    if ctx.invoked_subcommand is None:
-        _show_group_help(ctx)
-
-
-
-
-@daemon_app.command("start")
+@codebased_app.command("start")
 def daemon_start(
     ctx: typer.Context,
     host: str = typer.Option(DEFAULT_DAEMON_HOST, help="Host interface for the daemon to bind."),
     port: Optional[int] = typer.Option(None, help="Port to listen on (auto-select if omitted)."),
 ) -> None:
+    """Start the local codebased daemon in the background."""
+
     root = _ensure_root_dir(ctx.obj.root)
     existing = _load_daemon_state(root)
     if existing and _ping_daemon(existing.host, existing.port):
@@ -871,8 +887,10 @@ def daemon_start(
     )
 
 
-@daemon_app.command("stop")
+@codebased_app.command("stop")
 def daemon_stop(ctx: typer.Context) -> None:
+    """Stop the background daemon if it is running."""
+
     root = _resolve_root_path(ctx.obj.root)
     state = _load_daemon_state(root)
     if not state:
@@ -896,8 +914,10 @@ def daemon_stop(ctx: typer.Context) -> None:
     console.print("[green]Daemon stopped.[/green]")
 
 
-@daemon_app.command("status")
+@codebased_app.command("status")
 def daemon_status(ctx: typer.Context) -> None:
+    """Report the status of the local codebased daemon."""
+
     root = _resolve_root_path(ctx.obj.root)
     state = _load_daemon_state(root)
     if not state:
@@ -917,7 +937,7 @@ def daemon_status(ctx: typer.Context) -> None:
     console.print(
         f"[green]Daemon pid {state.pid} listening on {state.host}:{state.port} ({status}).[/green]"
     )
-@dataspace_app.command("tail")
+@query_app.command("dataspace-tail")
 def dataspace_tail(
     ctx: typer.Context,
     branch: str = typer.Option("main", help="Branch name to inspect."),
@@ -1013,6 +1033,7 @@ async def _run_agent_chat(
     resume_request_id: Optional[str],
     history_limit: int,
     agent: str,
+    inspect: bool,
 ) -> None:
     client = await _connect_client(state)
     try:
@@ -1024,13 +1045,22 @@ async def _run_agent_chat(
 
         invoke_params: Dict[str, Any] = {"prompt": final_prompt, "agent": agent}
         invoke_result = await client.call("agent_invoke", invoke_params)
-        if isinstance(invoke_result, dict) and prompt is not None:
-            invoke_result.setdefault("prompt_preview", prompt)
-        _print_result(invoke_result, "agent:invoke")
+        if not isinstance(invoke_result, dict):
+            _print_result(invoke_result, "agent:invoke")
+            return
 
-        request_id = None
-        if isinstance(invoke_result, dict):
-            request_id = invoke_result.get("request_id")
+        if prompt is not None:
+            invoke_result.setdefault("prompt_preview", prompt)
+
+        if inspect:
+            _print_result(invoke_result, "agent:invoke")
+
+        if wait_for_response:
+            _print_chat_waiting(invoke_result, agent)
+        else:
+            _print_chat_ack(invoke_result, agent, show_hint=not inspect)
+
+        request_id = invoke_result.get("request_id")
         if not request_id:
             return
 
@@ -1039,10 +1069,6 @@ async def _run_agent_chat(
                 console.print(
                     "[yellow]Ignoring --wait value because --wait-for-response was not supplied.[/yellow]"
                 )
-            console.print(
-                f"[dim]Request {request_id} dispatched. Retrieve results with "
-                f"`duet agent responses --agent {agent} --request-id {request_id}` or transcript commands as needed.[/dim]"
-            )
             return
 
         params: Dict[str, Any] = {"request_id": request_id, "wait_ms": 0, "agent": agent}
@@ -1818,6 +1844,34 @@ def _print_workspace_read(result: Any) -> None:
     )
 
 
+def _print_chat_ack(result: Dict[str, Any], agent: str, *, show_hint: bool = True) -> None:
+    request_id = result.get("request_id")
+    short_id = _short_id(request_id)
+    prompt_preview = _preview_text(result.get("prompt_preview") or result.get("prompt"))
+
+    label_parts = ["Queued", agent]
+    if short_id:
+        label_parts.append(f"[bold]{short_id}[/bold]")
+    headline = " ".join(label_parts)
+    if prompt_preview:
+        headline += f" · {prompt_preview}"
+
+    console.print(f"[green]{headline}[/green]")
+    if show_hint and request_id:
+        console.print(
+            f"[dim]Follow up with `duet query responses --request-id {request_id}` or `duet query transcript-show {request_id}` as needed.[/dim]"
+        )
+
+
+def _print_chat_waiting(result: Dict[str, Any], agent: str) -> None:
+    request_id = result.get("request_id")
+    short_id = _short_id(request_id)
+    label = agent
+    if short_id:
+        label = f"{label} ({short_id})"
+    console.print(f"[cyan]Waiting for {label} to respond…[/cyan]")
+
+
 def _print_agent_invoke(result: Any) -> None:
     if not isinstance(result, dict) or "request_id" not in result:
         console.print(JSON.from_data(result))
@@ -1858,7 +1912,7 @@ def _print_agent_invoke(result: Any) -> None:
 
     if request_id:
         console.print(
-            f"[dim]Track responses with `duet agent responses --request-id {request_id}` or `duet transcript show {request_id}`.[/dim]"
+            f"[dim]Track responses with `duet query responses --request-id {request_id}` or `duet query transcript-show {request_id}`.[/dim]"
         )
 
 
@@ -2890,13 +2944,7 @@ def _print_unexpected_error(exc: Exception) -> None:
     )
 
 
-@transcript_app.callback(invoke_without_command=True)
-def transcript_group(ctx: typer.Context) -> None:
-    if ctx.invoked_subcommand is None:
-        _show_group_help(ctx)
-
-
-@transcript_app.command("show")
+@query_app.command("transcript-show")
 def transcript_show(
     ctx: typer.Context,
     request_id: Optional[str] = typer.Argument(None, help="Request identifier to inspect."),
@@ -2921,7 +2969,7 @@ def transcript_show(
     _run(_run_call(ctx.obj, "transcript_show", params, "transcript:show"))
 
 
-@transcript_app.command("tail")
+@query_app.command("transcript-tail")
 def transcript_tail(
     ctx: typer.Context,
     request_id: Optional[str] = typer.Argument(None, help="Request identifier to follow."),
@@ -2978,20 +3026,14 @@ def transcript_export(
     )
 
 
-@workflow_app.callback(invoke_without_command=True)
-def workflow_group(ctx: typer.Context) -> None:
-    if ctx.invoked_subcommand is None:
-        _show_group_help(ctx)
-
-
-@workflow_app.command("list")
+@query_app.command("workflows")
 def workflow_list(ctx: typer.Context) -> None:
     """List workflow definitions and running instances."""
     params: Dict[str, Any] = {}
     _run(_run_call(ctx.obj, "workflow_list", params, "workflow:list"))
 
 
-@workflow_app.command("start")
+@run_app.command("workflow-start")
 def workflow_start(
     ctx: typer.Context,
     definition: Path = typer.Argument(
