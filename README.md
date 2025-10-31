@@ -15,7 +15,7 @@ to make collaborative work with agents ergonomic, auditable, and reversible.
 
 > Given the absurdity of economic investment in dumb AI ideas, I feel the need to say this: 
 > I (an opinionated PhD student) built this _because I myself want to use it_, 
-> not because I want to sell you something. That's great: because of that tacit contract -- the contract of "I'm actually using this fucking tool",
+> not because I want to sell you something. That's great: because of that tacit contract -- the contract of "the author is dogfooding his own shit",
 > you can trust that I will not bullshit you. 
 > You can also trust that if this little experiment leads to trash software, I'll archive this shit faster than you can say Series A.
 
