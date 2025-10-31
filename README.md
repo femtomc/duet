@@ -32,7 +32,7 @@ What does programmable mean here?
   pick the best implementation? Have you wanted to do this programmatically, with other agents reviewing and
   critiquing?
 
-Our sights are (and should always be) aimed high: `duet` aspires to be _the Emacs_ of agentic IDEs (is Emacs the Emacs of agentic IDEs? Perhaps ...)
+Our sights are (and should always be) aimed high: `duet` aspires to be _the Emacs of agentic IDEs_ (is Emacs the Emacs of agentic IDEs? Perhaps ...)
 
 Here's an important organizational note: `duet` is an open-source tool which should 
 allow you to recover any workflow you desire, and do it in style. Do yourself a 
