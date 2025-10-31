@@ -18,7 +18,8 @@ to make collaborative work with agents ergonomic, auditable, and reversible.
 > not because I want to sell you something. That's great: because of that, you can trust I'm not bullshitting you. 
 > You can also trust that if this turns out to be trash software, I'll archive this shit faster than you can say Series A.
 
-Now, back to the tool: `duet` is concerned with treating the act of collaborating with agents as a programmable conversation:
+Now, back to the tool: `duet` is concerned with treating your collaboration with agents as a programmable conversation. 
+What does programmable mean here?
 - Have you ever wanted to orchestrate several agents to work together in a team,
   where each agent has a specialized role (prompt), and the agents communicate together
   at your direction?
@@ -30,19 +31,18 @@ Now, back to the tool: `duet` is concerned with treating the act of collaboratin
   pick the best implementation? Have you wanted to do this programmatically, with other agents reviewing and
   critiquing?
 
-Perhaps most importantly, `duet` is an open-source _programmable_ tool which should allow you to recover any workflow 
-you desire, and do it in style. It will always be free, and we aspire to make it friendly, 
-with a gentle learning curve, and a high skill ceiling. 
+Perhaps most importantly, `duet` is an open-source tool which should allow you to recover any workflow 
+you desire, and do it in style. 
 
 Do yourself a favor: reject the stupidity of 
-agents-as-a-service (or whatever the fuck they call it) -- use this tool, make your own thing, don't let these MBA snake oil salespeople 
-sell you stochastic garbage software.
+Agents-aS-a-Service (ASS, or the equally stupid AAAS) -- use this tool, make your own thing, don't let MBA snake 
+oil salespeople sell you stochastic garbage software.
 
 ## Core concepts
 
-Before diving deeper, here is the vocabulary concerning the _syndicated actor model_ which `duet` makes
-use of. The backend of `duet` amounts to a runtime containing several entities that interact with each other in 
-_turns_.
+Before we discuss how this tool works, here is useful vocabulary. Uh oh! Technical details!
+The backend of `duet` amounts to something called a _syndicated actor model_ virtual machine. 
+The idea is that you a programming model where several entities interact with each other in _turns_.
 
 - **Actor** – an isolated unit of computation with its own state and mailbox. Every turn in is an actor
   reacting to inputs.
