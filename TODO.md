@@ -11,12 +11,12 @@ semantics, capability discipline, and multi-client ergonomics.
       interpreter slots into upcoming client work.
 
 ## 1. Parser, AST, and Module Loader
-- [ ] Extend `src/interpreter/parser.rs` to parse kernel forms (modules, macros,
-      hygienic identifiers) while retaining source spans.
-- [ ] Define kernel AST nodes (modules, definitions, expressions) separate from the
-      legacy `ProgramIr`.
+- [ ] Stand up a new `src/kernel` module with parser/AST support for Scheme-like
+      forms (modules, macros, hygienic identifiers) while retaining source spans.
+- [ ] Define kernel AST nodes (modules, definitions, expressions) independent of
+      the removed workflow `ProgramIr` structure.
 - [ ] Implement a module loader with cache invalidation keyed by source hash +
-      capability manifest; wire it into interpreter entity startup.
+      capability manifest; integrate it with the forthcoming interpreter host.
 
 ## 2. Evaluator and Continuations
 - [ ] Design kernel bytecode or continuation-passing interpreter that supports
@@ -37,10 +37,10 @@ semantics, capability discipline, and multi-client ergonomics.
       runtime journal captures the right turn outputs.
 
 ## 4. Scheduler and Fiber Runtime
-- [ ] Replace the single-command interpreter loop with a fiber scheduler that
-      can park continuations on waits and resume them deterministically.
-- [ ] Update `InterpreterEntity` to persist fiber tables, wait descriptors, and
-      prompt state when serialising snapshots/replaying turns.
+- [ ] Build a kernel interpreter host that manages fibers/continuations, parking
+      on waits and resuming deterministically.
+- [ ] Persist fiber tables, wait descriptors, and prompt state in runtime
+      snapshots so time-travel remains reversible.
 - [ ] Support multi-wait constructs (`select`, `with-timeout`) by installing and
       retracting wait registrations atomically.
 
@@ -68,9 +68,10 @@ semantics, capability discipline, and multi-client ergonomics.
       `docs/LANGUAGE_DESIGN.md`; refresh README and workflow docs accordingly.
 
 ## 8. Decommission Legacy Workflow IR
-- [ ] Remove unused `ProgramIr` builders/parser once kernel rollout completes.
-- [ ] Strip legacy workflow examples and docs; point users to the kernel library.
-- [ ] Clean up code paths gated by the old interpreter entity.
+- [x] Remove unused workflow builders/parser and legacy interpreter entity.
+- [x] Strip legacy workflow examples/docs; point users to the kernel library.
+- [ ] Finish excising compatibility shims (service/CLI commands) once the kernel
+      interpreter is in place.
 
 Progress should be tracked turn-by-turn to ensure reversible execution remains
 auditable throughout the migration.

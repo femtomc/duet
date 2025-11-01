@@ -1,7 +1,7 @@
 use duet::runtime::RuntimeConfig;
 use duet::runtime::control::Control;
 use duet::runtime::registry::EntityCatalog;
-use duet::runtime::service::Service;
+use duet::service::Service;
 use preserves::IOValue;
 use serde_json::{Value, json};
 use std::cell::RefCell;
@@ -77,10 +77,6 @@ fn service_handles_basic_commands() {
 
     assert_eq!(lines[0]["error"]["code"], "protocol_error");
     assert!(lines[1]["result"].is_object());
-    assert!(
-        lines[1]["result"]["runtime"]["control_interpreter"].is_object(),
-        "handshake should include control interpreter locator"
-    );
     assert!(lines[2]["result"].is_object());
     let all_entities = lines[3]["result"]["entities"].as_array().unwrap();
     assert!(

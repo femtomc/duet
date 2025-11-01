@@ -57,15 +57,6 @@ pub struct ProtocolError {
     pub details: Value,
 }
 
-/// Location of the interpreter that brokers control-plane requests.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ControlInterpreterLocator {
-    /// Actor identifier (UUID string).
-    pub actor: String,
-    /// Facet identifier (UUID string).
-    pub facet: String,
-}
-
 /// Response returned by the `handshake` command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HandshakeInfo {
@@ -77,8 +68,6 @@ pub struct HandshakeInfo {
     pub client_name: String,
     /// List of feature flags exposed by the runtime.
     pub features: Vec<String>,
-    /// Location of the control interpreter (if advertised).
-    pub control_interpreter: Option<ControlInterpreterLocator>,
 }
 
 /// Parameters accepted by the `status` command.
@@ -542,24 +531,11 @@ impl ServiceClient {
             .map(String::from)
             .collect();
 
-        let control_interpreter = runtime
-            .get("control_interpreter")
-            .and_then(Value::as_object)
-            .and_then(|info| {
-                let actor = info.get("actor")?.as_str()?;
-                let facet = info.get("facet")?.as_str()?;
-                Some(ControlInterpreterLocator {
-                    actor: actor.to_string(),
-                    facet: facet.to_string(),
-                })
-            });
-
         Ok(HandshakeInfo {
             protocol_version,
             runtime_version,
             client_name: echoed_client,
             features,
-            control_interpreter,
         })
     }
 

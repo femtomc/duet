@@ -170,7 +170,7 @@ pub fn init_storage(root: &Path) -> StorageResult<()> {
     storage.create_dir_all(&storage.branch_journal_dir(&main_branch))?;
     storage.create_dir_all(&storage.branch_snapshot_dir(&main_branch))?;
 
-    // Prepare interpreter directory structure; examples are no longer seeded.
+    // Prepare program directory structure for future interpreter modules.
     let programs_dir = storage.root.join(PROGRAMS_DIR);
     storage.create_dir_all(&programs_dir)?;
     storage.create_dir_all(&programs_dir.join(EXAMPLES_DIR))?;

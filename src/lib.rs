@@ -14,14 +14,14 @@
 /// Runtime core modules implementing the Syndicated Actor model
 pub mod runtime;
 
+/// Control-plane service exposed over NDJSON
+pub mod service;
+
 /// Built-in entities and helpers
 pub mod codebase;
 
 /// Common utility helpers used across modules
 pub mod util;
-
-/// Workflow language interpreter and DSL scaffolding
-pub mod interpreter;
 
 // Re-export key types for convenience
 pub use codebase::register_codebase_entities;

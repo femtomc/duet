@@ -21,7 +21,6 @@ pub mod reaction;
 pub mod registry;
 pub mod scheduler;
 pub mod schema;
-pub mod service;
 pub mod service_client;
 pub mod snapshot;
 pub mod state;
@@ -156,9 +155,6 @@ use storage::Storage;
 use tracing::warn;
 use turn::{BranchId, CapabilityCompletion, Handle, TurnInput, TurnOutput};
 
-use crate::interpreter::protocol::{
-    NOTIFY_MESSAGE_LABEL, TOOL_RESULT_RECORD_LABEL, wait_record_from_value,
-};
 use crate::runtime::turn::{ActorId, FacetId};
 use actor::Actor;
 use error::{ActorError, StorageError};
@@ -166,6 +162,8 @@ use reaction::{ReactionDefinition, ReactionId, ReactionInfo, ReactionStore, Stor
 use registry::EntityManager;
 use state::{CapId, CapabilityMetadata, CapabilityStatus, FacetMetadata, FacetStatus};
 use std::collections::{HashMap, HashSet};
+
+const TOOL_RESULT_RECORD_LABEL: &str = "tool-result";
 
 /// Message enqueued from asynchronous tasks back into the deterministic scheduler.
 #[derive(Clone)]
@@ -466,9 +464,6 @@ impl Runtime {
         self.scheduler.update_account(&actor_id, borrowed, repaid);
 
         self.dispatch_turn_outputs(&actor_id, &outputs);
-
-        // Notify interpreter entities about new assertions.
-        self.notify_interpreters(&delta);
 
         // Build turn record with parent turn tracking
         let parent = self.last_turn_per_actor.get(&actor_id).cloned();
@@ -904,73 +899,6 @@ impl Runtime {
 
         self.scheduler
             .enqueue(completion.origin_actor, input, ScheduleCause::Capability);
-    }
-
-    fn notify_interpreters(&mut self, delta: &state::StateDelta) {
-        if delta.assertions.added.is_empty() {
-            return;
-        }
-
-        let interpreter_entities: Vec<(ActorId, FacetId)> = self
-            .entity_manager()
-            .entities
-            .values()
-            .filter(|meta| meta.entity_type == "interpreter")
-            .map(|meta| (meta.actor.clone(), meta.facet.clone()))
-            .collect();
-
-        if interpreter_entities.is_empty() {
-            return;
-        }
-
-        let mut actor_wait_map = HashMap::new();
-        for (actor_id, _) in &interpreter_entities {
-            let has_waits = self.interpreter_actor_has_waits(actor_id);
-            actor_wait_map.insert(actor_id.clone(), has_waits);
-        }
-
-        if actor_wait_map.values().all(|has| !has) {
-            return;
-        }
-
-        for (_, _, value, _) in &delta.assertions.added {
-            for (actor_id, facet_id) in interpreter_entities.iter() {
-                if !actor_wait_map.get(actor_id).copied().unwrap_or(false) {
-                    continue;
-                }
-
-                let payload = preserves::IOValue::record(
-                    preserves::IOValue::symbol(NOTIFY_MESSAGE_LABEL),
-                    vec![value.clone()],
-                );
-
-                self.scheduler.enqueue(
-                    actor_id.clone(),
-                    TurnInput::ExternalMessage {
-                        actor: actor_id.clone(),
-                        facet: facet_id.clone(),
-                        payload,
-                    },
-                    ScheduleCause::Message,
-                );
-            }
-        }
-    }
-
-    fn interpreter_actor_has_waits(&self, actor_id: &ActorId) -> bool {
-        let actor = match self.actors.get(actor_id) {
-            Some(actor) => actor,
-            None => return false,
-        };
-
-        let assertions = actor.assertions.read();
-        for ((assert_actor, _), (value, _)) in assertions.active.iter() {
-            if assert_actor == actor_id && wait_record_from_value(value).is_some() {
-                return true;
-            }
-        }
-
-        false
     }
 
     /// Step the runtime forward by one turn

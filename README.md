@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="logo-circle.png" alt="Duet Logo" width="300"/>
+  <img src="logo.png" alt="Slop Logo" width="300"/>
 
   # Duet
 

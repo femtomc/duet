@@ -5,24 +5,17 @@
 //! `codebased` command-line daemon and is intentionally conservative: commands are
 //! processed sequentially, and unsupported operations return structured errors.
 
-use super::control::{AssertionEventAction, AssertionEventFilter, Control};
-use super::error::{CapabilityError, RuntimeError};
-use super::turn::{ActorId, BranchId, FacetId, TurnId};
 use crate::PROTOCOL_VERSION;
 use crate::codebase::{self, transcript};
-use crate::interpreter::ensure_control_interpreter;
-use crate::interpreter::protocol::{
-    DefinitionRecord, InputRequestRecord, InstanceProgress, InstanceRecord, InstanceStatus,
-    ProgramRef, WaitStatus, input_request_from_value,
-};
+use crate::runtime::control::{AssertionEventAction, AssertionEventFilter, Control};
+use crate::runtime::error::{CapabilityError, RuntimeError};
+use crate::runtime::turn::{ActorId, BranchId, TurnId};
 use crate::util::io_value::{as_record, io_value_summary, io_value_to_json};
 use preserves::IOValue;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use std::fs;
 use std::io::{self, BufRead, Write};
-use std::path::Path;
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -53,13 +46,6 @@ struct Session<'a, W: Write> {
     pending_requests: &'a mut HashMap<String, transcript::TranscriptCursor>,
     writer: W,
     handshake_completed: bool,
-    interpreter: Option<InterpreterBinding>,
-}
-
-#[derive(Clone)]
-struct InterpreterBinding {
-    actor: ActorId,
-    _facet: FacetId,
 }
 
 impl<'a, W: Write> Session<'a, W> {
@@ -73,7 +59,6 @@ impl<'a, W: Write> Session<'a, W> {
             pending_requests,
             writer,
             handshake_completed: false,
-            interpreter: None,
         }
     }
 
@@ -164,8 +149,6 @@ impl<'a, W: Write> Session<'a, W> {
             "workspace_entries" => self.cmd_workspace_entries(),
             "transcript_show" => self.cmd_transcript_show(params),
             "transcript_tail" => self.cmd_transcript_tail(params),
-            "workflow_list" => self.cmd_workflow_list(params),
-            "workflow_follow" => self.cmd_workflow_follow(params),
             "reaction_list" => self.cmd_reaction_list(),
             "dataspace_assertions" => self.cmd_dataspace_assertions(params),
             "dataspace_events" => self.cmd_dataspace_events(params),
@@ -193,10 +176,6 @@ impl<'a, W: Write> Session<'a, W> {
 
         self.handshake_completed = true;
 
-        let handle = ensure_control_interpreter(self.control).map_err(ServiceError::from)?;
-        let actor_str = handle.actor.to_string();
-        let facet_str = handle.facet.0.to_string();
-
         Ok(json!({
             "protocol_version": PROTOCOL_VERSION,
             "runtime": {
@@ -212,15 +191,8 @@ impl<'a, W: Write> Session<'a, W> {
                     "dataspace_inspection",
                     "dataspace_events",
                     "transcript_inspection",
-                    "program_inspection",
-                    "workflow_inspection",
                     "reaction_inspection"
-                ],
-                "control_interpreter": {
-                    "actor": actor_str,
-                    "facet": facet_str,
-                    "short_actor": short_id(&actor_str),
-                }
+                ]
             }
         }))
     }
@@ -233,122 +205,6 @@ impl<'a, W: Write> Session<'a, W> {
                 "handshake required before issuing commands".into(),
             ))
         }
-    }
-
-    fn ensure_interpreter_binding(&mut self) -> Result<InterpreterBinding, ServiceError> {
-        if let Some(binding) = &self.interpreter {
-            return Ok(binding.clone());
-        }
-
-        let handle = ensure_control_interpreter(self.control).map_err(ServiceError::from)?;
-        let binding = InterpreterBinding {
-            actor: handle.actor,
-            _facet: handle.facet,
-        };
-
-        self.interpreter = Some(binding.clone());
-        Ok(binding)
-    }
-
-    fn collect_interpreter_state(
-        &mut self,
-        binding: &InterpreterBinding,
-    ) -> (
-        Vec<DefinitionRecord>,
-        Vec<InstanceRecord>,
-        Vec<InputRequestRecord>,
-    ) {
-        let assertions = self.control.list_assertions_for_actor(&binding.actor);
-
-        let mut definitions: HashMap<String, DefinitionRecord> = HashMap::new();
-        let mut instances: HashMap<String, InstanceRecord> = HashMap::new();
-        let mut prompts: Vec<InputRequestRecord> = Vec::new();
-
-        for (_, value) in assertions {
-            if let Some(definition) = DefinitionRecord::parse(&value) {
-                definitions.insert(definition.definition_id.clone(), definition);
-                continue;
-            }
-
-            if let Some(instance) = InstanceRecord::parse(&value) {
-                instances.insert(instance.instance_id.clone(), instance);
-                continue;
-            }
-
-            if let Some(prompt) = input_request_from_value(&value) {
-                prompts.push(prompt);
-            }
-        }
-
-        let mut definition_list: Vec<_> = definitions.into_values().collect();
-        definition_list.sort_by(|a, b| a.program_name.cmp(&b.program_name));
-
-        let mut instance_list: Vec<_> = instances.into_values().collect();
-        instance_list.sort_by(|a, b| a.instance_id.cmp(&b.instance_id));
-
-        prompts.sort_by(|a, b| a.request_id.cmp(&b.request_id));
-
-        (definition_list, instance_list, prompts)
-    }
-
-    fn discover_example_programs(&self) -> Vec<Value> {
-        let mut examples = Vec::new();
-        let root = self.control.runtime().config().root.clone();
-        let programs_dir = root.join("programs");
-
-        if programs_dir.exists() {
-            self.collect_program_files(&programs_dir, &programs_dir, &mut examples);
-            examples.sort_by(|a, b| {
-                let a_path = a.get("path").and_then(Value::as_str).unwrap_or("");
-                let b_path = b.get("path").and_then(Value::as_str).unwrap_or("");
-                a_path.cmp(b_path)
-            });
-        }
-
-        examples
-    }
-
-    fn collect_program_files(&self, base: &Path, dir: &Path, out: &mut Vec<Value>) {
-        let entries = match fs::read_dir(dir) {
-            Ok(entries) => entries,
-            Err(_) => return,
-        };
-
-        for entry in entries {
-            let entry = match entry {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-            let path = entry.path();
-            if path.is_dir() {
-                self.collect_program_files(base, &path, out);
-            } else if path
-                .extension()
-                .and_then(|ext| ext.to_str())
-                .map(|ext| ext.eq_ignore_ascii_case("duet"))
-                .unwrap_or(false)
-            {
-                let relative = path
-                    .strip_prefix(base)
-                    .unwrap_or_else(|_| path.as_path())
-                    .to_path_buf();
-                let relative_str = relative.to_string_lossy().replace('\\', "/");
-                let mut item = json!({
-                    "path": relative_str,
-                    "absolute_path": path.to_string_lossy(),
-                });
-                if let Some(desc) = Self::read_program_description(&path) {
-                    item.as_object_mut()
-                        .unwrap()
-                        .insert("description".into(), json!(desc));
-                }
-                out.push(item);
-            }
-        }
-    }
-
-    fn read_program_description(_path: &Path) -> Option<String> {
-        None
     }
 
     fn cmd_status(&mut self, params: &Value) -> Result<Value, ServiceError> {
@@ -671,51 +527,6 @@ impl<'a, W: Write> Session<'a, W> {
             "next_cursor": chunk.next_cursor.map(|t| t.to_string()),
             "head": chunk.head.map(|t| t.to_string()),
             "has_more": chunk.has_more,
-        }))
-    }
-
-    fn cmd_workflow_list(&mut self, _params: &Value) -> Result<Value, ServiceError> {
-        self.ensure_handshake()?;
-        let binding = self.ensure_interpreter_binding()?;
-        self.control.drain_pending().map_err(ServiceError::from)?;
-        let (definitions, instances, _prompts) = self.collect_interpreter_state(&binding);
-
-        let definitions_json: Vec<Value> = definitions.iter().map(serialize_definition).collect();
-        let instances_json: Vec<Value> = instances.iter().map(serialize_instance).collect();
-        let examples_json = self.discover_example_programs();
-
-        Ok(json!({
-            "definitions": definitions_json,
-            "instances": instances_json,
-            "examples": examples_json,
-        }))
-    }
-
-    fn cmd_workflow_follow(&mut self, params: &Value) -> Result<Value, ServiceError> {
-        self.ensure_handshake()?;
-        let instance_id = params
-            .get("instance_id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| ServiceError::invalid_param("instance_id"))?;
-
-        let binding = self.ensure_interpreter_binding()?;
-        self.control.drain_pending().map_err(ServiceError::from)?;
-        let (_, instances, prompts) = self.collect_interpreter_state(&binding);
-
-        let instance = instances
-            .into_iter()
-            .find(|entry| entry.instance_id == instance_id)
-            .ok_or_else(|| ServiceError::invalid_param("instance_id"))?;
-
-        let prompt_values: Vec<Value> = prompts
-            .iter()
-            .filter(|prompt| prompt.instance_id == instance.instance_id)
-            .map(serialize_prompt)
-            .collect();
-
-        Ok(json!({
-            "instance": serialize_instance(&instance),
-            "prompts": prompt_values,
         }))
     }
 
@@ -1051,180 +862,6 @@ impl ResponseEnvelope {
             error: Some(ErrorEnvelope::from(error)),
         }
     }
-}
-
-fn serialize_definition(definition: &DefinitionRecord) -> Value {
-    json!({
-        "id": definition.definition_id,
-        "name": definition.program_name,
-        "source": definition.source,
-    })
-}
-
-fn serialize_instance(instance: &InstanceRecord) -> Value {
-    let mut value = json!({
-        "id": instance.instance_id,
-        "program": serialize_program_ref(&instance.program),
-        "program_name": instance.program_name,
-        "status": serialize_instance_status(&instance.status),
-    });
-
-    if let Some(state) = &instance.state {
-        value
-            .as_object_mut()
-            .unwrap()
-            .insert("state".into(), json!(state));
-    }
-
-    if let Some(progress) = &instance.progress {
-        value
-            .as_object_mut()
-            .unwrap()
-            .insert("progress".into(), serialize_progress(progress));
-    }
-
-    if !instance.roles.is_empty() {
-        let mut roles_json = Vec::with_capacity(instance.roles.len());
-        let mut entities_json = Vec::new();
-
-        for role in &instance.roles {
-            let mut role_obj = serde_json::Map::new();
-            role_obj.insert("name".into(), Value::String(role.name.clone()));
-
-            let mut props = serde_json::Map::new();
-            for (key, value_str) in &role.properties {
-                props.insert(key.clone(), Value::String(value_str.clone()));
-            }
-            role_obj.insert("properties".into(), Value::Object(props.clone()));
-            roles_json.push(Value::Object(role_obj));
-
-            if let (Some(actor), Some(facet)) =
-                (role.properties.get("actor"), role.properties.get("facet"))
-            {
-                let mut entity_obj = serde_json::Map::new();
-                entity_obj.insert("role".into(), Value::String(role.name.clone()));
-                entity_obj.insert("actor".into(), Value::String(actor.clone()));
-                entity_obj.insert("facet".into(), Value::String(facet.clone()));
-                if let Some(entity_id) = role.properties.get("entity") {
-                    entity_obj.insert("entity".into(), Value::String(entity_id.clone()));
-                }
-                if let Some(entity_type) = role.properties.get("entity-type") {
-                    entity_obj.insert("entity_type".into(), Value::String(entity_type.clone()));
-                }
-                if let Some(agent_kind) = role.properties.get("agent-kind") {
-                    entity_obj.insert("agent_kind".into(), Value::String(agent_kind.clone()));
-                }
-                entities_json.push(Value::Object(entity_obj));
-            }
-        }
-
-        let object = value.as_object_mut().unwrap();
-        object.insert("roles".into(), Value::Array(roles_json));
-        if !entities_json.is_empty() {
-            object.insert("entities".into(), Value::Array(entities_json));
-        }
-    }
-
-    value
-}
-
-fn serialize_prompt(prompt: &InputRequestRecord) -> Value {
-    let prompt_value = prompt.prompt.to_io_value();
-    json!({
-        "instance_id": prompt.instance_id,
-        "request_id": prompt.request_id,
-        "tag": prompt.tag,
-        "prompt": io_value_to_json(&prompt_value),
-        "summary": io_value_summary(&prompt_value, 80),
-    })
-}
-
-fn serialize_program_ref(program: &ProgramRef) -> Value {
-    match program {
-        ProgramRef::Definition(id) => json!({
-            "type": "definition",
-            "id": id,
-        }),
-        ProgramRef::Inline(source) => json!({
-            "type": "inline",
-            "source": source,
-        }),
-    }
-}
-
-fn serialize_instance_status(status: &InstanceStatus) -> Value {
-    match status {
-        InstanceStatus::Running => json!({ "state": "running" }),
-        InstanceStatus::Waiting(wait) => json!({
-            "state": "waiting",
-            "wait": serialize_wait_status(wait),
-        }),
-        InstanceStatus::Completed => json!({ "state": "completed" }),
-        InstanceStatus::Failed(message) => json!({
-            "state": "failed",
-            "message": message,
-        }),
-    }
-}
-
-fn serialize_wait_status(wait: &WaitStatus) -> Value {
-    match wait {
-        WaitStatus::RecordFieldEq {
-            label,
-            field,
-            value,
-        } => json!({
-            "type": "record-field-eq",
-            "label": label,
-            "field": field,
-            "value": format!("{:?}", value.to_io_value()),
-        }),
-        WaitStatus::Signal { label } => json!({
-            "type": "signal",
-            "label": label,
-        }),
-        WaitStatus::ToolResult { tag } => json!({
-            "type": "tool-result",
-            "tag": tag,
-        }),
-        WaitStatus::UserInput {
-            request_id,
-            tag,
-            prompt,
-        } => {
-            let prompt_value = prompt.to_io_value();
-            json!({
-                "type": "user-input",
-                "request_id": request_id,
-                "tag": tag,
-                "prompt": io_value_to_json(&prompt_value),
-                "summary": io_value_summary(&prompt_value, 80),
-            })
-        }
-    }
-}
-
-fn serialize_progress(progress: &InstanceProgress) -> Value {
-    let mut value = json!({
-        "entry_pending": progress.entry_pending,
-        "frame_depth": progress.frame_depth,
-    });
-
-    if let Some(state) = &progress.state {
-        value
-            .as_object_mut()
-            .unwrap()
-            .insert("state".into(), json!(state));
-    }
-
-    if let Some(wait) = &progress.waiting {
-        value
-            .as_object_mut()
-            .unwrap()
-            .insert("waiting".into(), serialize_wait_status(wait));
-    }
-
-    value
 }
 
 #[derive(Serialize)]

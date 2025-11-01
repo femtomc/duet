@@ -15,7 +15,6 @@ use chrono::{DateTime, Utc};
 use preserves::ValueImpl;
 use serde::{Deserialize, Serialize};
 
-use crate::interpreter::entity::InterpreterEntity;
 use crate::runtime::actor::{Activation, Entity, HydratableEntity};
 use crate::runtime::control::Control;
 use crate::runtime::error::{ActorError, ActorResult, Result as RuntimeResult, RuntimeError};
@@ -43,7 +42,6 @@ pub fn register_codebase_entities() {
         let catalog = EntityCatalog::global();
 
         workspace::register(catalog);
-        InterpreterEntity::register(catalog);
         agent::claude::register(catalog);
         agent::codex::register(catalog);
         agent::harness::register(catalog);

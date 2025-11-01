@@ -209,9 +209,9 @@ also give the CLI/TUI a way to preload libraries for user programs.
   - Session tables (facets, capability IDs, environment frames).
   - Fiber registry (continuations + pending waits).
   - Outstanding waits (converted to `WaitStatus` records for rehydration).
-  - Prompt/request state (mirroring current `InterpreterEntity` logic).
+  - Prompt/request state (captured by the interpreter host for resumability).
 - Snapshots are serialized using the same IOValue-based protocol already used in
-  `InterpreterEntity` (`runtime_snapshot_to_value`).
+  the runtime snapshot machinery (`runtime_snapshot_to_value`).
 - On replay, the interpreter rebuilds module caches, reattaches waits, and resumes
   fibers from their saved continuations.
 

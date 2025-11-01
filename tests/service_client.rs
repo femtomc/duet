@@ -43,19 +43,6 @@ fn service_client_handshake_and_status() {
         handshake.features.iter().any(|f| f == "status"),
         "expected status feature"
     );
-    let control_locator = handshake
-        .control_interpreter
-        .as_ref()
-        .expect("control interpreter advertised");
-    assert!(
-        !control_locator.actor.is_empty(),
-        "control interpreter should include actor id"
-    );
-    assert!(
-        !control_locator.facet.is_empty(),
-        "control interpreter should include facet id"
-    );
-
     let status = client
         .status(StatusRequest::default())
         .expect("status response");

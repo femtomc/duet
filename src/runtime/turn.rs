@@ -459,7 +459,7 @@ pub struct CapabilityCompletion {
     pub origin_actor: ActorId,
     /// Facet on the actor that should receive the assertion.
     pub origin_facet: FacetId,
-    /// Workflow instance identifier (for interpreter tool integration).
+    /// Optional instance identifier supplied by higher-level orchestration.
     pub instance_id: String,
     /// Role associated with the invocation.
     pub role: String,
