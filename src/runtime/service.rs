@@ -10,19 +10,16 @@ use super::error::{CapabilityError, RuntimeError};
 use super::turn::{ActorId, BranchId, FacetId, TurnId};
 use crate::PROTOCOL_VERSION;
 use crate::codebase::{self, transcript};
-use crate::interpreter::Value as InterpreterValue;
+use crate::interpreter::ensure_control_interpreter;
 use crate::interpreter::protocol::{
-    DefinitionRecord, InputRequestRecord, InputResponseRecord, InstanceProgress, InstanceRecord,
-    InstanceStatus, ProgramRef, RUN_MESSAGE_LABEL, WaitStatus, input_request_from_value,
-    input_response_to_value,
+    DefinitionRecord, InputRequestRecord, InstanceProgress, InstanceRecord, InstanceStatus,
+    ProgramRef, WaitStatus, input_request_from_value,
 };
-use crate::runtime::pattern::Pattern;
-use crate::runtime::reaction::{ReactionDefinition, ReactionEffect, ReactionValue};
 use crate::util::io_value::{as_record, io_value_summary, io_value_to_json};
 use preserves::IOValue;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
 use std::io::{self, BufRead, Write};
 use std::path::Path;
@@ -33,7 +30,6 @@ use uuid::Uuid;
 pub struct Service {
     control: Control,
     pending_requests: HashMap<String, transcript::TranscriptCursor>,
-    request_agents: HashMap<String, String>,
 }
 
 impl Service {
@@ -42,18 +38,12 @@ impl Service {
         Self {
             control,
             pending_requests: HashMap::new(),
-            request_agents: HashMap::new(),
         }
     }
 
     /// Process a single connection by consuming requests from the reader and writing responses.
     pub fn handle<R: BufRead, W: Write>(&mut self, reader: R, writer: W) -> io::Result<()> {
-        let mut session = Session::new(
-            &mut self.control,
-            &mut self.pending_requests,
-            &mut self.request_agents,
-            writer,
-        );
+        let mut session = Session::new(&mut self.control, &mut self.pending_requests, writer);
         session.run(reader)
     }
 }
@@ -61,7 +51,6 @@ impl Service {
 struct Session<'a, W: Write> {
     control: &'a mut Control,
     pending_requests: &'a mut HashMap<String, transcript::TranscriptCursor>,
-    request_agents: &'a mut HashMap<String, String>,
     writer: W,
     handshake_completed: bool,
     interpreter: Option<InterpreterBinding>,
@@ -70,20 +59,18 @@ struct Session<'a, W: Write> {
 #[derive(Clone)]
 struct InterpreterBinding {
     actor: ActorId,
-    facet: FacetId,
+    _facet: FacetId,
 }
 
 impl<'a, W: Write> Session<'a, W> {
     fn new(
         control: &'a mut Control,
         pending_requests: &'a mut HashMap<String, transcript::TranscriptCursor>,
-        request_agents: &'a mut HashMap<String, String>,
         writer: W,
     ) -> Self {
         Self {
             control,
             pending_requests,
-            request_agents,
             writer,
             handshake_completed: false,
             interpreter: None,
@@ -170,27 +157,16 @@ impl<'a, W: Write> Session<'a, W> {
             "step" => self.cmd_step(params),
             "goto" => self.cmd_goto(params),
             "back" => self.cmd_back(params),
-            "send_message" => self.cmd_send_message(params),
             "fork" => self.cmd_fork(params),
             "merge" => self.cmd_merge(params),
             "list_entities" => self.cmd_list_entities(params),
             "list_capabilities" => self.cmd_list_capabilities(params),
             "workspace_entries" => self.cmd_workspace_entries(),
-            "workspace_rescan" => self.cmd_workspace_rescan(),
-            "workspace_read" => self.cmd_workspace_read(params),
-            "workspace_write" => self.cmd_workspace_write(params),
-            "agent_invoke" => self.cmd_agent_invoke(params),
-            "agent_responses" => self.cmd_agent_responses(params),
             "transcript_show" => self.cmd_transcript_show(params),
             "transcript_tail" => self.cmd_transcript_tail(params),
             "workflow_list" => self.cmd_workflow_list(params),
-            "workflow_start" => self.cmd_workflow_start(params),
             "workflow_follow" => self.cmd_workflow_follow(params),
-            "workflow_input" => self.cmd_workflow_input(params),
-            "reaction_register" => self.cmd_reaction_register(params),
-            "reaction_unregister" => self.cmd_reaction_unregister(params),
             "reaction_list" => self.cmd_reaction_list(),
-            "invoke_capability" => self.cmd_invoke_capability(params),
             "dataspace_assertions" => self.cmd_dataspace_assertions(params),
             "dataspace_events" => self.cmd_dataspace_events(params),
             other => Err(ServiceError::Unsupported(other.to_string())),
@@ -217,6 +193,10 @@ impl<'a, W: Write> Session<'a, W> {
 
         self.handshake_completed = true;
 
+        let handle = ensure_control_interpreter(self.control).map_err(ServiceError::from)?;
+        let actor_str = handle.actor.to_string();
+        let facet_str = handle.facet.0.to_string();
+
         Ok(json!({
             "protocol_version": PROTOCOL_VERSION,
             "runtime": {
@@ -227,13 +207,20 @@ impl<'a, W: Write> Session<'a, W> {
                     "history",
                     "time_travel",
                     "branching",
-                    "entity_persistence",
-                    "capability_inspection",
+                    "entity_inspection",
+                    "branch_listing",
                     "dataspace_inspection",
                     "dataspace_events",
-                    "reactions",
-                    "workflow_interpreter"
-                ]
+                    "transcript_inspection",
+                    "program_inspection",
+                    "workflow_inspection",
+                    "reaction_inspection"
+                ],
+                "control_interpreter": {
+                    "actor": actor_str,
+                    "facet": facet_str,
+                    "short_actor": short_id(&actor_str),
+                }
             }
         }))
     }
@@ -253,29 +240,10 @@ impl<'a, W: Write> Session<'a, W> {
             return Ok(binding.clone());
         }
 
-        let binding = if let Some(info) = self
-            .control
-            .list_entities()
-            .into_iter()
-            .find(|info| info.entity_type == "interpreter")
-        {
-            InterpreterBinding {
-                actor: info.actor,
-                facet: info.facet,
-            }
-        } else {
-            let actor = ActorId::new();
-            let facet = FacetId::new();
-            self.control
-                .register_entity(
-                    actor.clone(),
-                    facet.clone(),
-                    "interpreter".to_string(),
-                    IOValue::symbol("default"),
-                )
-                .map_err(ServiceError::from)?;
-
-            InterpreterBinding { actor, facet }
+        let handle = ensure_control_interpreter(self.control).map_err(ServiceError::from)?;
+        let binding = InterpreterBinding {
+            actor: handle.actor,
+            _facet: handle.facet,
         };
 
         self.interpreter = Some(binding.clone());
@@ -383,14 +351,6 @@ impl<'a, W: Write> Session<'a, W> {
         None
     }
 
-    fn interpreter_instance_ids(&mut self, binding: &InterpreterBinding) -> HashSet<String> {
-        self.collect_interpreter_state(binding)
-            .1
-            .into_iter()
-            .map(|record| record.instance_id)
-            .collect()
-    }
-
     fn cmd_status(&mut self, params: &Value) -> Result<Value, ServiceError> {
         self.ensure_handshake()?;
         if let Some(branch_name) = params.get("branch").and_then(Value::as_str) {
@@ -463,42 +423,6 @@ impl<'a, W: Write> Session<'a, W> {
         let count = params.get("count").and_then(Value::as_u64).unwrap_or(1) as usize;
         let turn_id = self.control.back(count).map_err(ServiceError::from)?;
         Ok(json!({ "head": turn_id }))
-    }
-
-    fn cmd_send_message(&mut self, params: &Value) -> Result<Value, ServiceError> {
-        self.ensure_handshake()?;
-
-        if let Some(branch_name) = params.get("branch").and_then(Value::as_str) {
-            self.switch_branch(branch_name)?;
-        }
-
-        let target = params
-            .get("target")
-            .ok_or_else(|| ServiceError::invalid_param("target"))?;
-
-        let actor = target
-            .get("actor")
-            .and_then(Value::as_str)
-            .ok_or_else(|| ServiceError::invalid_param("target.actor"))?;
-        let facet = target
-            .get("facet")
-            .and_then(Value::as_str)
-            .ok_or_else(|| ServiceError::invalid_param("target.facet"))?;
-
-        let payload_value = params
-            .get("payload")
-            .ok_or_else(|| ServiceError::invalid_param("payload"))?;
-
-        let actor_id = ActorId::from_uuid(parse_uuid(actor)?);
-        let facet_id = FacetId::from_uuid(parse_uuid(facet)?);
-        let payload = parse_preserves(payload_value)?;
-
-        let turn_id = self
-            .control
-            .send_message(actor_id, facet_id, payload)
-            .map_err(ServiceError::from)?;
-
-        Ok(json!({ "queued_turn": turn_id }))
     }
 
     fn cmd_fork(&mut self, params: &Value) -> Result<Value, ServiceError> {
@@ -578,202 +502,6 @@ impl<'a, W: Write> Session<'a, W> {
 
         let entries = codebase::list_workspace_entries(&self.control, &handle);
         Ok(json!({ "entries": entries }))
-    }
-
-    fn cmd_workspace_rescan(&mut self) -> Result<Value, ServiceError> {
-        self.ensure_handshake()?;
-        let handle = self
-            .workspace_handle()
-            .ok_or_else(|| ServiceError::Protocol("workspace entity not registered".into()))?;
-
-        codebase::workspace_rescan(&mut self.control, &handle).map_err(ServiceError::from)?;
-        Ok(json!({ "status": "ok" }))
-    }
-
-    fn cmd_workspace_read(&mut self, params: &Value) -> Result<Value, ServiceError> {
-        self.ensure_handshake()?;
-        let path = params
-            .get("path")
-            .and_then(Value::as_str)
-            .ok_or_else(|| ServiceError::invalid_param("path"))?;
-
-        let handle = self
-            .workspace_handle()
-            .ok_or_else(|| ServiceError::Protocol("workspace entity not registered".into()))?;
-
-        let content =
-            codebase::read_file(&mut self.control, &handle, path).map_err(ServiceError::from)?;
-        Ok(json!({ "path": path, "content": content }))
-    }
-
-    fn cmd_workspace_write(&mut self, params: &Value) -> Result<Value, ServiceError> {
-        self.ensure_handshake()?;
-        let path = params
-            .get("path")
-            .and_then(Value::as_str)
-            .ok_or_else(|| ServiceError::invalid_param("path"))?;
-        let content = params
-            .get("content")
-            .and_then(Value::as_str)
-            .ok_or_else(|| ServiceError::invalid_param("content"))?;
-
-        let handle = self
-            .workspace_handle()
-            .ok_or_else(|| ServiceError::Protocol("workspace entity not registered".into()))?;
-
-        codebase::write_file(&mut self.control, &handle, path, content)
-            .map_err(ServiceError::from)?;
-        Ok(json!({ "status": "ok" }))
-    }
-
-    fn cmd_agent_invoke(&mut self, params: &Value) -> Result<Value, ServiceError> {
-        self.ensure_handshake()?;
-        let prompt = params
-            .get("prompt")
-            .and_then(Value::as_str)
-            .ok_or_else(|| ServiceError::invalid_param("prompt"))?;
-
-        let agent_override = params.get("agent").and_then(Value::as_str);
-        let handle = self.ensure_agent_handle(agent_override)?;
-        let invocation = match handle.kind.as_str() {
-            k if k == codebase::agent::claude::CLAUDE_KIND => {
-                codebase::invoke_claude_agent(&mut self.control, &handle, prompt)
-            }
-            k if k == codebase::agent::codex::CODEX_KIND => {
-                codebase::invoke_codex_agent(&mut self.control, &handle, prompt)
-            }
-            k if k == codebase::agent::harness::HARNESS_KIND => {
-                codebase::invoke_harness_agent(&mut self.control, &handle, prompt)
-            }
-            _ => return Err(ServiceError::invalid_param("agent")),
-        }
-        .map_err(ServiceError::from)?;
-
-        let (queued_turn_value, last_turn_for_cursor) = match invocation.queued_turn.clone() {
-            Some(turn) => (Value::from(turn.to_string()), turn),
-            None => {
-                let status = self.control.status().map_err(ServiceError::from)?;
-                (Value::Null, status.head_turn)
-            }
-        };
-
-        let branch_string = invocation.branch.to_string();
-
-        self.pending_requests.insert(
-            invocation.request_id.clone(),
-            transcript::TranscriptCursor {
-                branch: invocation.branch.clone(),
-                last_turn: last_turn_for_cursor,
-                actor: Some(invocation.actor.clone()),
-            },
-        );
-        self.request_agents
-            .insert(invocation.request_id.clone(), invocation.agent.clone());
-
-        Ok(json!({
-            "agent": invocation.agent,
-            "request_id": invocation.request_id,
-            "prompt": invocation.prompt,
-            "actor": invocation.actor.to_string(),
-            "branch": branch_string,
-            "queued_turn": queued_turn_value,
-        }))
-    }
-
-    fn cmd_agent_responses(&mut self, params: &Value) -> Result<Value, ServiceError> {
-        self.ensure_handshake()?;
-        let total_wait_ms = params
-            .get("wait_ms")
-            .and_then(Value::as_u64)
-            .unwrap_or(1000);
-
-        let request_filter = params
-            .get("request_id")
-            .and_then(Value::as_str)
-            .map(|s| s.to_string());
-
-        let limit = params
-            .get("limit")
-            .and_then(Value::as_u64)
-            .map(|v| v as usize);
-
-        let agent_override = params.get("agent").and_then(Value::as_str);
-        let agent_kind_owned = agent_override
-            .map(|s| s.to_string())
-            .or_else(|| {
-                request_filter
-                    .as_deref()
-                    .and_then(|req_id| self.request_agents.get(req_id).map(|s| s.to_string()))
-            })
-            .unwrap_or_else(|| codebase::agent::claude::CLAUDE_KIND.to_string());
-
-        let handle = self.ensure_agent_handle(Some(agent_kind_owned.as_str()))?;
-        let status = self.control.status().map_err(ServiceError::from)?;
-
-        if total_wait_ms > 0 {
-            let timeout = Duration::from_millis(total_wait_ms);
-
-            if let Some(req_id) = request_filter.clone() {
-                let (branch, since) = if let Some(cursor) = self.pending_requests.get(&req_id) {
-                    (cursor.branch.clone(), Some(cursor.last_turn.clone()))
-                } else {
-                    (status.active_branch.clone(), Some(status.head_turn.clone()))
-                };
-
-                let _ = self
-                    .control
-                    .wait_for_turn_after(&branch, since.as_ref(), timeout)
-                    .map_err(ServiceError::from)?;
-            } else {
-                let _ = self
-                    .control
-                    .wait_for_turn_after(&status.active_branch, Some(&status.head_turn), timeout)
-                    .map_err(ServiceError::from)?;
-            }
-        }
-
-        self.control.drain_pending().map_err(ServiceError::from)?;
-        let mut responses = codebase::list_agent_responses(&self.control, &handle);
-
-        if let Some(request_id) = request_filter.as_deref() {
-            responses.retain(|resp| resp.request_id == request_id);
-
-            if let Some(limit) = limit {
-                if responses.len() > limit {
-                    responses.truncate(limit);
-                }
-            }
-
-            if !responses.is_empty() {
-                use std::collections::hash_map::Entry;
-
-                match self.pending_requests.entry(request_id.to_string()) {
-                    Entry::Occupied(mut slot) => {
-                        let cursor = slot.get_mut();
-                        cursor.branch = status.active_branch.clone();
-                        cursor.last_turn = status.head_turn.clone();
-                        cursor.actor.get_or_insert_with(|| handle.actor.clone());
-                    }
-                    Entry::Vacant(slot) => {
-                        slot.insert(transcript::TranscriptCursor {
-                            branch: status.active_branch.clone(),
-                            last_turn: status.head_turn.clone(),
-                            actor: Some(handle.actor.clone()),
-                        });
-                    }
-                }
-
-                self.request_agents
-                    .entry(request_id.to_string())
-                    .or_insert_with(|| handle.kind.clone());
-            }
-        } else if let Some(limit) = limit {
-            if responses.len() > limit {
-                responses.truncate(limit);
-            }
-        }
-
-        Ok(json!({ "responses": responses }))
     }
 
     fn cmd_transcript_show(&mut self, params: &Value) -> Result<Value, ServiceError> {
@@ -963,62 +691,6 @@ impl<'a, W: Write> Session<'a, W> {
         }))
     }
 
-    fn cmd_workflow_start(&mut self, params: &Value) -> Result<Value, ServiceError> {
-        self.ensure_handshake()?;
-        let definition = params
-            .get("definition")
-            .and_then(Value::as_str)
-            .ok_or_else(|| ServiceError::invalid_param("definition"))?;
-        let label = params.get("label").and_then(Value::as_str);
-        let binding = self.ensure_interpreter_binding()?;
-        let before_ids = self.interpreter_instance_ids(&binding);
-
-        let payload = IOValue::record(
-            IOValue::symbol(RUN_MESSAGE_LABEL),
-            vec![IOValue::new(definition.to_string())],
-        );
-
-        let turn = self
-            .control
-            .send_message(binding.actor.clone(), binding.facet.clone(), payload)
-            .map_err(ServiceError::from)?;
-
-        self.control.drain_pending().map_err(ServiceError::from)?;
-
-        let (_, instances_after, _) = self.collect_interpreter_state(&binding);
-        let new_instance = instances_after
-            .into_iter()
-            .find(|instance| !before_ids.contains(&instance.instance_id));
-
-        let mut response = json!({
-            "status": "started",
-            "turn": turn.to_string(),
-        });
-
-        if let Some(instance) = new_instance {
-            response
-                .as_object_mut()
-                .unwrap()
-                .insert("instance".into(), serialize_instance(&instance));
-        }
-
-        if let Some(path) = params.get("definition_path").and_then(Value::as_str) {
-            response
-                .as_object_mut()
-                .unwrap()
-                .insert("definition_path".into(), json!(path));
-        }
-
-        if let Some(label_value) = label {
-            response
-                .as_object_mut()
-                .unwrap()
-                .insert("label".into(), json!(label_value));
-        }
-
-        Ok(response)
-    }
-
     fn cmd_workflow_follow(&mut self, params: &Value) -> Result<Value, ServiceError> {
         self.ensure_handshake()?;
         let instance_id = params
@@ -1047,281 +719,12 @@ impl<'a, W: Write> Session<'a, W> {
         }))
     }
 
-    fn cmd_workflow_input(&mut self, params: &Value) -> Result<Value, ServiceError> {
-        self.ensure_handshake()?;
-
-        let instance_id = params
-            .get("instance_id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| ServiceError::invalid_param("instance_id"))?;
-        let request_id = params
-            .get("request_id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| ServiceError::invalid_param("request_id"))?;
-        let response_text = params
-            .get("response")
-            .and_then(Value::as_str)
-            .ok_or_else(|| ServiceError::invalid_param("response"))?;
-
-        let binding = self.ensure_interpreter_binding()?;
-        self.control.drain_pending().map_err(ServiceError::from)?;
-        let (_, instances, _) = self.collect_interpreter_state(&binding);
-
-        let instance = instances
-            .into_iter()
-            .find(|entry| entry.instance_id == instance_id)
-            .ok_or_else(|| ServiceError::invalid_param("instance_id"))?;
-
-        let wait_status = match &instance.status {
-            InstanceStatus::Waiting(wait) => wait,
-            _ => {
-                return Err(ServiceError::Protocol(
-                    "workflow is not waiting for input".into(),
-                ));
-            }
-        };
-
-        let (expected_request, tag) = match wait_status {
-            WaitStatus::UserInput {
-                request_id, tag, ..
-            } => (request_id, tag),
-            _ => {
-                return Err(ServiceError::Protocol(
-                    "workflow is not waiting for user input".into(),
-                ));
-            }
-        };
-
-        if request_id != expected_request {
-            return Err(ServiceError::Protocol(
-                "request_id does not match pending prompt".into(),
-            ));
-        }
-
-        let response_record = InputResponseRecord {
-            instance_id: instance.instance_id.clone(),
-            request_id: request_id.to_string(),
-            tag: tag.clone(),
-            response: InterpreterValue::String(response_text.to_string()),
-        };
-
-        let turn = self
-            .control
-            .assert_value(
-                binding.actor.clone(),
-                input_response_to_value(&response_record),
-            )
-            .map_err(ServiceError::from)?;
-
-        self.control.drain_pending().map_err(ServiceError::from)?;
-
-        Ok(json!({
-            "status": "ok",
-            "turn": turn.to_string(),
-        }))
-    }
-
-    fn cmd_reaction_register(&mut self, params: &Value) -> Result<Value, ServiceError> {
-        self.ensure_handshake()?;
-
-        let actor_str = params
-            .get("actor")
-            .and_then(Value::as_str)
-            .ok_or_else(|| ServiceError::invalid_param("actor"))?;
-        let actor_uuid = parse_uuid(actor_str)?;
-        let actor = ActorId::from_uuid(actor_uuid);
-
-        let facet_str = params
-            .get("facet")
-            .and_then(Value::as_str)
-            .ok_or_else(|| ServiceError::invalid_param("facet"))?;
-        let facet_uuid = parse_uuid(facet_str)?;
-        let facet = FacetId::from_uuid(facet_uuid);
-
-        let pattern_text = params
-            .get("pattern")
-            .and_then(Value::as_str)
-            .ok_or_else(|| ServiceError::invalid_param("pattern"))?;
-        let pattern_value: IOValue = pattern_text
-            .parse()
-            .map_err(|err| ServiceError::InvalidParams(format!("invalid pattern: {err}")))?;
-
-        let effect_value = params
-            .get("effect")
-            .ok_or_else(|| ServiceError::invalid_param("effect"))?;
-        let effect = self.parse_reaction_effect(effect_value)?;
-
-        let pattern = Pattern {
-            id: Uuid::new_v4(),
-            pattern: pattern_value,
-            facet,
-        };
-
-        let definition = ReactionDefinition::new(pattern, effect);
-        let reaction_id = self
-            .control
-            .register_reaction(actor, definition)
-            .map_err(ServiceError::from)?;
-
-        Ok(json!({ "reaction_id": reaction_id.to_string() }))
-    }
-
-    fn cmd_reaction_unregister(&mut self, params: &Value) -> Result<Value, ServiceError> {
-        self.ensure_handshake()?;
-
-        let reaction_str = params
-            .get("reaction_id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| ServiceError::invalid_param("reaction_id"))?;
-        let reaction_uuid = parse_uuid(reaction_str)?;
-
-        let removed = self
-            .control
-            .unregister_reaction(reaction_uuid)
-            .map_err(ServiceError::from)?;
-
-        Ok(json!({ "removed": removed }))
-    }
-
     fn cmd_reaction_list(&mut self) -> Result<Value, ServiceError> {
         self.ensure_handshake()?;
         let reactions = self.control.list_reactions();
         let serialized = serde_json::to_value(&reactions)
             .map_err(|err| ServiceError::Protocol(err.to_string()))?;
         Ok(json!({ "reactions": serialized }))
-    }
-
-    fn cmd_invoke_capability(&mut self, params: &Value) -> Result<Value, ServiceError> {
-        self.ensure_handshake()?;
-
-        let cap_id = params
-            .get("capability")
-            .and_then(Value::as_str)
-            .ok_or_else(|| ServiceError::invalid_param("capability"))?;
-
-        let payload = params
-            .get("payload")
-            .and_then(Value::as_str)
-            .ok_or_else(|| ServiceError::invalid_param("payload"))?;
-
-        let capability = parse_uuid(cap_id)?;
-        let payload_value: IOValue = payload
-            .parse()
-            .map_err(|err| ServiceError::InvalidParams(format!("invalid payload: {err}")))?;
-
-        let response = self
-            .control
-            .invoke_capability(capability, payload_value)
-            .map_err(ServiceError::from)?;
-
-        let rendered = format!("{:?}", response);
-        Ok(json!({ "result": rendered }))
-    }
-
-    fn parse_reaction_effect(&self, value: &Value) -> Result<ReactionEffect, ServiceError> {
-        let effect_obj = value
-            .as_object()
-            .ok_or_else(|| ServiceError::invalid_param("effect"))?;
-
-        let effect_type = effect_obj
-            .get("type")
-            .and_then(Value::as_str)
-            .ok_or_else(|| ServiceError::invalid_param("effect.type"))?;
-
-        match effect_type {
-            "assert" => {
-                let value_field = effect_obj
-                    .get("value")
-                    .ok_or_else(|| ServiceError::invalid_param("effect.value"))?;
-                let reaction_value = self.parse_reaction_value(value_field)?;
-
-                let target_facet = if let Some(facet_text) = effect_obj.get("target_facet") {
-                    let facet_str = facet_text
-                        .as_str()
-                        .ok_or_else(|| ServiceError::invalid_param("effect.target_facet"))?;
-                    let uuid = parse_uuid(facet_str)?;
-                    Some(FacetId::from_uuid(uuid))
-                } else {
-                    None
-                };
-
-                Ok(ReactionEffect::Assert {
-                    value: reaction_value,
-                    target_facet,
-                })
-            }
-            "send-message" => {
-                let actor_str = effect_obj
-                    .get("actor")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| ServiceError::invalid_param("effect.actor"))?;
-                let facet_str = effect_obj
-                    .get("facet")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| ServiceError::invalid_param("effect.facet"))?;
-                let payload_field = effect_obj
-                    .get("payload")
-                    .ok_or_else(|| ServiceError::invalid_param("effect.payload"))?;
-
-                let target_actor = ActorId::from_uuid(parse_uuid(actor_str)?);
-                let target_facet = FacetId::from_uuid(parse_uuid(facet_str)?);
-                let payload = self.parse_reaction_value(payload_field)?;
-
-                Ok(ReactionEffect::SendMessage {
-                    actor: target_actor,
-                    facet: target_facet,
-                    payload,
-                })
-            }
-            other => Err(ServiceError::InvalidParams(format!(
-                "unsupported effect type: {}",
-                other
-            ))),
-        }
-    }
-
-    fn parse_reaction_value(&self, value: &Value) -> Result<ReactionValue, ServiceError> {
-        if let Some(text) = value.as_str() {
-            let literal: IOValue = text.parse().map_err(|err| {
-                ServiceError::InvalidParams(format!("invalid effect value: {err}"))
-            })?;
-            return Ok(ReactionValue::Literal { value: literal });
-        }
-
-        if let Some(obj) = value.as_object() {
-            let value_type = obj
-                .get("type")
-                .and_then(Value::as_str)
-                .ok_or_else(|| ServiceError::invalid_param("effect.value.type"))?;
-            match value_type {
-                "literal" => {
-                    let literal_text = obj
-                        .get("value")
-                        .and_then(Value::as_str)
-                        .ok_or_else(|| ServiceError::invalid_param("effect.value.value"))?;
-                    let literal: IOValue = literal_text.parse().map_err(|err| {
-                        ServiceError::InvalidParams(format!("invalid effect value: {err}"))
-                    })?;
-                    Ok(ReactionValue::Literal { value: literal })
-                }
-                "match" => Ok(ReactionValue::Match),
-                "match-index" => {
-                    let index_val = obj
-                        .get("index")
-                        .and_then(Value::as_u64)
-                        .ok_or_else(|| ServiceError::invalid_param("effect.value.index"))?;
-                    Ok(ReactionValue::MatchIndex {
-                        index: index_val as usize,
-                    })
-                }
-                other => Err(ServiceError::InvalidParams(format!(
-                    "unsupported value type: {}",
-                    other
-                ))),
-            }
-        } else {
-            Err(ServiceError::invalid_param("effect.value"))
-        }
     }
 
     fn cmd_dataspace_assertions(&mut self, params: &Value) -> Result<Value, ServiceError> {
@@ -1558,26 +961,6 @@ impl<'a, W: Write> Session<'a, W> {
 
     fn workspace_handle(&self) -> Option<codebase::WorkspaceHandle> {
         codebase::workspace_handle(&self.control)
-    }
-
-    fn ensure_agent_handle(
-        &mut self,
-        agent_kind: Option<&str>,
-    ) -> Result<codebase::AgentHandle, ServiceError> {
-        let kind = agent_kind.unwrap_or(codebase::agent::claude::CLAUDE_KIND);
-        let handle = match kind {
-            k if k == codebase::agent::claude::CLAUDE_KIND => {
-                codebase::ensure_claude_agent(&mut self.control)
-            }
-            k if k == codebase::agent::codex::CODEX_KIND => {
-                codebase::ensure_codex_agent(&mut self.control)
-            }
-            k if k == codebase::agent::harness::HARNESS_KIND => {
-                codebase::ensure_harness_agent(&mut self.control)
-            }
-            _ => return Err(ServiceError::invalid_param("agent")),
-        };
-        handle.map_err(ServiceError::from)
     }
 }
 
@@ -1909,16 +1292,4 @@ impl From<ServiceError> for ErrorEnvelope {
 fn parse_uuid(value: &str) -> Result<Uuid, ServiceError> {
     Uuid::parse_str(value)
         .map_err(|err| ServiceError::InvalidParams(format!("invalid UUID '{}': {}", value, err)))
-}
-
-fn parse_preserves(value: &Value) -> Result<IOValue, ServiceError> {
-    match value {
-        Value::String(s) => s.parse().map_err(|err| {
-            ServiceError::InvalidParams(format!("invalid preserves value: {}", err))
-        }),
-        other => Err(ServiceError::InvalidParams(format!(
-            "payload must be a string containing preserves text, found {}",
-            other
-        ))),
-    }
 }

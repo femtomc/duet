@@ -197,8 +197,7 @@ impl ValueExpr {
                 })
             }
             ValueExpr::RoleProperty { role, key } => {
-                let role_value = role
-                    .resolve(bindings, last_wait, context)?;
+                let role_value = role.resolve(bindings, last_wait, context)?;
                 let role_name = match role_value {
                     Value::String(ref text) => text.clone(),
                     Value::Symbol(ref sym) => sym.clone(),
@@ -206,7 +205,7 @@ impl ValueExpr {
                         return Err(validation_error(&format!(
                             "role-property expected role name as string, found {:?}",
                             other
-                        )))
+                        )));
                     }
                 };
                 let value = context.role_property(&role_name, key).ok_or_else(|| {
@@ -441,11 +440,9 @@ fn value_to_string(value: &Value) -> String {
             let rendered: Vec<String> = fields.iter().map(value_to_string).collect();
             format!("<{} {}>", label, rendered.join(" "))
         }
-        Value::RoleProperty { role, key } => format!(
-            "<role-property {} {}>",
-            value_to_string(role),
-            key
-        ),
+        Value::RoleProperty { role, key } => {
+            format!("<role-property {} {}>", value_to_string(role), key)
+        }
     }
 }
 

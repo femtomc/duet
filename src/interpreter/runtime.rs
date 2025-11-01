@@ -7,6 +7,9 @@ use preserves::IOValue;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Default iteration limit applied to `(loop ...)` constructs to prevent runaway execution.
+pub const LOOP_ITERATION_LIMIT: u32 = 1000;
+
 /// Snapshot of the interpreter runtime's internal state.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RuntimeSnapshot {
@@ -33,6 +36,8 @@ pub struct FrameSnapshot {
     pub index: usize,
     /// Frame execution mode.
     pub kind: FrameKindSnapshot,
+    /// Remaining iterations (for loop frames).
+    pub remaining: Option<u32>,
 }
 
 /// Snapshot representation of the frame kind.
@@ -92,6 +97,13 @@ pub enum RuntimeError<E> {
     NoStates,
     /// Function invocation failed (unknown function, arity mismatch).
     InvalidCall(String),
+    /// A loop exceeded the configured iteration limit.
+    LoopLimitExceeded {
+        /// State in which the loop resides.
+        state: String,
+        /// Configured iteration cap.
+        limit: u32,
+    },
 }
 
 /// Stateful interpreter runtime that drives IR programs against a host.
@@ -169,7 +181,7 @@ impl<H: InterpreterHost> InterpreterRuntime<H> {
                 self.frames.clear();
                 if !state.body.is_empty() {
                     self.frames
-                        .push(Frame::new(state.body.clone(), FrameKind::Normal));
+                        .push(Frame::new(state.body.clone(), FrameKind::Normal, None));
                 }
 
                 if self.frames.is_empty() {
@@ -196,6 +208,18 @@ impl<H: InterpreterHost> InterpreterRuntime<H> {
                         continue;
                     }
                     FrameKind::Loop => {
+                        if let Some(remaining) = frame.remaining.as_mut() {
+                            if *remaining == 0 {
+                                let state_name = self
+                                    .current_state_name()
+                                    .unwrap_or_else(|| "<unknown>".to_string());
+                                return Err(RuntimeError::LoopLimitExceeded {
+                                    state: state_name,
+                                    limit: LOOP_ITERATION_LIMIT,
+                                });
+                            }
+                            *remaining -= 1;
+                        }
                         frame.index = 0;
                         continue;
                     }
@@ -239,8 +263,11 @@ impl<H: InterpreterHost> InterpreterRuntime<H> {
                             .map_err(RuntimeError::Host)?
                         {
                             if !arm.body.is_empty() {
-                                self.frames
-                                    .push(Frame::new(arm.body.clone(), FrameKind::Normal));
+                                self.frames.push(Frame::new(
+                                    arm.body.clone(),
+                                    FrameKind::Normal,
+                                    None,
+                                ));
                             }
                             executed = true;
                             break;
@@ -249,7 +276,7 @@ impl<H: InterpreterHost> InterpreterRuntime<H> {
                     if !executed {
                         if let Some(body) = otherwise {
                             if !body.is_empty() {
-                                self.frames.push(Frame::new(body, FrameKind::Normal));
+                                self.frames.push(Frame::new(body, FrameKind::Normal, None));
                             }
                         }
                     }
@@ -258,7 +285,11 @@ impl<H: InterpreterHost> InterpreterRuntime<H> {
                 Instruction::Loop(body) => {
                     frame.index += 1;
                     if !body.is_empty() {
-                        self.frames.push(Frame::new(body, FrameKind::Loop));
+                        self.frames.push(Frame::new(
+                            body,
+                            FrameKind::Loop,
+                            Some(LOOP_ITERATION_LIMIT),
+                        ));
                     }
                     return Ok(RuntimeEvent::Progress);
                 }
@@ -276,7 +307,7 @@ impl<H: InterpreterHost> InterpreterRuntime<H> {
                         .map_err(RuntimeError::InvalidCall)?;
                     if !instructions.is_empty() {
                         self.frames
-                            .push(Frame::new(instructions, FrameKind::Normal));
+                            .push(Frame::new(instructions, FrameKind::Normal, None));
                     }
                     return Ok(RuntimeEvent::Progress);
                 }
@@ -498,6 +529,30 @@ impl<H: InterpreterHost> InterpreterRuntime<H> {
                         args: resolved_args,
                     });
                 }
+                InstructionTemplate::Let {
+                    bindings: let_bindings,
+                    sequential,
+                    body,
+                } => {
+                    let mut local = HashMap::new();
+                    if *sequential {
+                        let mut scope = bindings.clone();
+                        for binding in let_bindings {
+                            let value = self.resolve_expr(&binding.value, &scope)?;
+                            scope.insert(binding.name.clone(), value.clone());
+                            local.insert(binding.name.clone(), value);
+                        }
+                    } else {
+                        for binding in let_bindings {
+                            let value = self.resolve_expr(&binding.value, bindings)?;
+                            local.insert(binding.name.clone(), value);
+                        }
+                    }
+                    let mut extended = bindings.clone();
+                    extended.extend(local);
+                    let mut instantiated = self.instantiate_templates(body, &extended)?;
+                    instructions.append(&mut instantiated);
+                }
             }
         }
         Ok(instructions)
@@ -604,6 +659,30 @@ impl<H: InterpreterHost> InterpreterRuntime<H> {
             ActionTemplate::Retract(value_expr) => {
                 Ok(Action::Retract(self.resolve_expr(value_expr, bindings)?))
             }
+            ActionTemplate::RegisterPattern {
+                role,
+                pattern,
+                property,
+            } => Ok(Action::RegisterPattern {
+                role: role.clone(),
+                pattern: self.resolve_expr(pattern, bindings)?,
+                property: property.clone(),
+            }),
+            ActionTemplate::UnregisterPattern {
+                role,
+                pattern,
+                property,
+            } => Ok(Action::UnregisterPattern {
+                role: role.clone(),
+                pattern: match pattern {
+                    Some(expr) => Some(self.resolve_expr(expr, bindings)?),
+                    None => None,
+                },
+                property: property.clone(),
+            }),
+            ActionTemplate::DetachEntity { role } => {
+                Ok(Action::DetachEntity { role: role.clone() })
+            }
         }
     }
 
@@ -675,6 +754,7 @@ struct Frame {
     instructions: Vec<Instruction>,
     index: usize,
     kind: FrameKind,
+    remaining: Option<u32>,
 }
 
 #[derive(Clone)]
@@ -684,11 +764,12 @@ enum FrameKind {
 }
 
 impl Frame {
-    fn new(instructions: Vec<Instruction>, kind: FrameKind) -> Self {
+    fn new(instructions: Vec<Instruction>, kind: FrameKind, remaining: Option<u32>) -> Self {
         Self {
             instructions,
             index: 0,
             kind,
+            remaining,
         }
     }
 
@@ -700,6 +781,7 @@ impl Frame {
                 FrameKind::Normal => FrameKindSnapshot::Normal,
                 FrameKind::Loop => FrameKindSnapshot::Loop,
             },
+            remaining: self.remaining,
         }
     }
 
@@ -712,6 +794,7 @@ impl Frame {
             instructions: snapshot.instructions,
             index: snapshot.index,
             kind,
+            remaining: snapshot.remaining,
         }
     }
 }

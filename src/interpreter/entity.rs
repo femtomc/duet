@@ -3,9 +3,9 @@ use std::sync::Mutex;
 
 use crate::codebase::agent;
 use crate::interpreter::protocol::{
-    InputRequestRecord, OBSERVER_RECORD_LABEL, TOOL_REQUEST_RECORD_LABEL, TOOL_RESULT_RECORD_LABEL,
-    WaitRecord, input_request_to_value, input_response_from_value, runtime_snapshot_from_value,
-    runtime_snapshot_to_value, wait_record_to_value,
+    ENTITY_RECORD_LABEL, InputRequestRecord, OBSERVER_RECORD_LABEL, TOOL_REQUEST_RECORD_LABEL,
+    TOOL_RESULT_RECORD_LABEL, WaitRecord, input_request_to_value, input_response_from_value,
+    runtime_snapshot_from_value, runtime_snapshot_to_value, wait_record_to_value,
 };
 use crate::interpreter::value::ValueContext;
 use crate::interpreter::{
@@ -742,6 +742,19 @@ impl InterpreterEntity {
                     status = InstanceStatus::Failed(message.clone());
                     progress.state = runtime.current_state_name();
                     progress.entry_pending = runtime.entry_pending();
+                    progress.waiting = None;
+                    progress.frame_depth = runtime.frame_depth();
+                    result_error = Some(ActorError::InvalidActivation(message));
+                    break;
+                }
+                Err(RuntimeError::LoopLimitExceeded { state, limit }) => {
+                    let message = format!(
+                        "loop in state '{}' exceeded iteration limit {}",
+                        state, limit
+                    );
+                    status = InstanceStatus::Failed(message.clone());
+                    progress.state = Some(state);
+                    progress.entry_pending = false;
                     progress.waiting = None;
                     progress.frame_depth = runtime.frame_depth();
                     result_error = Some(ActorError::InvalidActivation(message));
@@ -1534,6 +1547,19 @@ impl InterpreterEntity {
                     result_error = Some(ActorError::InvalidActivation(message));
                     break;
                 }
+                Err(RuntimeError::LoopLimitExceeded { state, limit }) => {
+                    let message = format!(
+                        "loop in state '{}' exceeded iteration limit {}",
+                        state, limit
+                    );
+                    status = InstanceStatus::Failed(message.clone());
+                    progress.state = Some(state);
+                    progress.entry_pending = false;
+                    progress.waiting = None;
+                    progress.frame_depth = runtime.frame_depth();
+                    result_error = Some(ActorError::InvalidActivation(message));
+                    break;
+                }
             }
         }
 
@@ -2044,7 +2070,7 @@ impl<'a> ActivationHost<'a> {
                         return Err(ActorError::InvalidActivation(format!(
                             "role-property expected role name as string, found {:?}",
                             other
-                        )))
+                        )));
                     }
                 };
                 let binding = self.role_binding(&role_name)?;
@@ -2213,6 +2239,170 @@ impl<'a> InterpreterHost for ActivationHost<'a> {
                 }
 
                 self.activation.retract(handle);
+                Ok(())
+            }
+            Action::RegisterPattern {
+                role,
+                pattern,
+                property,
+            } => {
+                let (entity_id, facet_id) = {
+                    let binding = self.role_binding(role)?;
+                    let entity_str = binding.properties.get("entity").ok_or_else(|| {
+                        ActorError::InvalidActivation(format!(
+                            "register-pattern for role '{role}' requires role property 'entity'"
+                        ))
+                    })?;
+                    let facet_str = binding.properties.get("facet").ok_or_else(|| {
+                        ActorError::InvalidActivation(format!(
+                            "register-pattern for role '{role}' requires role property 'facet'"
+                        ))
+                    })?;
+
+                    let entity_value = entity_str.clone();
+                    let facet_value = facet_str.clone();
+
+                    let entity_uuid = Uuid::parse_str(&entity_value).map_err(|_| {
+                        ActorError::InvalidActivation(format!(
+                            "register-pattern role '{role}' property 'entity' must be a UUID, got {entity_value}"
+                        ))
+                    })?;
+                    let facet_uuid = Uuid::parse_str(&facet_value).map_err(|_| {
+                        ActorError::InvalidActivation(format!(
+                            "register-pattern role '{role}' property 'facet' must be a UUID, got {facet_value}"
+                        ))
+                    })?;
+
+                    (entity_uuid, FacetId::from_uuid(facet_uuid))
+                };
+
+                let resolved_pattern = self.resolve_value(pattern)?.to_io_value();
+                let pattern_id = self.activation.register_pattern_for_entity(
+                    entity_id,
+                    facet_id,
+                    resolved_pattern,
+                );
+
+                if let Some(prop) = property {
+                    let binding = self.role_binding_mut(role)?;
+                    binding
+                        .properties
+                        .insert(prop.clone(), pattern_id.to_string());
+                }
+
+                Ok(())
+            }
+            Action::UnregisterPattern {
+                role,
+                pattern,
+                property,
+            } => {
+                let property_name = property
+                    .clone()
+                    .unwrap_or_else(|| "agent-request-pattern".to_string());
+
+                let (pattern_id_str, remove_property): (String, bool) = if let Some(value) = pattern
+                {
+                    let id = match &value {
+                        Value::String(text) => text.clone(),
+                        Value::Symbol(sym) => sym.clone(),
+                        other => {
+                            return Err(ActorError::InvalidActivation(format!(
+                                "unregister-pattern :pattern must resolve to a string, found {:?}",
+                                other
+                            )));
+                        }
+                    };
+                    (id, property.is_some())
+                } else {
+                    let binding = self.role_binding(role)?;
+                    let existing = binding.properties.get(&property_name).ok_or_else(|| {
+                        ActorError::InvalidActivation(format!(
+                            "role '{role}' does not define property '{}'",
+                            property_name
+                        ))
+                    })?;
+                    (existing.clone(), true)
+                };
+
+                let pattern_uuid = Uuid::parse_str(&pattern_id_str).map_err(|_| {
+                    ActorError::InvalidActivation(format!(
+                        "unregister-pattern expected UUID string, got {}",
+                        pattern_id_str
+                    ))
+                })?;
+
+                self.activation.unregister_pattern(pattern_uuid);
+
+                if remove_property {
+                    if let Ok(binding) = self.role_binding_mut(role) {
+                        binding.properties.remove(&property_name);
+                    }
+                }
+
+                Ok(())
+            }
+            Action::DetachEntity { role } => {
+                let (_facet_value, entity_value, pattern_value) = {
+                    let binding = self.role_binding(role)?;
+                    let facet = binding.properties.get("facet").cloned();
+                    let entity = binding.properties.get("entity").cloned().ok_or_else(|| {
+                        ActorError::InvalidActivation(format!(
+                            "detach-entity for role '{role}' requires role property 'entity'"
+                        ))
+                    })?;
+                    let pattern = binding.properties.get("agent-request-pattern").cloned();
+                    (facet, entity, pattern)
+                };
+
+                let entity_uuid = Uuid::parse_str(&entity_value).map_err(|_| {
+                    ActorError::InvalidActivation(format!(
+                        "detach-entity role '{role}' property 'entity' must be a UUID, got {}",
+                        entity_value
+                    ))
+                })?;
+
+                if let Some(pattern_str) = pattern_value.as_ref() {
+                    if let Ok(pattern_uuid) = Uuid::parse_str(pattern_str) {
+                        self.activation.unregister_pattern(pattern_uuid);
+                    }
+                }
+
+                self.activation.detach_entity(entity_uuid);
+
+                if let Some(key) = self
+                    .assertions
+                    .keys()
+                    .find(|value| {
+                        if let Some(view) = record_with_label(value, ENTITY_RECORD_LABEL) {
+                            view.field_string(4)
+                                .map(|candidate| candidate == entity_value)
+                                .unwrap_or(false)
+                        } else {
+                            false
+                        }
+                    })
+                    .cloned()
+                {
+                    if let Some(handles) = self.assertions.get_mut(&key) {
+                        if let Some(handle) = handles.pop() {
+                            self.activation.retract(handle.clone());
+                        }
+                        if handles.is_empty() {
+                            self.assertions.remove(&key);
+                        }
+                    }
+                }
+
+                if let Ok(binding) = self.role_binding_mut(role) {
+                    binding.properties.remove("actor");
+                    binding.properties.remove("facet");
+                    binding.properties.remove("entity");
+                    binding.properties.remove("entity-type");
+                    binding.properties.remove("agent-kind");
+                    binding.properties.remove("agent-request-pattern");
+                }
+
                 Ok(())
             }
             Action::Send {

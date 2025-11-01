@@ -10,6 +10,8 @@
 pub mod ast;
 /// Builders that translate parsed programs into the IR.
 pub mod builder;
+/// Control-plane interpreter discovery helpers.
+pub mod control;
 /// Interpreter entity implementation.
 pub mod entity;
 /// Typed intermediate representation structures.
@@ -25,6 +27,10 @@ pub mod value;
 
 pub use ast::{Expr, Program};
 pub use builder::build_ir;
+pub use control::{
+    CONTROL_INTERPRETER_LABEL, ControlInterpreterHandle, discover as discover_control_interpreter,
+    ensure as ensure_control_interpreter,
+};
 pub use entity::InterpreterEntity;
 pub use ir::{
     Action, BranchArm, Condition, Instruction, ProgramIr, RoleBinding, State, WaitCondition,

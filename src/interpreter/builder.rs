@@ -8,7 +8,8 @@ use super::{
 };
 use crate::interpreter::ir::{
     Action, ActionTemplate, BranchArm, BranchArmTemplate, Condition, Function, Instruction,
-    InstructionTemplate, ProgramIr, RoleBinding, State, WaitCondition, WaitConditionTemplate,
+    InstructionTemplate, LetBindingTemplate, ProgramIr, RoleBinding, State, WaitCondition,
+    WaitConditionTemplate,
 };
 
 /// Build a typed IR from a parsed program.
@@ -17,6 +18,7 @@ pub fn build_ir(program: &Program) -> Result<ProgramIr> {
     let mut roles = Vec::new();
     let mut state_forms: Vec<Vec<Expr>> = Vec::new();
     let mut function_forms: Vec<Vec<Expr>> = Vec::new();
+    let mut implicit_body: Vec<Expr> = Vec::new();
     let mut top_level_heads: Vec<String> = Vec::new();
     let mut nested_state_parent: Option<String> = None;
 
@@ -60,6 +62,7 @@ pub fn build_ir(program: &Program) -> Result<ProgramIr> {
                         nested_state_parent = Some(parent);
                     }
                 }
+                implicit_body.push(form.clone());
             }
         }
     }
@@ -94,9 +97,17 @@ pub fn build_ir(program: &Program) -> Result<ProgramIr> {
         states.push(parse_state(&items, &prototypes)?);
     }
 
+    if states.is_empty() && !implicit_body.is_empty() {
+        states.push(build_state_from_forms(
+            "main".to_string(),
+            &implicit_body,
+            &prototypes,
+        )?);
+    }
+
     if states.is_empty() {
         let mut message = format!(
-            "program '{}' must declare at least one top-level (state ...) form.",
+            "program '{}' must declare at least one top-level (state ...) form or include inline workflow instructions.",
             program.name
         );
         if !top_level_heads.is_empty() {
@@ -105,7 +116,7 @@ pub fn build_ir(program: &Program) -> Result<ProgramIr> {
         }
         if let Some(parent) = nested_state_parent {
             message.push_str(&format!(
-                " Hint: found a (state ...) nested inside a ({}) form; move state declarations to the top level.",
+                " Hint: found a (state ...) nested inside a ({}) form; move state declarations to the top level or inline actions directly.",
                 parent
             ));
         }
@@ -145,16 +156,16 @@ fn parse_role(expr: &Expr) -> Result<RoleBinding> {
     })
 }
 
-fn parse_state(items: &[Expr], prototypes: &HashMap<String, FunctionPrototype>) -> Result<State> {
-    if items.len() < 2 {
-        return Err(validation("state requires a name"));
-    }
-    let name = expect_symbol(&items[1])?;
+fn build_state_from_forms(
+    name: String,
+    forms: &[Expr],
+    prototypes: &HashMap<String, FunctionPrototype>,
+) -> Result<State> {
     let mut entry = Vec::new();
     let mut body = Vec::new();
     let mut terminal = false;
 
-    for form in &items[2..] {
+    for form in forms {
         if let Expr::List(list) = form {
             if matches_symbol(list.first(), "enter") {
                 for action in &list[1..] {
@@ -176,6 +187,14 @@ fn parse_state(items: &[Expr], prototypes: &HashMap<String, FunctionPrototype>) 
         body,
         terminal,
     })
+}
+
+fn parse_state(items: &[Expr], prototypes: &HashMap<String, FunctionPrototype>) -> Result<State> {
+    if items.len() < 2 {
+        return Err(validation("state requires a name"));
+    }
+    let name = expect_symbol(&items[1])?;
+    build_state_from_forms(name, &items[2..], prototypes)
 }
 
 fn form_head(expr: &Expr) -> String {
@@ -417,6 +436,84 @@ fn parse_action_literal(expr: &Expr) -> Result<Action> {
             }
             Ok(Action::Retract(parse_value_literal(&list[1])?))
         }
+        "register-pattern" => {
+            let mut role = None;
+            let mut pattern = None;
+            let mut property = None;
+            let mut idx = 1;
+            while idx < list.len() {
+                let key = expect_keyword(&list[idx])?;
+                idx += 1;
+                match key.as_str() {
+                    "role" => {
+                        role = Some(expect_symbol(&list[idx])?);
+                        idx += 1;
+                    }
+                    "pattern" => {
+                        pattern = Some(parse_value_literal(&list[idx])?);
+                        idx += 1;
+                    }
+                    "property" => {
+                        property = Some(expect_string(&list[idx])?);
+                        idx += 1;
+                    }
+                    _ => return Err(validation("unknown register-pattern argument")),
+                }
+            }
+            Ok(Action::RegisterPattern {
+                role: role.ok_or_else(|| validation("register-pattern requires :role"))?,
+                pattern: pattern.ok_or_else(|| validation("register-pattern requires :pattern"))?,
+                property,
+            })
+        }
+        "unregister-pattern" => {
+            let mut role = None;
+            let mut pattern = None;
+            let mut property = None;
+            let mut idx = 1;
+            while idx < list.len() {
+                let key = expect_keyword(&list[idx])?;
+                idx += 1;
+                match key.as_str() {
+                    "role" => {
+                        role = Some(expect_symbol(&list[idx])?);
+                        idx += 1;
+                    }
+                    "pattern" => {
+                        pattern = Some(parse_value_literal(&list[idx])?);
+                        idx += 1;
+                    }
+                    "property" => {
+                        property = Some(expect_string(&list[idx])?);
+                        idx += 1;
+                    }
+                    _ => return Err(validation("unknown unregister-pattern argument")),
+                }
+            }
+            Ok(Action::UnregisterPattern {
+                role: role.ok_or_else(|| validation("unregister-pattern requires :role"))?,
+                pattern,
+                property,
+            })
+        }
+        "detach-entity" => {
+            let mut role = None;
+            let mut idx = 1;
+            while idx < list.len() {
+                let key = expect_keyword(&list[idx])?;
+                idx += 1;
+                match key.as_str() {
+                    "role" => {
+                        role = Some(expect_symbol(&list[idx])?);
+                        idx += 1;
+                    }
+                    _ => return Err(validation("unknown detach-entity argument")),
+                }
+            }
+            Ok(Action::DetachEntity {
+                role: role.ok_or_else(|| validation("detach-entity requires :role"))?,
+            })
+        }
         "log" => {
             if list.len() != 2 {
                 return Err(validation("log expects a string message"));
@@ -648,6 +745,24 @@ fn append_instruction_template(
             }
             return Ok(());
         }
+        if matches_symbol(list.first(), "let") || matches_symbol(list.first(), "let*") {
+            if list.len() < 3 {
+                return Err(validation("let requires bindings and body"));
+            }
+            let sequential = matches_symbol(list.first(), "let*");
+            let (bindings, extended_params) =
+                parse_let_bindings_template(&list[1], params, sequential)?;
+            let mut body = Vec::new();
+            for item in &list[2..] {
+                append_instruction_template(&mut body, item, prototypes, &extended_params)?;
+            }
+            target.push(InstructionTemplate::Let {
+                bindings,
+                sequential,
+                body,
+            });
+            return Ok(());
+        }
         if let Some(Expr::Symbol(name)) = list.first() {
             if prototypes.contains_key(name) {
                 target.push(parse_call_template(list, prototypes, params)?);
@@ -698,6 +813,41 @@ fn parse_instruction_template(
     Ok(InstructionTemplate::Action(parse_action_template(
         expr, params,
     )?))
+}
+
+fn parse_let_bindings_template(
+    bindings_expr: &Expr,
+    params: &HashSet<String>,
+    sequential: bool,
+) -> Result<(Vec<LetBindingTemplate>, HashSet<String>)> {
+    let bindings_list = expect_list(bindings_expr, "let bindings")?;
+    let mut templates = Vec::new();
+    let mut collected_names = Vec::new();
+    let mut scope = params.clone();
+
+    for binding in bindings_list {
+        let pair = expect_list(binding, "let binding")?;
+        if pair.len() != 2 {
+            return Err(validation("let binding must be (name expr)"));
+        }
+        let name = expect_symbol(&pair[0])?;
+        let value_expr = parse_value_expr(&pair[1], if sequential { &scope } else { params })?;
+        if sequential {
+            scope.insert(name.clone());
+        }
+        collected_names.push(name.clone());
+        templates.push(LetBindingTemplate {
+            name,
+            value: value_expr,
+        });
+    }
+
+    let mut extended_params = params.clone();
+    for name in collected_names {
+        extended_params.insert(name);
+    }
+
+    Ok((templates, extended_params))
 }
 
 fn parse_branch_template(
@@ -823,6 +973,84 @@ fn parse_action_template(expr: &Expr, params: &HashSet<String>) -> Result<Action
                 return Err(validation("retract expects a value"));
             }
             Ok(ActionTemplate::Retract(parse_value_expr(&list[1], params)?))
+        }
+        "register-pattern" => {
+            let mut role = None;
+            let mut pattern = None;
+            let mut property = None;
+            let mut idx = 1;
+            while idx < list.len() {
+                let key = expect_keyword(&list[idx])?;
+                idx += 1;
+                match key.as_str() {
+                    "role" => {
+                        role = Some(expect_symbol(&list[idx])?);
+                        idx += 1;
+                    }
+                    "pattern" => {
+                        pattern = Some(parse_value_expr(&list[idx], params)?);
+                        idx += 1;
+                    }
+                    "property" => {
+                        property = Some(expect_string(&list[idx])?);
+                        idx += 1;
+                    }
+                    _ => return Err(validation("unknown register-pattern argument")),
+                }
+            }
+            Ok(ActionTemplate::RegisterPattern {
+                role: role.ok_or_else(|| validation("register-pattern requires :role"))?,
+                pattern: pattern.ok_or_else(|| validation("register-pattern requires :pattern"))?,
+                property,
+            })
+        }
+        "unregister-pattern" => {
+            let mut role = None;
+            let mut pattern = None;
+            let mut property = None;
+            let mut idx = 1;
+            while idx < list.len() {
+                let key = expect_keyword(&list[idx])?;
+                idx += 1;
+                match key.as_str() {
+                    "role" => {
+                        role = Some(expect_symbol(&list[idx])?);
+                        idx += 1;
+                    }
+                    "pattern" => {
+                        pattern = Some(parse_value_expr(&list[idx], params)?);
+                        idx += 1;
+                    }
+                    "property" => {
+                        property = Some(expect_string(&list[idx])?);
+                        idx += 1;
+                    }
+                    _ => return Err(validation("unknown unregister-pattern argument")),
+                }
+            }
+            Ok(ActionTemplate::UnregisterPattern {
+                role: role.ok_or_else(|| validation("unregister-pattern requires :role"))?,
+                pattern,
+                property,
+            })
+        }
+        "detach-entity" => {
+            let mut role = None;
+            let mut idx = 1;
+            while idx < list.len() {
+                let key = expect_keyword(&list[idx])?;
+                idx += 1;
+                match key.as_str() {
+                    "role" => {
+                        role = Some(expect_symbol(&list[idx])?);
+                        idx += 1;
+                    }
+                    _ => return Err(validation("unknown detach-entity argument")),
+                }
+            }
+            Ok(ActionTemplate::DetachEntity {
+                role: role.ok_or_else(|| validation("detach-entity requires :role"))?,
+            })
         }
         "log" => {
             if list.len() != 2 {
@@ -1016,220 +1244,234 @@ fn parse_action_template(expr: &Expr, params: &HashSet<String>) -> Result<Action
 }
 
 fn parse_wait(expr: &Expr) -> Result<WaitCondition> {
-    let list = expect_list(expr, "wait")?;
-    if list.is_empty() {
-        return Err(validation("wait condition cannot be empty"));
-    }
-    let head = expect_symbol(&list[0])?;
-    match head.as_str() {
-        "record" => {
-            if list.len() < 2 {
-                return Err(validation("record wait requires label"));
-            }
-            let label = expect_symbol(&list[1])?;
-            let mut field = None;
-            let mut value = None;
-            let mut idx = 2;
-            while idx < list.len() {
-                let key = expect_keyword(&list[idx])?;
-                idx += 1;
-                match key.as_str() {
-                    "field" => {
-                        field = Some(expect_integer(&list[idx])?);
-                        idx += 1;
-                    }
-                    "equals" => {
-                        value = Some(parse_value_literal(&list[idx])?);
-                        idx += 1;
-                    }
-                    _ => return Err(validation("unknown record wait argument")),
-                }
-            }
-
-            let field = field.ok_or_else(|| validation("record wait requires :field"))?;
-            let value = value.ok_or_else(|| validation("record wait requires :equals"))?;
-            if field < 0 {
-                return Err(validation("record wait :field must be non-negative"));
-            }
-
-            Ok(WaitCondition::RecordFieldEq {
-                label,
-                field: field as usize,
-                value,
-            })
+    match expr {
+        Expr::Symbol(sym) => {
+            return Ok(WaitCondition::Signal { label: sym.clone() });
         }
-        "signal" => {
-            if list.len() < 2 {
-                return Err(validation("signal requires a label"));
+        Expr::List(list) => {
+            if list.is_empty() {
+                return Err(validation("wait condition cannot be empty"));
             }
-            Ok(WaitCondition::Signal {
-                label: expect_symbol(&list[1])?,
-            })
-        }
-        "tool-result" => {
-            if list.len() == 2 && !matches!(list[1], Expr::Keyword(_)) {
-                return Ok(WaitCondition::ToolResult {
-                    tag: expect_string(&list[1])?,
-                });
-            }
-
-            let mut tag = None;
-            let mut idx = 1;
-            while idx < list.len() {
-                let key = expect_keyword(&list[idx])?;
-                idx += 1;
-                match key.as_str() {
-                    "tag" => {
-                        tag = Some(expect_string(&list[idx])?);
-                        idx += 1;
+            let head = expect_symbol(&list[0])?;
+            match head.as_str() {
+                "record" => {
+                    if list.len() < 2 {
+                        return Err(validation("record wait requires label"));
                     }
-                    _ => return Err(validation("unknown tool-result wait argument")),
-                }
-            }
-
-            let tag = tag.ok_or_else(|| validation("tool-result wait requires :tag"))?;
-            Ok(WaitCondition::ToolResult { tag })
-        }
-        "user-input" => {
-            let mut prompt = None;
-            let mut tag = None;
-            if list.len() == 2 && !matches!(list[1], Expr::Keyword(_)) {
-                prompt = Some(parse_value_literal(&list[1])?);
-            } else {
-                let mut idx = 1;
-                while idx < list.len() {
-                    let key = expect_keyword(&list[idx])?;
-                    idx += 1;
-                    match key.as_str() {
-                        "prompt" => {
-                            prompt = Some(parse_value_literal(&list[idx])?);
-                            idx += 1;
+                    let label = expect_symbol(&list[1])?;
+                    let mut field = None;
+                    let mut value = None;
+                    let mut idx = 2;
+                    while idx < list.len() {
+                        let key = expect_keyword(&list[idx])?;
+                        idx += 1;
+                        match key.as_str() {
+                            "field" => {
+                                field = Some(expect_integer(&list[idx])?);
+                                idx += 1;
+                            }
+                            "equals" => {
+                                value = Some(parse_value_literal(&list[idx])?);
+                                idx += 1;
+                            }
+                            _ => return Err(validation("unknown record wait argument")),
                         }
-                        "tag" => {
-                            tag = Some(expect_string(&list[idx])?);
-                            idx += 1;
-                        }
-                        _ => return Err(validation("unknown user-input wait argument")),
                     }
-                }
-            }
 
-            let prompt =
-                prompt.ok_or_else(|| validation("user-input wait requires a :prompt value"))?;
-            Ok(WaitCondition::UserInput {
-                prompt,
-                tag,
-                request_id: None,
-            })
+                    let field = field.ok_or_else(|| validation("record wait requires :field"))?;
+                    let value = value.ok_or_else(|| validation("record wait requires :equals"))?;
+                    if field < 0 {
+                        return Err(validation("record wait :field must be non-negative"));
+                    }
+
+                    Ok(WaitCondition::RecordFieldEq {
+                        label,
+                        field: field as usize,
+                        value,
+                    })
+                }
+                "signal" => {
+                    if list.len() < 2 {
+                        return Err(validation("signal requires a label"));
+                    }
+                    Ok(WaitCondition::Signal {
+                        label: expect_symbol(&list[1])?,
+                    })
+                }
+                "tool-result" => {
+                    if list.len() == 2 && !matches!(list[1], Expr::Keyword(_)) {
+                        return Ok(WaitCondition::ToolResult {
+                            tag: expect_string(&list[1])?,
+                        });
+                    }
+
+                    let mut tag = None;
+                    let mut idx = 1;
+                    while idx < list.len() {
+                        let key = expect_keyword(&list[idx])?;
+                        idx += 1;
+                        match key.as_str() {
+                            "tag" => {
+                                tag = Some(expect_string(&list[idx])?);
+                                idx += 1;
+                            }
+                            _ => return Err(validation("unknown tool-result wait argument")),
+                        }
+                    }
+
+                    let tag = tag.ok_or_else(|| validation("tool-result wait requires :tag"))?;
+                    Ok(WaitCondition::ToolResult { tag })
+                }
+                "user-input" => {
+                    let mut prompt = None;
+                    let mut tag = None;
+                    if list.len() == 2 && !matches!(list[1], Expr::Keyword(_)) {
+                        prompt = Some(parse_value_literal(&list[1])?);
+                    } else {
+                        let mut idx = 1;
+                        while idx < list.len() {
+                            let key = expect_keyword(&list[idx])?;
+                            idx += 1;
+                            match key.as_str() {
+                                "prompt" => {
+                                    prompt = Some(parse_value_literal(&list[idx])?);
+                                    idx += 1;
+                                }
+                                "tag" => {
+                                    tag = Some(expect_string(&list[idx])?);
+                                    idx += 1;
+                                }
+                                _ => return Err(validation("unknown user-input wait argument")),
+                            }
+                        }
+                    }
+
+                    let prompt = prompt
+                        .ok_or_else(|| validation("user-input wait requires a :prompt value"))?;
+                    Ok(WaitCondition::UserInput {
+                        prompt,
+                        tag,
+                        request_id: None,
+                    })
+                }
+                _ => Err(validation("unknown wait condition")),
+            }
         }
-        _ => Err(validation("unknown wait condition")),
+        _ => Err(validation("wait condition must be a symbol or list")),
     }
 }
 
 fn parse_wait_template(expr: &Expr, params: &HashSet<String>) -> Result<WaitConditionTemplate> {
-    let list = expect_list(expr, "wait")?;
-    if list.is_empty() {
-        return Err(validation("wait condition cannot be empty"));
-    }
-    let head = expect_symbol(&list[0])?;
-    match head.as_str() {
-        "record" => {
-            if list.len() < 2 {
-                return Err(validation("record wait requires label"));
-            }
-            let label = expect_symbol(&list[1])?;
-            let mut field = None;
-            let mut value = None;
-            let mut idx = 2;
-            while idx < list.len() {
-                let key = expect_keyword(&list[idx])?;
-                idx += 1;
-                match key.as_str() {
-                    "field" => {
-                        field = Some(expect_integer(&list[idx])?);
-                        idx += 1;
-                    }
-                    "equals" => {
-                        value = Some(parse_value_expr(&list[idx], params)?);
-                        idx += 1;
-                    }
-                    _ => return Err(validation("unknown record wait argument")),
-                }
-            }
-
-            let field = field.ok_or_else(|| validation("record wait requires :field"))?;
-            let value = value.ok_or_else(|| validation("record wait requires :equals"))?;
-            if field < 0 {
-                return Err(validation("record wait :field must be non-negative"));
-            }
-
-            Ok(WaitConditionTemplate::RecordFieldEq {
-                label,
-                field: field as usize,
-                value,
-            })
+    match expr {
+        Expr::Symbol(sym) => {
+            return Ok(WaitConditionTemplate::Signal { label: sym.clone() });
         }
-        "signal" => {
-            if list.len() < 2 {
-                return Err(validation("signal requires a label"));
+        Expr::List(list) => {
+            if list.is_empty() {
+                return Err(validation("wait condition cannot be empty"));
             }
-            Ok(WaitConditionTemplate::Signal {
-                label: expect_symbol(&list[1])?,
-            })
-        }
-        "tool-result" => {
-            if list.len() == 2 && !matches!(list[1], Expr::Keyword(_)) {
-                return Ok(WaitConditionTemplate::ToolResult {
-                    tag: parse_value_expr(&list[1], params)?,
-                });
-            }
-
-            let mut tag = None;
-            let mut idx = 1;
-            while idx < list.len() {
-                let key = expect_keyword(&list[idx])?;
-                idx += 1;
-                match key.as_str() {
-                    "tag" => {
-                        tag = Some(parse_value_expr(&list[idx], params)?);
-                        idx += 1;
+            let head = expect_symbol(&list[0])?;
+            match head.as_str() {
+                "record" => {
+                    if list.len() < 2 {
+                        return Err(validation("record wait requires label"));
                     }
-                    _ => return Err(validation("unknown tool-result wait argument")),
-                }
-            }
-
-            let tag = tag.ok_or_else(|| validation("tool-result wait requires :tag"))?;
-            Ok(WaitConditionTemplate::ToolResult { tag })
-        }
-        "user-input" => {
-            let mut prompt = None;
-            let mut tag = None;
-            if list.len() == 2 && !matches!(list[1], Expr::Keyword(_)) {
-                prompt = Some(parse_value_expr(&list[1], params)?);
-            } else {
-                let mut idx = 1;
-                while idx < list.len() {
-                    let key = expect_keyword(&list[idx])?;
-                    idx += 1;
-                    match key.as_str() {
-                        "prompt" => {
-                            prompt = Some(parse_value_expr(&list[idx], params)?);
-                            idx += 1;
+                    let label = expect_symbol(&list[1])?;
+                    let mut field = None;
+                    let mut value = None;
+                    let mut idx = 2;
+                    while idx < list.len() {
+                        let key = expect_keyword(&list[idx])?;
+                        idx += 1;
+                        match key.as_str() {
+                            "field" => {
+                                field = Some(expect_integer(&list[idx])?);
+                                idx += 1;
+                            }
+                            "equals" => {
+                                value = Some(parse_value_expr(&list[idx], params)?);
+                                idx += 1;
+                            }
+                            _ => return Err(validation("unknown record wait argument")),
                         }
-                        "tag" => {
-                            tag = Some(parse_value_expr(&list[idx], params)?);
-                            idx += 1;
-                        }
-                        _ => return Err(validation("unknown user-input wait argument")),
                     }
-                }
-            }
 
-            let prompt =
-                prompt.ok_or_else(|| validation("user-input wait requires a :prompt value"))?;
-            Ok(WaitConditionTemplate::UserInput { prompt, tag })
+                    let field = field.ok_or_else(|| validation("record wait requires :field"))?;
+                    let value = value.ok_or_else(|| validation("record wait requires :equals"))?;
+                    if field < 0 {
+                        return Err(validation("record wait :field must be non-negative"));
+                    }
+
+                    Ok(WaitConditionTemplate::RecordFieldEq {
+                        label,
+                        field: field as usize,
+                        value,
+                    })
+                }
+                "signal" => {
+                    if list.len() < 2 {
+                        return Err(validation("signal requires a label"));
+                    }
+                    Ok(WaitConditionTemplate::Signal {
+                        label: expect_symbol(&list[1])?,
+                    })
+                }
+                "tool-result" => {
+                    if list.len() == 2 && !matches!(list[1], Expr::Keyword(_)) {
+                        return Ok(WaitConditionTemplate::ToolResult {
+                            tag: parse_value_expr(&list[1], params)?,
+                        });
+                    }
+
+                    let mut tag = None;
+                    let mut idx = 1;
+                    while idx < list.len() {
+                        let key = expect_keyword(&list[idx])?;
+                        idx += 1;
+                        match key.as_str() {
+                            "tag" => {
+                                tag = Some(parse_value_expr(&list[idx], params)?);
+                                idx += 1;
+                            }
+                            _ => return Err(validation("unknown tool-result wait argument")),
+                        }
+                    }
+
+                    let tag = tag.ok_or_else(|| validation("tool-result wait requires :tag"))?;
+                    Ok(WaitConditionTemplate::ToolResult { tag })
+                }
+                "user-input" => {
+                    let mut prompt = None;
+                    let mut tag = None;
+                    if list.len() == 2 && !matches!(list[1], Expr::Keyword(_)) {
+                        prompt = Some(parse_value_expr(&list[1], params)?);
+                    } else {
+                        let mut idx = 1;
+                        while idx < list.len() {
+                            let key = expect_keyword(&list[idx])?;
+                            idx += 1;
+                            match key.as_str() {
+                                "prompt" => {
+                                    prompt = Some(parse_value_expr(&list[idx], params)?);
+                                    idx += 1;
+                                }
+                                "tag" => {
+                                    tag = Some(parse_value_expr(&list[idx], params)?);
+                                    idx += 1;
+                                }
+                                _ => return Err(validation("unknown user-input wait argument")),
+                            }
+                        }
+                    }
+
+                    let prompt = prompt
+                        .ok_or_else(|| validation("user-input wait requires a :prompt value"))?;
+                    Ok(WaitConditionTemplate::UserInput { prompt, tag })
+                }
+                _ => Err(validation("unknown wait condition")),
+            }
         }
-        _ => Err(validation("unknown wait condition")),
+        _ => Err(validation("wait condition must be a symbol or list")),
     }
 }
 

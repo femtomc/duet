@@ -1,7 +1,12 @@
 use std::sync::Once;
 
-use duet::interpreter::protocol::{TOOL_RESULT_RECORD_LABEL, wait_record_from_value};
-use duet::interpreter::{InstanceRecord, InstanceStatus, InterpreterEntity, RUN_MESSAGE_LABEL};
+use duet::interpreter::protocol::{
+    InputResponseRecord, TOOL_RESULT_RECORD_LABEL, input_request_from_value,
+    input_response_to_value, wait_record_from_value,
+};
+use duet::interpreter::{
+    InstanceRecord, InstanceStatus, InterpreterEntity, RUN_MESSAGE_LABEL, Value as InterpreterValue,
+};
 use duet::runtime::RuntimeConfig;
 use duet::runtime::actor::{Activation, CapabilitySpec, Entity};
 use duet::runtime::control::Control;
@@ -267,6 +272,150 @@ fn interpreter_resumes_when_signal_asserted() {
 }
 
 #[test]
+fn interpreter_accepts_bare_signal_wait() {
+    ensure_entities_registered();
+
+    let temp_dir = TempDir::new().unwrap();
+    let config = RuntimeConfig {
+        root: temp_dir.path().to_path_buf(),
+        snapshot_interval: 5,
+        flow_control_limit: 100,
+        debug: false,
+    };
+
+    let mut control = Control::init(config).unwrap();
+
+    let interpreter_actor = ActorId::new();
+    let interpreter_facet = FacetId::new();
+
+    control
+        .register_entity(
+            interpreter_actor.clone(),
+            interpreter_facet.clone(),
+            "interpreter".to_string(),
+            IOValue::symbol("unused"),
+        )
+        .unwrap();
+
+    let program = r#"(workflow wait-symbol)
+(state start
+  (await ready)
+  (goto done))
+(state done (terminal))"#;
+
+    let run_payload = IOValue::record(
+        IOValue::symbol(RUN_MESSAGE_LABEL),
+        vec![IOValue::new(program.to_string())],
+    );
+
+    {
+        let runtime = control.runtime_mut();
+        runtime.send_message(
+            interpreter_actor.clone(),
+            interpreter_facet.clone(),
+            run_payload,
+        );
+        runtime
+            .step()
+            .unwrap()
+            .expect("turn should execute for interpreter run");
+    }
+
+    let signal_actor = ActorId::new();
+    let signal_facet = FacetId::new();
+
+    control
+        .register_entity(
+            signal_actor.clone(),
+            signal_facet.clone(),
+            "test-signal".to_string(),
+            IOValue::symbol("unused"),
+        )
+        .unwrap();
+
+    {
+        let runtime = control.runtime_mut();
+        runtime.send_message(
+            signal_actor.clone(),
+            signal_facet.clone(),
+            IOValue::symbol("trigger"),
+        );
+        runtime
+            .step()
+            .unwrap()
+            .expect("turn should execute for signal");
+    }
+
+    control.step(10).unwrap();
+
+    let assertions = control
+        .runtime()
+        .assertions_for_actor(&interpreter_actor)
+        .expect("interpreter assertions after resume");
+
+    let completed = assertions
+        .iter()
+        .filter_map(|(_, value)| InstanceRecord::parse(value))
+        .find(|record| matches!(record.status, InstanceStatus::Completed));
+
+    assert!(completed.is_some(), "workflow should complete after signal");
+}
+
+#[test]
+fn loop_exceeds_iteration_limit() {
+    ensure_entities_registered();
+
+    let temp_dir = TempDir::new().unwrap();
+    let config = RuntimeConfig {
+        root: temp_dir.path().to_path_buf(),
+        snapshot_interval: 5,
+        flow_control_limit: 100,
+        debug: false,
+    };
+
+    let mut control = Control::init(config).unwrap();
+
+    let interpreter_actor = ActorId::new();
+    let interpreter_facet = FacetId::new();
+
+    control
+        .register_entity(
+            interpreter_actor.clone(),
+            interpreter_facet.clone(),
+            "interpreter".to_string(),
+            IOValue::symbol("unused"),
+        )
+        .unwrap();
+
+    let program = r#"(workflow loop-limit)
+(state start
+  (loop (action (log "spin"))))"#;
+
+    let run_payload = IOValue::record(
+        IOValue::symbol(RUN_MESSAGE_LABEL),
+        vec![IOValue::new(program.to_string())],
+    );
+
+    {
+        let runtime = control.runtime_mut();
+        runtime.send_message(
+            interpreter_actor.clone(),
+            interpreter_facet.clone(),
+            run_payload,
+        );
+    }
+
+    let err = control
+        .step(1)
+        .expect_err("loop execution should surface iteration limit error");
+    let message = format!("{err:?}");
+    assert!(
+        message.contains("iteration limit"),
+        "error should mention iteration limit"
+    );
+}
+
+#[test]
 fn interpreter_tool_invocation_roundtrip() {
     ensure_entities_registered();
 
@@ -524,4 +673,576 @@ fn assert_record_resolves_role_property() {
         "entity id should be a UUID, got {}",
         entity_id
     );
+}
+
+#[test]
+fn function_call_resolves_role_property() {
+    ensure_entities_registered();
+
+    let temp_dir = TempDir::new().unwrap();
+    let config = RuntimeConfig {
+        root: temp_dir.path().to_path_buf(),
+        snapshot_interval: 5,
+        flow_control_limit: 100,
+        debug: false,
+    };
+
+    let mut control = Control::init(config).unwrap();
+
+    let interpreter_actor = ActorId::new();
+    let interpreter_facet = FacetId::new();
+
+    control
+        .register_entity(
+            interpreter_actor.clone(),
+            interpreter_facet.clone(),
+            "interpreter".to_string(),
+            IOValue::symbol("unused"),
+        )
+        .unwrap();
+
+    let program = r#"(workflow role-prop-function)
+(roles
+  (tabs :agent-kind "claude-code")
+  (spaces :agent-kind "claude-code"))
+(defn send-request (role request-id prompt)
+  (action
+    (assert (record mock-request
+                    (role-property role "entity")
+                    request-id
+                    prompt))))
+(state boot
+  (attach-entity :role tabs :agent-kind "claude-code")
+  (attach-entity :role spaces :agent-kind "claude-code")
+  (goto opening))
+(state opening
+  (send-request tabs "opening-1" "Hello from tabs")
+  (await (record mock-response :field 1 :equals "opening-1"))
+  (terminal))"#;
+
+    let run_payload = IOValue::record(
+        IOValue::symbol(RUN_MESSAGE_LABEL),
+        vec![IOValue::new(program.to_string())],
+    );
+
+    {
+        let runtime = control.runtime_mut();
+        runtime.send_message(
+            interpreter_actor.clone(),
+            interpreter_facet.clone(),
+            run_payload,
+        );
+        runtime
+            .step()
+            .unwrap_or_else(|err| panic!("initial interpreter turn failed: {err:?}"));
+    }
+
+    control
+        .drain_pending()
+        .unwrap_or_else(|err| panic!("workflow execution failed: {err:?}"));
+
+    let assertions = control
+        .runtime()
+        .assertions_for_actor(&interpreter_actor)
+        .expect("interpreter assertions available");
+
+    let request = assertions
+        .iter()
+        .find_map(|(_, value)| record_with_label(value, "mock-request"))
+        .expect("mock-request asserted");
+
+    let entity_id = request
+        .field_string(0)
+        .expect("first field should be resolved entity id");
+    assert!(
+        Uuid::parse_str(&entity_id).is_ok(),
+        "entity id should be a UUID, got {}",
+        entity_id
+    );
+    let req_id = request
+        .field_string(1)
+        .expect("second field should be request id");
+    assert_eq!(req_id, "opening-1");
+}
+
+#[test]
+fn register_pattern_records_property() {
+    ensure_entities_registered();
+
+    let temp_dir = TempDir::new().unwrap();
+    let config = RuntimeConfig {
+        root: temp_dir.path().to_path_buf(),
+        snapshot_interval: 5,
+        flow_control_limit: 100,
+        debug: false,
+    };
+
+    let mut control = Control::init(config).unwrap();
+
+    let interpreter_actor = ActorId::new();
+    let interpreter_facet = FacetId::new();
+
+    control
+        .register_entity(
+            interpreter_actor.clone(),
+            interpreter_facet.clone(),
+            "interpreter".to_string(),
+            IOValue::symbol("unused"),
+        )
+        .unwrap();
+
+    let program = r#"(workflow register-pattern-demo)
+(roles (helper :entity-type "test-local"))
+(state start
+  (attach-entity :role helper :entity-type "test-local")
+  (action (register-pattern :role helper
+                             :pattern (record ping "<_>")
+                             :property "ping-pattern"))
+  (action (assert (record pattern-registered
+                          (role-property helper "ping-pattern"))))
+  (terminal))"#;
+
+    let run_payload = IOValue::record(
+        IOValue::symbol(RUN_MESSAGE_LABEL),
+        vec![IOValue::new(program.to_string())],
+    );
+
+    {
+        let runtime = control.runtime_mut();
+        runtime.send_message(
+            interpreter_actor.clone(),
+            interpreter_facet.clone(),
+            run_payload,
+        );
+        runtime
+            .step()
+            .unwrap_or_else(|err| panic!("initial interpreter turn failed: {err:?}"));
+    }
+
+    control
+        .drain_pending()
+        .unwrap_or_else(|err| panic!("workflow execution failed: {err:?}"));
+
+    let assertions = control
+        .runtime()
+        .assertions_for_actor(&interpreter_actor)
+        .expect("interpreter assertions available");
+
+    let pattern = assertions
+        .iter()
+        .find_map(|(_, value)| record_with_label(value, "pattern-registered"))
+        .expect("pattern-registered assertion present");
+
+    let pattern_id = pattern
+        .field_string(0)
+        .expect("pattern-registered should include pattern id");
+
+    assert!(
+        Uuid::parse_str(&pattern_id).is_ok(),
+        "pattern id should be a UUID, got {pattern_id}"
+    );
+}
+
+#[test]
+fn prompt_resume_retracts_request() {
+    ensure_entities_registered();
+
+    let temp_dir = TempDir::new().unwrap();
+    let config = RuntimeConfig {
+        root: temp_dir.path().to_path_buf(),
+        snapshot_interval: 5,
+        flow_control_limit: 100,
+        debug: false,
+    };
+
+    let mut control = Control::init(config).unwrap();
+
+    let interpreter_actor = ActorId::new();
+    let interpreter_facet = FacetId::new();
+
+    control
+        .register_entity(
+            interpreter_actor.clone(),
+            interpreter_facet.clone(),
+            "interpreter".to_string(),
+            IOValue::symbol("unused"),
+        )
+        .unwrap();
+
+    let program = r#"(workflow prompt-lifecycle)
+(state start
+  (await (user-input :prompt (record prompt "first")))
+  (await (user-input :prompt (record prompt "second")))
+  (terminal))"#;
+
+    let run_payload = IOValue::record(
+        IOValue::symbol(RUN_MESSAGE_LABEL),
+        vec![IOValue::new(program.to_string())],
+    );
+
+    {
+        let runtime = control.runtime_mut();
+        runtime.send_message(
+            interpreter_actor.clone(),
+            interpreter_facet.clone(),
+            run_payload,
+        );
+        runtime
+            .step()
+            .unwrap_or_else(|err| panic!("initial interpreter turn failed: {err:?}"));
+    }
+
+    control
+        .drain_pending()
+        .unwrap_or_else(|err| panic!("workflow execution failed: {err:?}"));
+
+    // Collect the initial prompt request.
+    let assertions = control
+        .runtime()
+        .assertions_for_actor(&interpreter_actor)
+        .expect("interpreter assertions available");
+
+    let mut prompt_requests: Vec<_> = assertions
+        .iter()
+        .filter_map(|(_, value)| input_request_from_value(value))
+        .collect();
+
+    assert_eq!(
+        prompt_requests.len(),
+        1,
+        "expected a single prompt request after initial wait"
+    );
+
+    let first_prompt = prompt_requests.remove(0);
+    let instance_id = first_prompt.instance_id.clone();
+
+    let first_response = InputResponseRecord {
+        instance_id: instance_id.clone(),
+        request_id: first_prompt.request_id.clone(),
+        tag: first_prompt.tag.clone(),
+        response: InterpreterValue::String("first".to_string()),
+    };
+
+    control
+        .assert_value(
+            interpreter_actor.clone(),
+            input_response_to_value(&first_response),
+        )
+        .unwrap_or_else(|err| panic!("failed to assert first response: {err:?}"));
+
+    control
+        .drain_pending()
+        .unwrap_or_else(|err| panic!("workflow execution failed after first response: {err:?}"));
+
+    let assertions = control
+        .runtime()
+        .assertions_for_actor(&interpreter_actor)
+        .expect("interpreter assertions available after first response");
+
+    let mut prompt_requests: Vec<_> = assertions
+        .iter()
+        .filter_map(|(_, value)| input_request_from_value(value))
+        .collect();
+
+    assert_eq!(
+        prompt_requests.len(),
+        1,
+        "second prompt should replace the first request"
+    );
+
+    let second_prompt = prompt_requests.remove(0);
+    assert_ne!(
+        second_prompt.request_id, first_prompt.request_id,
+        "second prompt should use a new request id"
+    );
+
+    let second_response = InputResponseRecord {
+        instance_id,
+        request_id: second_prompt.request_id.clone(),
+        tag: second_prompt.tag.clone(),
+        response: InterpreterValue::String("second".to_string()),
+    };
+
+    control
+        .assert_value(
+            interpreter_actor.clone(),
+            input_response_to_value(&second_response),
+        )
+        .unwrap_or_else(|err| panic!("failed to assert second response: {err:?}"));
+
+    control
+        .drain_pending()
+        .unwrap_or_else(|err| panic!("workflow execution failed after second response: {err:?}"));
+
+    let assertions = control
+        .runtime()
+        .assertions_for_actor(&interpreter_actor)
+        .expect("interpreter assertions available after second response");
+
+    let remaining_prompts: Vec<_> = assertions
+        .iter()
+        .filter_map(|(_, value)| input_request_from_value(value))
+        .collect();
+
+    assert!(
+        remaining_prompts.is_empty(),
+        "all prompt requests should be cleared after final input"
+    );
+}
+
+#[test]
+fn implicit_state_runs_to_completion() {
+    ensure_entities_registered();
+
+    let temp_dir = TempDir::new().unwrap();
+    let config = RuntimeConfig {
+        root: temp_dir.path().to_path_buf(),
+        snapshot_interval: 5,
+        flow_control_limit: 100,
+        debug: false,
+    };
+
+    let mut control = Control::init(config).unwrap();
+
+    let interpreter_actor = ActorId::new();
+    let interpreter_facet = FacetId::new();
+
+    control
+        .register_entity(
+            interpreter_actor.clone(),
+            interpreter_facet.clone(),
+            "interpreter".to_string(),
+            IOValue::symbol("unused"),
+        )
+        .unwrap();
+
+    let program = r#"(workflow implicit-demo)
+(action (log "hello-from-implicit"))
+(terminal)"#;
+
+    let run_payload = IOValue::record(
+        IOValue::symbol(RUN_MESSAGE_LABEL),
+        vec![IOValue::new(program.to_string())],
+    );
+
+    {
+        let runtime = control.runtime_mut();
+        runtime.send_message(
+            interpreter_actor.clone(),
+            interpreter_facet.clone(),
+            run_payload,
+        );
+        runtime
+            .step()
+            .unwrap_or_else(|err| panic!("initial interpreter turn failed: {err:?}"));
+    }
+
+    control
+        .drain_pending()
+        .unwrap_or_else(|err| panic!("workflow execution failed: {err:?}"));
+
+    let assertions = control
+        .runtime()
+        .assertions_for_actor(&interpreter_actor)
+        .expect("interpreter assertions available");
+
+    let instance = assertions
+        .iter()
+        .find_map(|(_, value)| InstanceRecord::parse(value))
+        .expect("instance record present");
+
+    assert!(
+        matches!(instance.status, InstanceStatus::Completed),
+        "implicit state program should complete"
+    );
+}
+
+#[test]
+fn detach_entity_cleans_role_and_metadata() {
+    ensure_entities_registered();
+
+    let temp_dir = TempDir::new().unwrap();
+    let config = RuntimeConfig {
+        root: temp_dir.path().to_path_buf(),
+        snapshot_interval: 5,
+        flow_control_limit: 100,
+        debug: false,
+    };
+
+    let mut control = Control::init(config).unwrap();
+
+    let interpreter_actor = ActorId::new();
+    let interpreter_facet = FacetId::new();
+
+    control
+        .register_entity(
+            interpreter_actor.clone(),
+            interpreter_facet.clone(),
+            "interpreter".to_string(),
+            IOValue::symbol("unused"),
+        )
+        .unwrap();
+
+    let initial_entities = control.list_entities_for_actor(&interpreter_actor);
+    let initial_count = initial_entities.len();
+
+    let program = r#"(workflow detach-demo)
+(roles (helper :entity-type "test-local"))
+(state start
+  (attach-entity :role helper :entity-type "test-local")
+  (action (register-pattern :role helper
+                             :pattern (record ping "<_>")
+                             :property "ping-pattern"))
+  (action (unregister-pattern :role helper :property "ping-pattern"))
+  (action (detach-entity :role helper))
+  (terminal))"#;
+
+    let run_payload = IOValue::record(
+        IOValue::symbol(RUN_MESSAGE_LABEL),
+        vec![IOValue::new(program.to_string())],
+    );
+
+    {
+        let runtime = control.runtime_mut();
+        runtime.send_message(
+            interpreter_actor.clone(),
+            interpreter_facet.clone(),
+            run_payload,
+        );
+        runtime
+            .step()
+            .unwrap_or_else(|err| panic!("initial interpreter turn failed: {err:?}"));
+    }
+
+    control
+        .drain_pending()
+        .unwrap_or_else(|err| panic!("workflow execution failed: {err:?}"));
+
+    let final_entities = control.list_entities_for_actor(&interpreter_actor);
+    assert_eq!(
+        final_entities.len(),
+        initial_count,
+        "detached entity metadata should be removed"
+    );
+    assert!(
+        final_entities.iter().all(|info| info.pattern_count == 0),
+        "no residual pattern subscriptions should remain after detach"
+    );
+
+    let assertions = control
+        .runtime()
+        .assertions_for_actor(&interpreter_actor)
+        .expect("interpreter assertions available");
+
+    let instance = assertions
+        .iter()
+        .find_map(|(_, value)| InstanceRecord::parse(value))
+        .expect("instance record present");
+
+    let helper = instance
+        .roles
+        .iter()
+        .find(|binding| binding.name == "helper")
+        .expect("helper role present");
+
+    for key in &[
+        "actor",
+        "facet",
+        "entity",
+        "entity-type",
+        "agent-kind",
+        "agent-request-pattern",
+        "ping-pattern",
+    ] {
+        assert!(
+            !helper.properties.contains_key(*key),
+            "role property '{key}' should be cleared after detach"
+        );
+    }
+}
+
+#[test]
+fn function_let_binds_values() {
+    ensure_entities_registered();
+
+    let temp_dir = TempDir::new().unwrap();
+    let config = RuntimeConfig {
+        root: temp_dir.path().to_path_buf(),
+        snapshot_interval: 5,
+        flow_control_limit: 100,
+        debug: false,
+    };
+
+    let mut control = Control::init(config).unwrap();
+
+    let interpreter_actor = ActorId::new();
+    let interpreter_facet = FacetId::new();
+
+    control
+        .register_entity(
+            interpreter_actor.clone(),
+            interpreter_facet.clone(),
+            "interpreter".to_string(),
+            IOValue::symbol("unused"),
+        )
+        .unwrap();
+
+    let program = r#"(workflow let-demo)
+(roles (helper :entity-type "test-local"))
+(defn make-request (role)
+  (let ((request (record mock-request (role-property role "entity")))
+        (entity-id (role-property role "entity")))
+    (action (assert request))
+    (action (assert (record log-entry entity-id)))))
+(state start
+  (attach-entity :role helper :entity-type "test-local")
+  (make-request helper)
+  (terminal))"#;
+
+    let run_payload = IOValue::record(
+        IOValue::symbol(RUN_MESSAGE_LABEL),
+        vec![IOValue::new(program.to_string())],
+    );
+
+    {
+        let runtime = control.runtime_mut();
+        runtime.send_message(
+            interpreter_actor.clone(),
+            interpreter_facet.clone(),
+            run_payload,
+        );
+        runtime
+            .step()
+            .unwrap_or_else(|err| panic!("initial interpreter turn failed: {err:?}"));
+    }
+
+    control
+        .drain_pending()
+        .unwrap_or_else(|err| panic!("workflow execution failed: {err:?}"));
+
+    let assertions = control
+        .runtime()
+        .assertions_for_actor(&interpreter_actor)
+        .expect("interpreter assertions available");
+
+    let request = assertions
+        .iter()
+        .find_map(|(_, value)| record_with_label(value, "mock-request"))
+        .expect("mock-request asserted");
+
+    let entity_id = request
+        .field_string(0)
+        .expect("request should contain entity id");
+    assert!(
+        Uuid::parse_str(&entity_id).is_ok(),
+        "entity id should be a UUID"
+    );
+
+    let has_log = assertions.iter().any(|(_, value)| {
+        record_with_label(value, "log-entry")
+            .and_then(|view| view.field_string(0))
+            .map(|message| message == entity_id)
+            .unwrap_or(false)
+    });
+    assert!(has_log, "log entry should reuse bound entity id");
 }

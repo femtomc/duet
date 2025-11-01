@@ -1,6 +1,7 @@
 //! `codebased` – Codebase daemon built on the Duet runtime.
 
 use duet::codebase;
+use duet::interpreter::ensure_control_interpreter;
 use duet::runtime::service::Service;
 use duet::runtime::{Control, RuntimeConfig};
 use std::env;
@@ -94,6 +95,10 @@ fn main() -> io::Result<()> {
 
     if let Err(err) = codebase::ensure_harness_agent(&mut control) {
         eprintln!("Failed to ensure harness agent: {err}");
+    }
+
+    if let Err(err) = ensure_control_interpreter(&mut control) {
+        eprintln!("Failed to ensure control interpreter: {err}");
     }
 
     if let Some(addr) = listen_addr {

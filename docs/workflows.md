@@ -26,6 +26,21 @@ and waits until the declared conditions occur in the dataspace.
 Persistence, time-travel, and branching remain automatic; workflow execution is
 just another stream of turns.
 
+### Local bindings
+
+Within function bodies you can introduce scoped bindings to keep expressions
+readable:
+
+- `(let ((name expr) …) body …)` evaluates each `expr` once and makes the
+  results available to the subsequent forms. Bindings are visible for the rest
+  of the enclosing body (including nested `let`s).
+- `(let* ((name expr) …) body …)` is the sequential variant: each binding may
+  reference the ones that precede it.
+
+State bodies currently require explicit helper functions if you need the same
+effect; we expect to generalise `let` across the whole language as the DSL
+evolves.
+
 ## Representation
 
 We adopt a Lisp-style S-expression syntax because:
@@ -95,6 +110,7 @@ Example (pseudocode; concrete grammar below):
 * `signal` expressions refer to dataspace assertions; the interpreter waits for them.
 * `send-prompt` emits a `send_message` command; templates interpolate runtime values.
 * `await (record agent-response :field 1 :equals ...)` watches for `agent-response` assertions tagged with the supplied identifier.
+* `await ready` is shorthand for `(await (signal ready))`, i.e. wait for a dataspace assertion labelled `ready`.
 
 ## Interpreter Expectations
 
@@ -123,6 +139,14 @@ Example (pseudocode; concrete grammar below):
 | `(branch (when <cond> <body>) (otherwise <body>))` | Conditional branching. |
 | `(loop …)` | Repeats nested actions/awaits until a branch exits. |
 | `(terminal)` | Marks workflow completion. |
+
+If you omit explicit `(state …)` forms, the interpreter wraps the top-level
+action/await forms in an implicit `(state main …)` block. This keeps quick
+scripts concise while preserving the state-machine semantics under the hood.
+
+Loops automatically carry a safety cap (currently 1,000 iterations per turn) to
+prevent runaway control programs. If a loop exceeds that bound the interpreter
+fails fast with a descriptive error so the broker cannot wedge the runtime.
 
 Conditions (non-exhaustive):
 
@@ -160,6 +184,21 @@ Actions (non-exhaustive):
 * `(log <text>)`
 * `(assert <value>)`
 * `(retract <value>)`
+* `(register-pattern :role <role> :pattern <value> [:property <name>])` – register a
+  dataspace pattern on behalf of the entity bound to `<role>`. The interpreter
+  infers the facet/entity ids from the role binding and calls
+  `register_pattern_for_entity`, so the entity receives assertions matching the
+  supplied preserves pattern. When `:property` is provided the generated pattern
+  UUID is written back into the role’s properties, making it accessible through
+  `(role-property …)` for later retraction or logging.
+* `(unregister-pattern :role <role> [:pattern <expr>] [:property <name>])` – remove a
+  previously registered pattern. When `:pattern` is omitted the interpreter looks up
+  the identifier from the supplied (or default `agent-request-pattern`) property, clears
+  that property, and unregisters the subscription at the runtime level.
+* `(detach-entity :role <role>)` – detach the entity bound to `<role>`, remove any
+  interpreter metadata for it, and clear the standard role properties (`actor`,
+  `facet`, `entity`, `entity-type`, `agent-kind`, `agent-request-pattern`). Combine with
+  `unregister-pattern` when custom subscriptions were added.
 
 `(invoke-tool …)` emits an `interpreter-tool-request` record containing the workflow
 instance id, correlation tag, role metadata, capability alias, capability UUID,

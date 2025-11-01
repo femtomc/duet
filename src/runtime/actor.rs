@@ -975,6 +975,17 @@ impl Activation {
         pattern_id
     }
 
+    /// Queue a pattern unregistration for the current turn.
+    pub fn unregister_pattern(&mut self, pattern_id: Uuid) {
+        self.outputs
+            .push(TurnOutput::PatternUnregistered { pattern_id });
+    }
+
+    /// Queue an entity detachment for the current turn.
+    pub fn detach_entity(&mut self, entity_id: Uuid) {
+        self.outputs.push(TurnOutput::EntityDetached { entity_id });
+    }
+
     fn next_spawn_ids(&mut self) -> (ActorId, FacetId, Uuid) {
         let sequence = self.spawn_counter;
         self.spawn_counter += 1;

@@ -22,6 +22,7 @@ pub mod registry;
 pub mod scheduler;
 pub mod schema;
 pub mod service;
+pub mod service_client;
 pub mod snapshot;
 pub mod state;
 pub mod storage;
@@ -103,7 +104,7 @@ mod tests {
             issuer_entity: Some(Uuid::new_v4()),
         };
 
-        runtime.dispatch_turn_outputs(&[spawn_output.clone()]);
+        runtime.dispatch_turn_outputs(&parent_actor_id, &[spawn_output.clone()]);
         assert!(runtime.entity_manager().get(&entity_id).is_none());
         assert!(runtime.actors.get(&child_actor).is_none());
 
@@ -128,7 +129,7 @@ mod tests {
             );
         }
 
-        runtime.dispatch_turn_outputs(&[spawn_output]);
+        runtime.dispatch_turn_outputs(&parent_actor_id, &[spawn_output]);
 
         assert!(runtime.entity_manager().get(&entity_id).is_some());
         assert!(runtime.actors.get(&child_actor).is_some());
@@ -464,7 +465,7 @@ impl Runtime {
         let repaid = delta.accounts.repaid;
         self.scheduler.update_account(&actor_id, borrowed, repaid);
 
-        self.dispatch_turn_outputs(&outputs);
+        self.dispatch_turn_outputs(&actor_id, &outputs);
 
         // Notify interpreter entities about new assertions.
         self.notify_interpreters(&delta);
@@ -509,7 +510,7 @@ impl Runtime {
         Ok(Some(turn_record))
     }
 
-    fn dispatch_turn_outputs(&mut self, outputs: &[TurnOutput]) {
+    fn dispatch_turn_outputs(&mut self, actor_id: &ActorId, outputs: &[TurnOutput]) {
         for output in outputs {
             match output {
                 TurnOutput::Message {
@@ -574,6 +575,12 @@ impl Runtime {
                 } => {
                     self.handle_entity_attach(actor, facet, entity_id, entity_type, config);
                 }
+                TurnOutput::PatternUnregistered { pattern_id } => {
+                    self.handle_pattern_unregistered(actor_id, pattern_id);
+                }
+                TurnOutput::EntityDetached { entity_id } => {
+                    self.handle_entity_detach(actor_id, entity_id);
+                }
                 _ => {}
             }
         }
@@ -631,6 +638,74 @@ impl Runtime {
 
         if let Err(err) = self.persist_entities() {
             warn!("failed to persist entity metadata after attach: {}", err);
+        }
+    }
+
+    fn handle_pattern_unregistered(&mut self, actor_id: &ActorId, pattern_id: &Uuid) {
+        if let Some(actor) = self.actors.get(actor_id) {
+            actor.unregister_pattern(*pattern_id);
+        } else {
+            warn!(
+                "pattern unregistration requested for unknown actor {:?}",
+                actor_id
+            );
+            return;
+        }
+
+        let mut updated = false;
+        {
+            let manager = self.entity_manager_mut();
+            for (_id, metadata) in manager.iter_mut() {
+                let before = metadata.patterns.len();
+                metadata
+                    .patterns
+                    .retain(|pattern| pattern.id != *pattern_id);
+                if metadata.patterns.len() != before {
+                    updated = true;
+                }
+            }
+        }
+
+        if updated {
+            if let Err(err) = self.persist_entities() {
+                warn!(
+                    "failed to persist entity metadata after pattern unregistration: {}",
+                    err
+                );
+            }
+        }
+    }
+
+    fn handle_entity_detach(&mut self, actor_id: &ActorId, entity_id: &Uuid) {
+        if let Some(actor) = self.actors.get(actor_id) {
+            if !actor.detach_entity(*entity_id) {
+                warn!(
+                    "detaching unknown entity {} from actor {:?}",
+                    entity_id, actor_id
+                );
+            }
+        } else {
+            warn!("entity detach requested for unknown actor {:?}", actor_id);
+            return;
+        }
+
+        let removed_metadata = self.entity_manager_mut().unregister(entity_id);
+
+        if let Some(metadata) = removed_metadata {
+            if let Some(actor) = self.actors.get(actor_id) {
+                for pattern in metadata.patterns.iter() {
+                    actor.unregister_pattern(pattern.id);
+                }
+            }
+        } else {
+            warn!(
+                "entity detach requested for unknown entity {} on actor {:?}",
+                entity_id, actor_id
+            );
+        }
+
+        if let Err(err) = self.persist_entities() {
+            warn!("failed to persist entity metadata after detach: {}", err);
         }
     }
 

@@ -355,6 +355,16 @@ pub enum TurnOutput {
         /// Registered pattern definition
         pattern: Pattern,
     },
+    /// Pattern subscription removed during this turn
+    PatternUnregistered {
+        /// Identifier of the removed pattern
+        pattern_id: Uuid,
+    },
+    /// Entity detached from the current actor during this turn
+    EntityDetached {
+        /// Identifier of the detached entity
+        entity_id: Uuid,
+    },
 
     /// Capability invocation requested during this turn
     CapabilityInvoke {

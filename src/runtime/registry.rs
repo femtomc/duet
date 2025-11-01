@@ -297,6 +297,11 @@ impl EntityManager {
         self.entities.iter()
     }
 
+    /// Iterate mutably over metadata entries.
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (&uuid::Uuid, &mut EntityMetadata)> {
+        self.entities.iter_mut()
+    }
+
     /// List metadata entries as a vector
     pub fn list(&self) -> Vec<&EntityMetadata> {
         self.entities.values().collect()

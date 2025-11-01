@@ -13,7 +13,7 @@ use std::sync::{Mutex, Once};
 
 use chrono::{DateTime, Utc};
 use preserves::ValueImpl;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::interpreter::entity::InterpreterEntity;
 use crate::runtime::actor::{Activation, Entity, HydratableEntity};
@@ -109,7 +109,7 @@ pub struct WorkspaceHandle {
 }
 
 /// Materialised view of a workspace entry published in the dataspace.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceEntry {
     /// Normalised workspace-relative path.
     pub path: String,

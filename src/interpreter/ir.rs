@@ -155,6 +155,29 @@ pub enum Action {
     Assert(Value),
     /// Retract a structured value from the dataspace.
     Retract(Value),
+    /// Register a dataspace pattern on behalf of a role-bound entity.
+    RegisterPattern {
+        /// Role whose bound entity should watch for the pattern.
+        role: String,
+        /// Pattern expression asserted on behalf of the entity.
+        pattern: Value,
+        /// Optional role property that will store the generated pattern id.
+        property: Option<String>,
+    },
+    /// Remove a previously registered pattern.
+    UnregisterPattern {
+        /// Role whose pattern subscription should be removed.
+        role: String,
+        /// Identifier of the pattern to remove (string/UUID).
+        pattern: Option<Value>,
+        /// Role property that should be cleared; defaults to `agent-request-pattern`.
+        property: Option<String>,
+    },
+    /// Detach an entity currently bound to a role.
+    DetachEntity {
+        /// Role whose bound entity should be detached.
+        role: String,
+    },
 }
 
 /// Function definition stored in the IR.
@@ -193,6 +216,24 @@ pub enum InstructionTemplate {
         /// Templated arguments resolved when the function is invoked.
         args: Vec<ValueExpr>,
     },
+    /// Scoped bindings introducing temporary names for subsequent instructions.
+    Let {
+        /// Bindings evaluated when the template is instantiated.
+        bindings: Vec<LetBindingTemplate>,
+        /// Whether bindings are evaluated sequentially (let* semantics).
+        sequential: bool,
+        /// Body instructions evaluated with the extended binding scope.
+        body: Vec<InstructionTemplate>,
+    },
+}
+
+/// Template describing a single scoped binding.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LetBindingTemplate {
+    /// Binding name introduced into the scope.
+    pub name: String,
+    /// Value expression assigned to the binding.
+    pub value: ValueExpr,
 }
 
 /// Branch arm template.
@@ -281,6 +322,29 @@ pub enum ActionTemplate {
     Assert(ValueExpr),
     /// Retract a structured value from the dataspace.
     Retract(ValueExpr),
+    /// Register a dataspace pattern on behalf of a role-bound entity.
+    RegisterPattern {
+        /// Role whose bound entity should watch for the pattern.
+        role: String,
+        /// Pattern expression evaluated at runtime.
+        pattern: ValueExpr,
+        /// Optional role property that will store the generated pattern id.
+        property: Option<String>,
+    },
+    /// Remove a previously registered pattern.
+    UnregisterPattern {
+        /// Role whose pattern subscription should be removed.
+        role: String,
+        /// Pattern identifier expression (optional).
+        pattern: Option<ValueExpr>,
+        /// Role property containing the pattern id; defaults to `agent-request-pattern`.
+        property: Option<String>,
+    },
+    /// Detach an entity currently bound to a role.
+    DetachEntity {
+        /// Role whose bound entity should be detached.
+        role: String,
+    },
 }
 
 /// Templated wait condition that may reference parameters.
