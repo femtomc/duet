@@ -1,8 +1,6 @@
 <div align="center">
   <img src="logo.png" alt="Slop Logo" width="300"/>
 
-  # Duet
-
   **Programmable conversations in a time machine**
 </div>
 
