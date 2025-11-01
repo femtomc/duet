@@ -76,9 +76,10 @@ duet/
 ## 3. Interpreter Language Roadmap
 
 The interpreter currently offers a minimal DSL: `(workflow …)`, `(roles …)`,
-`(state …)`, primitive actions (`log`, `assert`, `retract`, `send`, `invoke-tool`
-stub), waits (`record`, `signal`), branches, loops, and goto. To
-reach the Emacs-style goal we will expand the language over the next sprints.
+`(state …)`, core commands (`emit`, `await`, `transition`, `terminal`), and the
+primitive actions (`log`, `assert`, `retract`, `send`, `invoke-tool`, etc.) the
+runtime understands. To reach the Emacs-style goal we will expand the language
+over the next sprints.
 
 | Phase | Focus | Key Deliverables | Status |
 |-------|-------|------------------|--------|

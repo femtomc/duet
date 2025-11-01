@@ -13,8 +13,6 @@ use std::path::{Path, PathBuf};
 
 const EXAMPLES_DIR: &str = "examples";
 const PROGRAMS_DIR: &str = "programs";
-const TWO_AGENT_EXAMPLE_NAME: &str = "two_agents.duet";
-const TWO_AGENT_EXAMPLE_SOURCE: &str = include_str!("../../examples/workflows/two_agents.duet");
 
 /// Storage manager for runtime persistence
 #[derive(Debug, Clone)]
@@ -157,21 +155,6 @@ impl Storage {
     }
 }
 
-fn seed_example_programs(storage: &Storage) -> StorageResult<()> {
-    let programs_dir = storage.root.join(PROGRAMS_DIR);
-    storage.create_dir_all(&programs_dir)?;
-
-    let examples_dir = programs_dir.join(EXAMPLES_DIR);
-    storage.create_dir_all(&examples_dir)?;
-
-    let example_path = examples_dir.join(TWO_AGENT_EXAMPLE_NAME);
-    if !storage.exists(&example_path) {
-        storage.write_atomic(&example_path, TWO_AGENT_EXAMPLE_SOURCE.as_bytes())?;
-    }
-
-    Ok(())
-}
-
 /// Initialize storage directories for a new runtime
 pub fn init_storage(root: &Path) -> StorageResult<()> {
     let storage = Storage::new(root.to_path_buf());
@@ -187,7 +170,10 @@ pub fn init_storage(root: &Path) -> StorageResult<()> {
     storage.create_dir_all(&storage.branch_journal_dir(&main_branch))?;
     storage.create_dir_all(&storage.branch_snapshot_dir(&main_branch))?;
 
-    seed_example_programs(&storage)?;
+    // Prepare interpreter directory structure; examples are no longer seeded.
+    let programs_dir = storage.root.join(PROGRAMS_DIR);
+    storage.create_dir_all(&programs_dir)?;
+    storage.create_dir_all(&programs_dir.join(EXAMPLES_DIR))?;
 
     Ok(())
 }
@@ -254,28 +240,8 @@ mod tests {
         assert!(root.join("snapshots").exists());
         assert!(root.join("journal/main").exists());
         assert!(root.join("snapshots/main").exists());
-    }
-
-    #[test]
-    fn seeds_example_program() {
-        let temp = TempDir::new().unwrap();
-        let root = temp.path();
-
-        init_storage(root).unwrap();
-
-        let example_path = root
-            .join(PROGRAMS_DIR)
-            .join(EXAMPLES_DIR)
-            .join(TWO_AGENT_EXAMPLE_NAME);
-        assert!(
-            example_path.exists(),
-            "example program should be created during init"
-        );
-        let contents = std::fs::read_to_string(&example_path).unwrap();
-        assert!(
-            contents.contains("(workflow two-agent-debate"),
-            "seeded program should match bundled content"
-        );
+        assert!(root.join(PROGRAMS_DIR).exists());
+        assert!(root.join(PROGRAMS_DIR).join(EXAMPLES_DIR).exists());
     }
 
     #[test]

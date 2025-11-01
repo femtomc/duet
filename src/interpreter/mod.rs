@@ -32,9 +32,7 @@ pub use control::{
     ensure as ensure_control_interpreter,
 };
 pub use entity::InterpreterEntity;
-pub use ir::{
-    Action, BranchArm, Condition, Instruction, ProgramIr, RoleBinding, State, WaitCondition,
-};
+pub use ir::{Action, Command, ProgramIr, RoleBinding, State, WaitCondition};
 pub use parser::parse_program;
 pub use protocol::{
     DEFINE_MESSAGE_LABEL, DEFINITION_RECORD_LABEL, DefinitionRecord, INPUT_REQUEST_RECORD_LABEL,
@@ -44,10 +42,9 @@ pub use protocol::{
     input_request_to_value, input_response_from_value, input_response_to_value,
 };
 pub use runtime::{
-    FrameKindSnapshot, FrameSnapshot, InterpreterHost, InterpreterRuntime, RuntimeError,
-    RuntimeEvent, RuntimeSnapshot,
+    InterpreterHost, InterpreterRuntime, RuntimeError, RuntimeEvent, RuntimeSnapshot,
 };
-pub use value::{Value, ValueExpr, parse_value, parse_value_expr, parse_value_literal};
+pub use value::{Value, parse_value, parse_value_literal};
 
 use thiserror::Error;
 

@@ -9,7 +9,7 @@ use crate::interpreter::protocol::{
 };
 use crate::interpreter::value::ValueContext;
 use crate::interpreter::{
-    Action, Condition, DEFINE_MESSAGE_LABEL, DefinitionRecord, InstanceProgress, InstanceRecord,
+    Action, DEFINE_MESSAGE_LABEL, DefinitionRecord, InstanceProgress, InstanceRecord,
     InstanceStatus, InterpreterHost, InterpreterRuntime, LOG_RECORD_LABEL, NOTIFY_MESSAGE_LABEL,
     ProgramIr, ProgramRef, RESUME_MESSAGE_LABEL, RUN_MESSAGE_LABEL, RoleBinding, RuntimeError,
     RuntimeEvent, RuntimeSnapshot, Value, WaitCondition, WaitStatus, build_ir, parse_program,
@@ -732,28 +732,6 @@ impl InterpreterEntity {
                     let message = "program must define at least one state".to_string();
                     status = InstanceStatus::Failed(message.clone());
                     progress.state = None;
-                    progress.entry_pending = false;
-                    progress.waiting = None;
-                    progress.frame_depth = runtime.frame_depth();
-                    result_error = Some(ActorError::InvalidActivation(message));
-                    break;
-                }
-                Err(RuntimeError::InvalidCall(message)) => {
-                    status = InstanceStatus::Failed(message.clone());
-                    progress.state = runtime.current_state_name();
-                    progress.entry_pending = runtime.entry_pending();
-                    progress.waiting = None;
-                    progress.frame_depth = runtime.frame_depth();
-                    result_error = Some(ActorError::InvalidActivation(message));
-                    break;
-                }
-                Err(RuntimeError::LoopLimitExceeded { state, limit }) => {
-                    let message = format!(
-                        "loop in state '{}' exceeded iteration limit {}",
-                        state, limit
-                    );
-                    status = InstanceStatus::Failed(message.clone());
-                    progress.state = Some(state);
                     progress.entry_pending = false;
                     progress.waiting = None;
                     progress.frame_depth = runtime.frame_depth();
@@ -1532,28 +1510,6 @@ impl InterpreterEntity {
                     let message = "program must define at least one state".to_string();
                     status = InstanceStatus::Failed(message.clone());
                     progress.state = None;
-                    progress.entry_pending = false;
-                    progress.waiting = None;
-                    progress.frame_depth = runtime.frame_depth();
-                    result_error = Some(ActorError::InvalidActivation(message));
-                    break;
-                }
-                Err(RuntimeError::InvalidCall(message)) => {
-                    status = InstanceStatus::Failed(message.clone());
-                    progress.state = runtime.current_state_name();
-                    progress.entry_pending = runtime.entry_pending();
-                    progress.waiting = None;
-                    progress.frame_depth = runtime.frame_depth();
-                    result_error = Some(ActorError::InvalidActivation(message));
-                    break;
-                }
-                Err(RuntimeError::LoopLimitExceeded { state, limit }) => {
-                    let message = format!(
-                        "loop in state '{}' exceeded iteration limit {}",
-                        state, limit
-                    );
-                    status = InstanceStatus::Failed(message.clone());
-                    progress.state = Some(state);
                     progress.entry_pending = false;
                     progress.waiting = None;
                     progress.frame_depth = runtime.frame_depth();
@@ -2410,18 +2366,31 @@ impl<'a> InterpreterHost for ActivationHost<'a> {
                 facet,
                 payload,
             } => {
-                let actor_id = Uuid::parse_str(actor).map_err(|_| {
-                    ActorError::InvalidActivation(format!(
-                        "send requires :actor to be a UUID, got {actor}"
-                    ))
+                let actor_value = self.resolve_value(actor)?;
+                let actor_text = actor_value.as_str().ok_or_else(|| {
+                    ActorError::InvalidActivation(
+                        "send requires :actor to resolve to a string".into(),
+                    )
                 })?;
-                let facet_id = Uuid::parse_str(facet).map_err(|_| {
+                let actor_id = Uuid::parse_str(actor_text).map_err(|_| {
                     ActorError::InvalidActivation(format!(
-                        "send requires :facet to be a UUID, got {facet}"
+                        "send requires :actor to be a UUID, got {actor_text}"
                     ))
                 })?;
 
-                let payload_value = payload.to_io_value();
+                let facet_value = self.resolve_value(facet)?;
+                let facet_text = facet_value.as_str().ok_or_else(|| {
+                    ActorError::InvalidActivation(
+                        "send requires :facet to resolve to a string".into(),
+                    )
+                })?;
+                let facet_id = Uuid::parse_str(facet_text).map_err(|_| {
+                    ActorError::InvalidActivation(format!(
+                        "send requires :facet to be a UUID, got {facet_text}"
+                    ))
+                })?;
+
+                let payload_value = self.resolve_value(payload)?.to_io_value();
                 self.activation.send_message(
                     ActorId::from_uuid(actor_id),
                     FacetId::from_uuid(facet_id),
@@ -2681,14 +2650,6 @@ impl<'a> InterpreterHost for ActivationHost<'a> {
         }
     }
 
-    fn check_condition(&mut self, condition: &Condition) -> std::result::Result<bool, Self::Error> {
-        match condition {
-            Condition::Signal { label } => Ok(self.satisfied.iter().any(
-                |entry| matches!(entry.condition, WaitCondition::Signal { label: ref ready } if ready == label),
-            )),
-        }
-    }
-
     fn prepare_wait(&mut self, wait: &mut WaitCondition) -> std::result::Result<(), Self::Error> {
         if let WaitCondition::RecordFieldEq { value, .. } = wait {
             let resolved = self.resolve_value(value)?;
@@ -2805,7 +2766,10 @@ mod tests {
         let mut activation = activation_for(&actor);
 
         let program = "(workflow demo)
-               (state start (action (assert (record agent-request \"agent-1\" \"planner\" \"hello\")) (log \"hello\")) (terminal))";
+               (state start
+                 (emit (assert (record agent-request \"agent-1\" \"planner\" \"hello\")))
+                 (emit (log \"hello\"))
+                 (terminal))";
         let payload = IOValue::record(
             IOValue::symbol(RUN_MESSAGE_LABEL),
             vec![IOValue::new(program)],
@@ -2843,7 +2807,7 @@ mod tests {
         let target_actor = ActorId::new();
         let target_facet = FacetId::new();
         let program = format!(
-            "(workflow send-demo)\n(state start\n  (action (send :actor \"{}\" :facet \"{}\" :value (record ping \"hello\")))\n  (terminal))",
+            "(workflow send-demo)\n(state start\n  (emit (send :actor \"{}\" :facet \"{}\" :value (record ping \"hello\")))\n  (terminal))",
             target_actor.0, target_facet.0
         );
 
@@ -2930,11 +2894,11 @@ mod tests {
 
         let handler_source = r#"(workflow observer-handler)
 (state start
-  (action (assert (record observed)))
+  (emit (assert (record observed)))
   (terminal))"#;
 
         let program = format!(
-            "(workflow observe-demo)\n(state start (action (observe (signal ready) \"{}\")) (terminal))",
+            "(workflow observe-demo)\n(state start (emit (observe (signal ready) \"{}\")) (terminal))",
             handler_source.replace("\"", "\\\"")
         );
 
@@ -2997,11 +2961,11 @@ mod tests {
 
         let handler_source = r#"(workflow observer-handler)
 (state start
-  (action (assert (record observed)))
+  (emit (assert (record observed)))
   (terminal))"#;
 
         let program = format!(
-            "(workflow observe-demo)\n(state start (action (observe (signal ready) \"{}\")) (terminal))",
+            "(workflow observe-demo)\n(state start (emit (observe (signal ready) \"{}\")) (terminal))",
             handler_source.replace("\"", "\\\"")
         );
 
@@ -3052,7 +3016,7 @@ mod tests {
         let actor = Actor::new(ActorId::new());
         let mut activation = activation_for(&actor);
 
-        let program = "(workflow spawn-demo)\n(state start (action (spawn)) (terminal))";
+        let program = "(workflow spawn-demo)\n(state start (emit (spawn)) (terminal))";
 
         let payload = IOValue::record(
             IOValue::symbol(RUN_MESSAGE_LABEL),
@@ -3097,7 +3061,7 @@ mod tests {
         let program = "(workflow spawn-entity-demo)
 (roles (worker :agent-kind \"claude-code\"))
 (state start
-  (action (spawn-entity :role worker :config (record agent-config \"demo\")))
+  (emit (spawn-entity :role worker :config (record agent-config \"demo\")))
   (terminal))";
 
         let payload = IOValue::record(
@@ -3246,7 +3210,7 @@ mod tests {
         let program = "(workflow spawn-entity-explicit)
 (roles (worker :label \"primary\"))
 (state start
-  (action (spawn-entity :role worker :agent-kind \"claude-code\"))
+  (emit (spawn-entity :role worker :agent-kind \"claude-code\"))
   (terminal))";
 
         let payload = IOValue::record(
@@ -3316,7 +3280,7 @@ mod tests {
 
         let target_facet = FacetId::new();
         let program = format!(
-            "(workflow stop-demo)\n(state start (action (stop :facet \"{}\")) (terminal))",
+            "(workflow stop-demo)\n(state start (emit (stop :facet \"{}\")) (terminal))",
             target_facet.0
         );
 
@@ -3463,9 +3427,9 @@ mod tests {
 
         let program = r#"(workflow wait-demo)
 (state start
-  (enter (log "start"))
+  (emit (log "start"))
   (await (signal ready))
-  (goto done))
+  (transition done))
 (state done (terminal))"#;
 
         let run_payload = IOValue::record(
@@ -3532,7 +3496,7 @@ mod tests {
             "(workflow tool-demo)
                (roles (workspace :capability \"{}\" :agent-kind \"tester\"))
                (state start
-                 (action (invoke-tool :role workspace :capability \"capability\" :payload (record request \"payload\") :tag tool-req))
+                 (emit (invoke-tool :role workspace :capability \"capability\" :payload (record request \"payload\") :tag tool-req))
                  (terminal))",
             capability_id
         );
@@ -3614,7 +3578,7 @@ mod tests {
 
         let program = "(workflow bad-role)
                (state start
-                 (action (invoke-tool :role missing :capability \"capability\"))
+                 (emit (invoke-tool :role missing :capability \"capability\"))
                  (terminal))";
 
         let payload = IOValue::record(
@@ -3657,7 +3621,7 @@ mod tests {
         let program = "(workflow bad-capability)
                (roles (workspace :capability \"not-a-uuid\"))
                (state start
-                 (action (invoke-tool :role workspace :capability \"capability\"))
+                 (emit (invoke-tool :role workspace :capability \"capability\"))
                  (terminal))";
 
         let payload = IOValue::record(

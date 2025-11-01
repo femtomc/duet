@@ -140,49 +140,8 @@ first-class access to the runtime:
 - Spawn new facets inside the current actor to structure concurrent behaviour.
 - Attach helper entities to existing facets with `(attach-entity …)` when you want
   in-actor coordination that observes the same dataspace without minting a new actor.
-- Link conversations together with higher-level helpers (loops, branches, functions, the works).
+- Link conversations together with higher-level helpers (awaits, transitions, functions once they land).
 
-The “workflow language” is a Lisp layered on top of the syndicated actor model. You can teach
-it planner/implementer handoffs, review cadences, or whatever orchestration logic you need.
-
-Here’s an example program that sequences two Claude roles already bound to the workflow:
-
-```lisp
-(workflow ping-pong
-  (roles
-    (planner :agent-kind "claude-code")
-    (implementer :agent-kind "claude-code"))
-
-  (state start
-    (enter (log "Planner drafts the task"))
-    (action (assert (record agent-request (role-property planner "entity") "req-1"
-                "Draft a plan for adding OAuth to the CLI")))
-    (await (record agent-response :field 1 :equals "req-1"))
-    (goto implement))
-
-  (state implement
-    (action (assert (record agent-request (role-property implementer "entity") "req-2"
-                "Please expand this into actionable steps" )))
-    (await (record agent-response :field 1 :equals "req-2"))
-    (terminal)))
-```
-
-The interpreter compiles this to IR, keeps snapshots so you can pause mid-state, and resumes as
-soon as the awaited assertion appears.
-
-### Bundled examples
-
-When `codebased` initialises a workspace it creates a `.duet/programs` tree alongside the
-journal. We seed ready-to-run programs under `.duet/programs/examples`; they’re ordinary
-interpreter sources that the CLI can list and execute. The first one,
-`.duet/programs/examples/two_agents.duet`, spawns two Claude Code roles and has them debate
-tabs versus spaces for a couple of turns. It’s meant to be a smoke test: run it, watch the
-`conversation-turn` records appear, and you’ll see how to structure your own orchestration loops.
-The repository copy lives at `examples/workflows/two_agents.duet`; the seed logic copies it
-during workspace initialisation. That program relies on a tiny helper `(defn send-request …)` so
-both roles share the same prompt plumbing—a pattern we expect to promote into a bundled standard
-library once the module system lands.
-
-Use `duet query workflows` to list everything under `.duet/programs`, including the seeded
-examples, and `duet run workflow-start path/to/program.duet` to spin up new instances. Feel free
-to stash your own programs alongside the bundled ones.
+The interpreter layer is transitioning to a new Scheme-like kernel that exposes
+syndicated actor primitives directly. For the in-progress design and migration
+plan, see `docs/LANGUAGE_DESIGN.md`.

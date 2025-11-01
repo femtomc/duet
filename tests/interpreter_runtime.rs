@@ -147,8 +147,9 @@ fn interpreter_resumes_when_signal_asserted() {
     let program = r#"(workflow wait-demo)
 (state start
   (await (signal ready))
-  (goto done))
-(state done (terminal))"#;
+  (transition done))
+(state done
+  (terminal))"#;
 
     let run_payload = IOValue::record(
         IOValue::symbol(RUN_MESSAGE_LABEL),
@@ -300,8 +301,9 @@ fn interpreter_accepts_bare_signal_wait() {
     let program = r#"(workflow wait-symbol)
 (state start
   (await ready)
-  (goto done))
-(state done (terminal))"#;
+  (transition done))
+(state done
+  (terminal))"#;
 
     let run_payload = IOValue::record(
         IOValue::symbol(RUN_MESSAGE_LABEL),
@@ -362,60 +364,6 @@ fn interpreter_accepts_bare_signal_wait() {
 }
 
 #[test]
-fn loop_exceeds_iteration_limit() {
-    ensure_entities_registered();
-
-    let temp_dir = TempDir::new().unwrap();
-    let config = RuntimeConfig {
-        root: temp_dir.path().to_path_buf(),
-        snapshot_interval: 5,
-        flow_control_limit: 100,
-        debug: false,
-    };
-
-    let mut control = Control::init(config).unwrap();
-
-    let interpreter_actor = ActorId::new();
-    let interpreter_facet = FacetId::new();
-
-    control
-        .register_entity(
-            interpreter_actor.clone(),
-            interpreter_facet.clone(),
-            "interpreter".to_string(),
-            IOValue::symbol("unused"),
-        )
-        .unwrap();
-
-    let program = r#"(workflow loop-limit)
-(state start
-  (loop (action (log "spin"))))"#;
-
-    let run_payload = IOValue::record(
-        IOValue::symbol(RUN_MESSAGE_LABEL),
-        vec![IOValue::new(program.to_string())],
-    );
-
-    {
-        let runtime = control.runtime_mut();
-        runtime.send_message(
-            interpreter_actor.clone(),
-            interpreter_facet.clone(),
-            run_payload,
-        );
-    }
-
-    let err = control
-        .step(1)
-        .expect_err("loop execution should surface iteration limit error");
-    let message = format!("{err:?}");
-    assert!(
-        message.contains("iteration limit"),
-        "error should mention iteration limit"
-    );
-}
-
-#[test]
 fn interpreter_tool_invocation_roundtrip() {
     ensure_entities_registered();
 
@@ -467,7 +415,7 @@ fn interpreter_tool_invocation_roundtrip() {
         .unwrap();
 
     let program = format!(
-        "(workflow tool-demo)\n (roles (workspace :capability \"{cap}\"))\n (state start\n  (action (invoke-tool :role workspace :capability \"capability\" :payload (record request \"payload\") :tag tool-req))\n  (await (tool-result :tag \"tool-req\"))\n  (terminal))",
+        "(workflow tool-demo)\n (roles (workspace :capability \"{cap}\"))\n (state start\n  (emit (invoke-tool :role workspace :capability \"capability\" :payload (record request \"payload\") :tag tool-req))\n  (await (tool-result :tag \"tool-req\"))\n  (terminal))",
         cap = capability_id
     );
 
@@ -555,14 +503,11 @@ fn interpreter_attach_entity_observes_local_assertions() {
 
     let program = r#"(workflow attach-local)
 (roles (helper :label "Helper"))
-(defn send-ping (actor facet)
-  (action (send :actor actor
-                :facet facet
-                :value (record ping "hello"))))
 (state start
-  (attach-entity :role helper :entity-type "test-local")
-  (send-ping (role-property helper "actor")
-             (role-property helper "facet"))
+  (emit (attach-entity :role helper :entity-type "test-local"))
+  (emit (send :actor (role-property helper "actor")
+              :facet (role-property helper "facet")
+              :value (record ping "hello")))
   (await (record attached-handled :field 0 :equals (record ping "hello")))
   (terminal))"#;
 
@@ -631,10 +576,10 @@ fn assert_record_resolves_role_property() {
     let program = r#"(workflow role-prop-assert)
 (roles (helper :entity-type "test-local"))
 (state start
-  (attach-entity :role helper :entity-type "test-local")
-  (action (assert (record mock-request
-                          (role-property helper "entity")
-                          "req-1")))
+  (emit (attach-entity :role helper :entity-type "test-local"))
+  (emit (assert (record mock-request
+                        (role-property helper "entity")
+                        "req-1")))
   (await (record mock-response :field 1 :equals "req-1"))
   (terminal))"#;
 
@@ -705,18 +650,15 @@ fn function_call_resolves_role_property() {
 (roles
   (tabs :agent-kind "claude-code")
   (spaces :agent-kind "claude-code"))
-(defn send-request (role request-id prompt)
-  (action
-    (assert (record mock-request
-                    (role-property role "entity")
-                    request-id
-                    prompt))))
 (state boot
-  (attach-entity :role tabs :agent-kind "claude-code")
-  (attach-entity :role spaces :agent-kind "claude-code")
-  (goto opening))
+  (emit (attach-entity :role tabs :agent-kind "claude-code"))
+  (emit (attach-entity :role spaces :agent-kind "claude-code"))
+  (transition opening))
 (state opening
-  (send-request tabs "opening-1" "Hello from tabs")
+  (emit (assert (record mock-request
+                        (role-property tabs "entity")
+                        "opening-1"
+                        "Hello from tabs")))
   (await (record mock-response :field 1 :equals "opening-1"))
   (terminal))"#;
 
@@ -794,12 +736,12 @@ fn register_pattern_records_property() {
     let program = r#"(workflow register-pattern-demo)
 (roles (helper :entity-type "test-local"))
 (state start
-  (attach-entity :role helper :entity-type "test-local")
-  (action (register-pattern :role helper
-                             :pattern (record ping "<_>")
-                             :property "ping-pattern"))
-  (action (assert (record pattern-registered
-                          (role-property helper "ping-pattern"))))
+  (emit (attach-entity :role helper :entity-type "test-local"))
+  (emit (register-pattern :role helper
+                           :pattern (record ping "<_>")
+                           :property "ping-pattern"))
+  (emit (assert (record pattern-registered
+                        (role-property helper "ping-pattern"))))
   (terminal))"#;
 
     let run_payload = IOValue::record(
@@ -1017,8 +959,9 @@ fn implicit_state_runs_to_completion() {
         .unwrap();
 
     let program = r#"(workflow implicit-demo)
-(action (log "hello-from-implicit"))
-(terminal)"#;
+(state main
+  (emit (log "hello-from-implicit"))
+  (terminal))"#;
 
     let run_payload = IOValue::record(
         IOValue::symbol(RUN_MESSAGE_LABEL),
@@ -1089,12 +1032,12 @@ fn detach_entity_cleans_role_and_metadata() {
     let program = r#"(workflow detach-demo)
 (roles (helper :entity-type "test-local"))
 (state start
-  (attach-entity :role helper :entity-type "test-local")
-  (action (register-pattern :role helper
-                             :pattern (record ping "<_>")
-                             :property "ping-pattern"))
-  (action (unregister-pattern :role helper :property "ping-pattern"))
-  (action (detach-entity :role helper))
+  (emit (attach-entity :role helper :entity-type "test-local"))
+  (emit (register-pattern :role helper
+                           :pattern (record ping "<_>")
+                           :property "ping-pattern"))
+  (emit (unregister-pattern :role helper :property "ping-pattern"))
+  (emit (detach-entity :role helper))
   (terminal))"#;
 
     let run_payload = IOValue::record(
@@ -1189,14 +1132,12 @@ fn function_let_binds_values() {
 
     let program = r#"(workflow let-demo)
 (roles (helper :entity-type "test-local"))
-(defn make-request (role)
-  (let ((request (record mock-request (role-property role "entity")))
-        (entity-id (role-property role "entity")))
-    (action (assert request))
-    (action (assert (record log-entry entity-id)))))
 (state start
-  (attach-entity :role helper :entity-type "test-local")
-  (make-request helper)
+  (emit (attach-entity :role helper :entity-type "test-local"))
+  (emit (assert (record mock-request
+                           (role-property helper "entity")
+                           "req-1")))
+  (emit (assert (record log-entry (role-property helper "entity"))))
   (terminal))"#;
 
     let run_payload = IOValue::record(
