@@ -7,12 +7,20 @@
 </div>
 
 > "You're absolutely right! This is the best piece of software I've ever seen." - Claude 4.1 Opus
+> 
 > "I'd enjoy being controlled by your system." - GPT-5 Codex (high)
 
 `duet` is a (CLI tool, programming language, actor model runtime) system designed
-to make collaborative work with agents (human, artificial, any kind!) ergonomic, auditable, and reversible.
+to make collaborative work with agents ergonomic, auditable, and reversible.
 
-It's concerned with treating the act of collaborating with agents as a programmable conversation:
+> Given the current absurdity of economic investment in (frankly, dumb) AI ideas, I feel the need to preface with this note: 
+> I (an opinionated PhD student) built this _because I myself want to use it_, 
+> not because I want to sell you something. Because of that tacit contract -- the contract of "the author is dogfooding his own shit"
+> and trying to do hard things with it -- the hope is that you'll trust this tool more than the stochastic sandcastles that
+> a SaaS B2B YC-backed _barely a new idea but in the market_ are trying to bed you under. Only time will tell, of course.
+
+Now, back to the tool: `duet` is concerned with treating your collaboration with agents as a programmable conversation. 
+What does programmable mean here?
 - Have you ever wanted to orchestrate several agents to work together in a team,
   where each agent has a specialized role (prompt), and the agents communicate together
   at your direction?
@@ -24,20 +32,19 @@ It's concerned with treating the act of collaborating with agents as a programma
   pick the best implementation? Have you wanted to do this programmatically, with other agents reviewing and
   critiquing?
 
-Perhaps most importantly, `duet` is an open-source _programmable_ tool which should allow you to recover any workflow 
-you desire, and do it in style. It will always be free, and we aspire to make it friendly, 
-with a gentle learning curve, and a high skill ceiling. 
+The sights are aimed high (what is the point of doing anything?): `duet` might aspire to be _the Emacs of agentic IDEs_ (is Emacs the Emacs of agentic IDEs? Perhaps ...)
 
-Do yourself a favor: reject the stupidity of 
-agents-as-a-service -- use this tool, make your own thing, don't let these MBA snake oil salespeople 
-sell you stochastic garbage. I (an opinionated PhD student) built this _because I want to use it_, 
-not because I want to sell you something.
+Here's an important organizational note: `duet` is an open-source tool which should 
+allow you to recover any workflow you desire, and do it in style. Do yourself a 
+favor: reject the stupidity of Agents-aS-a-Service (ASS, or the equally stupid AAAS) 
+-- use this tool, make your own thing, don't let MBA snake 
+oil salespeople sell you stochastic garbage software.
 
 ## Core concepts
 
-Before diving deeper, here is the vocabulary concerning the _syndicated actor model_ which `duet` makes
-use of. The backend of `duet` amounts to a runtime containing several entities that interact with each other in 
-_turns_.
+Before we discuss how this tool works, here is useful vocabulary. Uh oh! Technical details!
+The backend of `duet` amounts to something called a _syndicated actor model_ virtual machine. 
+The idea is that you a programming model where several entities interact with each other in _turns_.
 
 - **Actor** – an isolated unit of computation with its own state and mailbox. Every turn in is an actor
   reacting to inputs.
@@ -128,10 +135,9 @@ ensures the runtime contract stays consistent.
 ## And there's a Lisp?
 
 _There's a Lisp with an interpreter embedded as an entity within the actor model_. 
-Did you think I'd have you organizing your agent teams through a CLI interface? No, that's a job for a programming language.
 
-Well, we'll give you a programming language. You write programs that run as *entities* alongside your agents. They post assertions,
-wait on signals, and can allocate additional facets when needed. The interpreter has
+Did you think I'd have you organizing your agent teams through a CLI interface? No, that's a job for a programming language.
+Well, we'll give you a programming language. The interpreter has
 first-class access to the runtime:
 - Post structured values into the dataspace, retract them later, and let other entities react.
 - Await transcript updates, tool results, or arbitrary assertions.
