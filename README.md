@@ -15,8 +15,8 @@ to make collaborative work with agents ergonomic, auditable, and reversible.
 
 > Given the current absurdity of economic investment in dumb AI ideas, I feel the need to preface your valuable reading time with this note: 
 > I (an opinionated PhD student) built this _because I myself want to use it_, 
-> not because I want to sell you something. Because of that tacit contract -- the contract of "the author is dogfooding his own shit" --
-> you can trust that bullshit (or any other SaaS B2B garbage) will be kept out of this software.
+> not because I want to sell you something. Because of that tacit contract -- the contract of "the author is dogfooding his own shit"
+> -- you can trust that bullshit (or any other SaaS B2B garbage) will be kept out of this software.
 
 Now, back to the tool: `duet` is concerned with treating your collaboration with agents as a programmable conversation. 
 What does programmable mean here?
